@@ -87,19 +87,21 @@ def _stable_json(value: object) -> str:
 
 
 def _format_doctor(report: DoctorReport) -> str:
-    git_repository = "yes" if report.git.inside_repository else "no"
+    git_repository = _format_repository_state(report.git.inside_repository)
     git_clean = _format_cleanliness(report.git.clean)
     root = report.git.repository_root or "not available"
+    git_version = _format_version(report.git.present, report.git.version)
+    codex_version = _format_version(report.codex.present, report.codex.version)
 
     lines = [
         f"Python: {report.python.version} "
         f"({'supported' if report.python.supported else 'unsupported'}; >= "
         f"{report.python.minimum_version})",
-        f"Git: {report.git.version or 'not found'}",
+        f"Git: {git_version}",
         f"Inside Git repository: {git_repository}",
         f"Repository root: {root}",
         f"Repository clean: {git_clean}",
-        f"Codex: {report.codex.version or 'not found'} "
+        f"Codex: {codex_version} "
         f"({'supported' if report.codex.supported else 'unsupported'}; >= "
         f"{report.codex.minimum_version})",
         f"Codex login: {report.codex.login_status}",
@@ -113,3 +115,15 @@ def _format_cleanliness(clean: bool | None) -> str:
     if clean is None:
         return "not available"
     return "yes" if clean else "no"
+
+
+def _format_repository_state(inside_repository: bool | None) -> str:
+    if inside_repository is None:
+        return "indeterminate"
+    return "yes" if inside_repository else "no"
+
+
+def _format_version(present: bool, version: str | None) -> str:
+    if not present:
+        return "not found"
+    return version or "unavailable"

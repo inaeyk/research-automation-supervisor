@@ -16,7 +16,11 @@ from packaging.version import InvalidVersion, Version
 MINIMUM_PYTHON = (3, 11)
 MINIMUM_CODEX = Version("0.144.0")
 COMMAND_TIMEOUT_SECONDS = 10.0
-_SEMANTIC_VERSION = re.compile(r"(?<!\d)(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?!\d)")
+_VERSION_TEXT = r"(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)"
+_CODEX_VERSION_OUTPUT = re.compile(
+    rf"(?:codex|codex-cli)(?:\s+version)?\s+v?{_VERSION_TEXT}",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -45,7 +49,7 @@ class PythonDiagnostic:
 class GitDiagnostic:
     present: bool
     version: str | None = None
-    inside_repository: bool = False
+    inside_repository: bool | None = None
     repository_root: str | None = None
     clean: bool | None = None
     error: str | None = None
@@ -72,7 +76,20 @@ class DoctorReport:
     @property
     def ok(self) -> bool:
         """Whether required dependencies and authentication are ready."""
-        return not self.dependency_errors
+        return (
+            not self.dependency_errors
+            and self.python.supported
+            and self.git.present
+            and self.git.version is not None
+            and self.git.error is None
+            and self.git.inside_repository is not None
+            and (not self.git.inside_repository or self.git.clean is not None)
+            and self.codex.present
+            and self.codex.version is not None
+            and self.codex.supported
+            and self.codex.authenticated is True
+            and self.codex.error is None
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Return a deterministic JSON-compatible representation."""
@@ -119,16 +136,17 @@ def run_doctor(
         errors.append("Python 3.11 or newer is required.")
     if not git.present:
         errors.append("Git executable is required.")
-    elif git.version is None:
-        errors.append("Git version could not be determined.")
+    elif git.error is not None:
+        errors.append(git.error)
     if not codex.present:
         errors.append("Codex executable is required.")
-    elif codex.version is None:
-        errors.append("Codex version could not be determined.")
-    elif not codex.supported:
-        errors.append(f"Codex {MINIMUM_CODEX} or newer is required.")
-    if codex.present and codex.authenticated is not True:
-        errors.append("Codex login is required.")
+    else:
+        if codex.error is not None:
+            errors.append(codex.error)
+        if codex.version is not None and not codex.supported:
+            errors.append(f"Codex {MINIMUM_CODEX} or newer is required.")
+        if codex.authenticated is not True:
+            errors.append("Codex login is required.")
 
     return DoctorReport(python_diagnostic, git, codex, tuple(errors))
 
@@ -138,23 +156,39 @@ def _check_git(runner: CommandRunner, executable: str | None, cwd: Path) -> GitD
         return GitDiagnostic(present=False, error="Git executable was not found.")
 
     version_result = _safe_run(runner, [executable, "--version"])
-    version = _parse_git_version(version_result.stdout) if version_result else None
-    error = None
-    if version_result is None or version_result.returncode != 0 or version is None:
-        error = "Git version check failed."
+    version: str | None = None
+    errors: list[str] = []
+    if version_result is None or version_result.returncode != 0:
+        errors.append("Git version command failed or timed out.")
+    else:
+        version = _parse_git_version(version_result.stdout)
+        if version is None:
+            errors.append("Git version could not be determined.")
 
     repository_result = _safe_run(
         runner, [executable, "-C", str(cwd), "rev-parse", "--show-toplevel"]
     )
-    if repository_result is None or repository_result.returncode != 0:
-        return GitDiagnostic(present=True, version=version, error=error)
+    if repository_result is None:
+        errors.append("Git repository probe failed or timed out.")
+        return GitDiagnostic(present=True, version=version, error=_join_errors(errors))
+    if repository_result.returncode != 0:
+        if _is_not_git_repository(repository_result):
+            return GitDiagnostic(
+                present=True,
+                version=version,
+                inside_repository=False,
+                error=_join_errors(errors),
+            )
+        errors.append("Git repository probe failed or timed out.")
+        return GitDiagnostic(present=True, version=version, error=_join_errors(errors))
 
     root_text = repository_result.stdout.strip()
     if not root_text:
+        errors.append("Git repository root could not be determined.")
         return GitDiagnostic(
             present=True,
             version=version,
-            error="Git repository root could not be determined.",
+            error=_join_errors(errors),
         )
     root = str(Path(root_text).resolve())
     status_result = _safe_run(
@@ -166,7 +200,7 @@ def _check_git(runner: CommandRunner, executable: str | None, cwd: Path) -> GitD
         else None
     )
     if status_result is None or status_result.returncode != 0:
-        error = "Git repository status check failed."
+        errors.append("Git repository status check failed or timed out.")
         clean = None
     return GitDiagnostic(
         present=True,
@@ -174,7 +208,7 @@ def _check_git(runner: CommandRunner, executable: str | None, cwd: Path) -> GitD
         inside_repository=True,
         repository_root=root,
         clean=clean,
-        error=error,
+        error=_join_errors(errors),
     )
 
 
@@ -183,17 +217,21 @@ def _check_codex(runner: CommandRunner, executable: str | None) -> CodexDiagnost
         return CodexDiagnostic(present=False, error="Codex executable was not found.")
 
     version_result = _safe_run(runner, [executable, "--version"])
-    version = _parse_codex_version(version_result.stdout) if version_result else None
+    version: str | None = None
+    errors: list[str] = []
+    if version_result is None or version_result.returncode != 0:
+        errors.append("Codex version command failed or timed out.")
+    else:
+        version = _parse_codex_version(version_result.stdout)
+        if version is None:
+            errors.append("Codex version could not be determined.")
     supported = version is not None and Version(version) >= MINIMUM_CODEX
-    error = None
-    if version_result is None or version_result.returncode != 0 or version is None:
-        error = "Codex version check failed."
 
     login_result = _safe_run(runner, [executable, "login", "status"])
     if login_result is None:
         authenticated = None
         login_status = "check failed"
-        error = error or "Codex login status check failed."
+        errors.append("Codex login status check failed or timed out.")
     elif login_result.returncode == 0:
         authenticated = True
         login_status = "authenticated"
@@ -207,7 +245,7 @@ def _check_codex(runner: CommandRunner, executable: str | None) -> CodexDiagnost
         supported=supported,
         authenticated=authenticated,
         login_status=login_status,
-        error=error,
+        error=_join_errors(errors),
     )
 
 
@@ -221,15 +259,24 @@ def _safe_run(
 
 
 def _parse_git_version(output: str) -> str | None:
-    match = re.search(r"\bgit version\s+([^\s]+)", output, flags=re.IGNORECASE)
+    match = re.fullmatch(r"git version\s+([^\s]+)", output.strip(), flags=re.IGNORECASE)
     return match.group(1) if match else None
 
 
 def _parse_codex_version(output: str) -> str | None:
-    match = _SEMANTIC_VERSION.search(output)
+    match = _CODEX_VERSION_OUTPUT.fullmatch(output.strip())
     if match is None:
         return None
     try:
         return str(Version(match.group(1)))
     except InvalidVersion:
         return None
+
+
+def _is_not_git_repository(result: CommandResult) -> bool:
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    return result.returncode == 128 and "not a git repository" in output
+
+
+def _join_errors(errors: Sequence[str]) -> str | None:
+    return " ".join(errors) if errors else None

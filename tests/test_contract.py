@@ -100,7 +100,126 @@ def test_patterns_are_normalized_in_model(tmp_path: Path) -> None:
 
     contract = load_contract(write_contract(tmp_path / "normalized.yaml", data))
 
-    assert contract.allowed_paths == ["src/other/**"]
+    assert contract.allowed_paths == ("src/other/**",)
+
+
+def test_duplicate_top_level_yaml_key_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_dump(valid_contract_data(), sort_keys=False)
+    source = source.replace(
+        "schema_version: 1\n", "schema_version: 1\nschema_version: 1\n", 1
+    )
+    path = tmp_path / "duplicate-top-level.yaml"
+    path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ContractLoadError, match="duplicate mapping key"):
+        load_contract(path)
+
+
+def test_duplicate_nested_yaml_key_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_dump(valid_contract_data(), sort_keys=False)
+    source = source.replace(
+        "  command: pytest -q\n",
+        "  command: pytest -q\n  command: ruff check .\n",
+        1,
+    )
+    path = tmp_path / "duplicate-nested.yaml"
+    path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ContractLoadError, match="duplicate mapping key"):
+        load_contract(path)
+
+
+def test_invalid_utf8_is_a_sanitized_load_error(tmp_path: Path) -> None:
+    path = tmp_path / "invalid-utf8.yaml"
+    path.write_bytes(b"schema_version: \xff")
+
+    with pytest.raises(
+        ContractLoadError, match=r"contract is not valid UTF-8 at byte offset \d+"
+    ):
+        load_contract(path)
+
+
+def test_nested_unknown_fields_are_rejected(tmp_path: Path) -> None:
+    data = valid_contract_data()
+    data["acceptance_tests"] = [
+        {
+            "id": "tests",
+            "command": "pytest -q",
+            "timeout_seconds": 60,
+            "working_directory": "/tmp",
+        }
+    ]
+
+    with pytest.raises(
+        ContractValidationError,
+        match=r"acceptance_tests\.0\.working_directory: Extra inputs are not permitted",
+    ):
+        load_contract(write_contract(tmp_path / "nested-extra.yaml", data))
+
+
+def test_blank_acceptance_command_is_rejected(tmp_path: Path) -> None:
+    data = valid_contract_data()
+    data["acceptance_tests"] = [
+        {"id": "tests", "command": " \t ", "timeout_seconds": 60}
+    ]
+
+    with pytest.raises(ContractValidationError, match=r"acceptance_tests\.0\.command"):
+        load_contract(write_contract(tmp_path / "blank-command.yaml", data))
+
+
+@pytest.mark.parametrize("field", ["allowed_paths", "protected_paths"])
+def test_blank_path_patterns_are_rejected(tmp_path: Path, field: str) -> None:
+    data = valid_contract_data()
+    data[field] = [" \t "]
+
+    with pytest.raises(ContractValidationError, match=f"{field}.0"):
+        load_contract(write_contract(tmp_path / f"blank-{field}.yaml", data))
+
+
+@pytest.mark.parametrize("identifier", ["bad id", ".hidden", "tests/fast"])
+def test_invalid_acceptance_test_identifiers_are_rejected(
+    tmp_path: Path, identifier: str
+) -> None:
+    data = valid_contract_data()
+    data["acceptance_tests"] = [
+        {"id": identifier, "command": "pytest -q", "timeout_seconds": 60}
+    ]
+
+    with pytest.raises(ContractValidationError, match=r"acceptance_tests\.0\.id"):
+        load_contract(write_contract(tmp_path / "invalid-test-id.yaml", data))
+
+
+@pytest.mark.parametrize(
+    ("repair_rounds", "timeout"),
+    [(0, 1), (10, MAX_TIMEOUT_SECONDS)],
+)
+def test_numeric_boundary_values_are_accepted(
+    tmp_path: Path, repair_rounds: int, timeout: int
+) -> None:
+    data = valid_contract_data()
+    data["max_repair_rounds"] = repair_rounds
+    data["acceptance_tests"] = [
+        {"id": "boundary", "command": "pytest -q", "timeout_seconds": timeout}
+    ]
+
+    contract = load_contract(write_contract(tmp_path / "boundaries.yaml", data))
+
+    assert contract.max_repair_rounds == repair_rounds
+    assert contract.acceptance_tests[0].timeout_seconds == timeout
+
+
+def test_validated_contract_collections_are_immutable(tmp_path: Path) -> None:
+    contract = load_contract(write_contract(tmp_path / "immutable.yaml", valid_contract_data()))
+
+    assert isinstance(contract.allowed_paths, tuple)
+    assert isinstance(contract.protected_paths, tuple)
+    assert isinstance(contract.acceptance_tests, tuple)
+    with pytest.raises(AttributeError):
+        contract.allowed_paths.append("protected/**")
+    with pytest.raises(AttributeError):
+        contract.protected_paths.append("src/**")
+    with pytest.raises(AttributeError):
+        contract.acceptance_tests.append(contract.acceptance_tests[0])
 
 
 @pytest.mark.parametrize(

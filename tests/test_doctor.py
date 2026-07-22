@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
-from research_automation_supervisor.doctor import CommandResult, run_doctor
+from research_automation_supervisor.cli import _format_doctor
+from research_automation_supervisor.doctor import (
+    CodexDiagnostic,
+    CommandResult,
+    DoctorReport,
+    GitDiagnostic,
+    PythonDiagnostic,
+    run_doctor,
+)
 
 GIT = "/tools/git"
 CODEX = "/tools/codex"
@@ -21,6 +30,21 @@ class FakeRunner:
         key = tuple(args)
         self.calls.append((key, timeout))
         return self.results[key]
+
+
+class TimeoutRunner(FakeRunner):
+    def __init__(
+        self,
+        results: dict[tuple[str, ...], CommandResult],
+        timed_out_call: tuple[str, ...],
+    ) -> None:
+        super().__init__(results)
+        self.timed_out_call = timed_out_call
+
+    def __call__(self, args: Sequence[str], *, timeout: float) -> CommandResult:
+        if tuple(args) == self.timed_out_call:
+            raise subprocess.TimeoutExpired(list(args), timeout)
+        return super().__call__(args, timeout=timeout)
 
 
 def successful_results(*, dirty: bool = False) -> dict[tuple[str, ...], CommandResult]:
@@ -131,7 +155,7 @@ def test_failed_login_is_sanitized() -> None:
         cwd=CWD,
         python_version=(3, 11, 0),
     )
-    rendered = str(report.to_dict())
+    rendered = f"{report.to_dict()}\n{_format_doctor(report)}"
 
     assert not report.ok
     assert report.codex.authenticated is False
@@ -157,3 +181,145 @@ def test_outside_repository_is_reported_without_dependency_failure() -> None:
     assert not report.git.inside_repository
     assert report.git.repository_root is None
     assert report.git.clean is None
+
+
+def test_failed_git_version_command_does_not_parse_stdout() -> None:
+    results = successful_results()
+    results[(GIT, "--version")] = CommandResult(1, "git version 99.0.0\n")
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.git.version is None
+    assert report.git.error == "Git version command failed or timed out."
+    assert "Git version command failed or timed out." in report.dependency_errors
+    assert not report.ok
+
+
+def test_failed_codex_version_command_does_not_parse_stdout() -> None:
+    results = successful_results()
+    results[(CODEX, "--version")] = CommandResult(1, "codex-cli 99.0.0\n")
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.codex.version is None
+    assert not report.codex.supported
+    assert report.codex.error == "Codex version command failed or timed out."
+    assert not report.ok
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "runtime 99.0.0; codex version unknown\n",
+        "wrapper 1.2.3\ncodex-cli 0.145.0\n",
+        "version 0.145.0\n",
+    ],
+)
+def test_codex_version_rejects_unrecognized_output(output: str) -> None:
+    results = successful_results()
+    results[(CODEX, "--version")] = CommandResult(0, output)
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.codex.version is None
+    assert report.codex.error == "Codex version could not be determined."
+    assert not report.ok
+
+
+def test_failed_repository_probe_is_indeterminate_and_unready() -> None:
+    results = successful_results()
+    results[(GIT, "-C", str(CWD), "rev-parse", "--show-toplevel")] = CommandResult(
+        1, "", "permission denied"
+    )
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.git.inside_repository is None
+    assert report.git.repository_root is None
+    assert report.git.error == "Git repository probe failed or timed out."
+    assert not report.ok
+
+
+def test_timed_out_repository_probe_is_indeterminate_and_unready() -> None:
+    results = successful_results()
+    probe = (GIT, "-C", str(CWD), "rev-parse", "--show-toplevel")
+
+    report = run_doctor(
+        runner=TimeoutRunner(results, probe),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.git.inside_repository is None
+    assert report.git.error == "Git repository probe failed or timed out."
+    assert "Git repository probe failed or timed out." in report.dependency_errors
+    assert not report.ok
+
+
+def test_repository_root_can_differ_from_current_directory() -> None:
+    root = Path("/workspace")
+    results = successful_results()
+    results[(GIT, "-C", str(CWD), "rev-parse", "--show-toplevel")] = CommandResult(
+        0, f"{root}\n"
+    )
+    results[
+        (GIT, "-C", str(root), "status", "--porcelain", "--untracked-files=normal")
+    ] = CommandResult(0, "")
+    runner = FakeRunner(results)
+
+    report = run_doctor(
+        runner=runner,
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.ok
+    assert report.git.repository_root == str(root)
+    assert (
+        (GIT, "-C", str(root), "status", "--porcelain", "--untracked-files=normal"),
+        10.0,
+    ) in runner.calls
+
+
+def test_operational_error_defensively_prevents_ready_report() -> None:
+    report = DoctorReport(
+        python=PythonDiagnostic("3.12.0", True),
+        git=GitDiagnostic(
+            True,
+            "2.45.1",
+            None,
+            error="Git repository probe failed or timed out.",
+        ),
+        codex=CodexDiagnostic(
+            True,
+            "0.145.0",
+            True,
+            authenticated=True,
+            login_status="authenticated",
+        ),
+        dependency_errors=(),
+    )
+
+    assert not report.ok
