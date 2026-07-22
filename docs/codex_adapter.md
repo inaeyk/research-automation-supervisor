@@ -1,0 +1,122 @@
+# Deterministic Codex adapter
+
+Stage 1 has one narrow trust boundary: a human writes a prompt file and a YAML
+request, and the adapter transports the exact UTF-8 prompt bytes to one
+non-interactive `codex exec` process. The adapter does not generate prompts,
+reason about workflow stages, resume sessions, retry runs, create Git objects,
+run handoffs, or advance a workflow.
+
+## Request
+
+`research-supervisor validate-codex-request PATH` validates without writing or
+launching Codex. `research-supervisor run-codex PATH` performs the run. Both
+commands also support `--json`; `run-codex` accepts `--runs-dir`, which defaults
+to `runs/codex` under the caller's current directory.
+
+The request has exactly these fields:
+
+```yaml
+schema_version: 1
+run_id: minimal-worker-001
+role: worker
+workspace: ../..
+prompt_path: ../prompts/minimal-worker.md
+model: gpt-5.6-sol
+reasoning_effort: high
+timeout_seconds: 1800
+```
+
+Relative workspace and prompt paths are resolved from the request file's
+directory. The workspace must be a directory in a Git worktree. The prompt must
+be a nonempty regular UTF-8 file of at most 1 MiB. It is read once before launch
+and only its byte count and SHA-256 are recorded.
+
+## Fixed policy and command
+
+Role policy is adapter-owned:
+
+| Role | Sandbox | Approval | Ephemeral |
+|---|---|---|---|
+| `supervisor` | `read-only` | `never` | no |
+| `worker` | `workspace-write` | `never` | no |
+| `auditor` | `read-only` | `never` | yes |
+
+The adapter uses a shell-free argument vector equivalent to:
+
+```text
+codex exec --json
+  --output-last-message <adapter temporary path>
+  --model <validated model>
+  -c model_reasoning_effort=<validated effort>
+  -c web_search="disabled"
+  -c sandbox_workspace_write.network_access=false
+  -c features.skill_mcp_dependency_install=false
+  --sandbox <role policy>
+  --ask-for-approval never
+  --ignore-user-config --ignore-rules --strict-config
+  --cd <resolved workspace>
+  [--ephemeral for auditors]
+  -
+```
+
+The process also uses the resolved workspace as its working directory. Prompt
+bytes go only to standard input. The adapter does not add search, extra writable
+directories, Git-check bypasses, full-auto, or sandbox-bypass flags. Environment
+variables with credential-shaped names are removed from a copied environment;
+only their names are recorded.
+
+## Lifecycle and artifacts
+
+Each run exclusively creates `<runs-dir>/<run_id>` and never reuses it. Codex is
+started in a new process session. Standard output is streamed as JSONL and
+standard error is bounded. At the hard timeout, or when stdout exceeds 100 MiB
+or stderr exceeds 10 MiB, the whole process group receives termination, a fixed
+two-second grace period, and then a force-kill if required. There are no retries.
+
+The run directory contains:
+
+- `request.normalized.json`: resolved request and fixed role policy;
+- `prompt.sha256`: prompt hash, never prompt text;
+- `events.jsonl`: canonical redacted JSON objects;
+- `stderr.log`: bounded redacted diagnostics;
+- `final-message.md`: redacted last response;
+- `metadata.json`: command policy, timing, process, event, and environment-name
+  metadata;
+- `result.json`: the normalized outcome returned by the CLI.
+
+Malformed JSONL lines are not retained. Metadata stores only their count and
+SHA-256 hashes. Metadata and result finalization use atomic replacement, and
+failure runs retain the same useful artifact structure.
+
+## Outcomes and exit codes
+
+Statuses, in classification order, are `launch_failed`, `timed_out`,
+`output_limit_exceeded`, `permission_blocked`, `malformed_event_stream`,
+`process_failed`, `missing_final_message`, and `succeeded`.
+
+CLI exit codes are:
+
+- `0`: succeeded;
+- `2`: invalid request, YAML, path, prompt, or CLI input;
+- `3`: missing or unusable local dependency;
+- `4`: launch or process failure;
+- `5`: timeout;
+- `6`: conservative permission or sandbox denial;
+- `7`: malformed events, missing final response, or an output limit;
+- `1`: unexpected internal failure.
+
+Permission classification only uses allowlisted phrases in stderr or explicit
+structured failure/denial events. Assistant prose cannot trigger it.
+
+## Redaction and tests
+
+Redaction is recursive and idempotent. It covers authorization bearer headers,
+common API-token prefixes, credential-shaped assignments and JSON keys, and
+values removed from the subprocess environment. Non-string JSON scalars retain
+their types. Redaction is a best-effort content control, not a proof that an
+arbitrary unknown secret shape can be recognized. The human prompt remains the
+authoritative input and is never rewritten or printed by the CLI.
+
+Tests launch `tests/fixtures/fake_codex.py` (or inject discovery, environment,
+clock, and version boundaries). They do not invoke a real model, inspect user
+Codex configuration, log in, install software, or access the network.
