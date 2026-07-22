@@ -55,7 +55,7 @@ def redact_text(text: str, sensitive_values: Sequence[str] = ()) -> str:
         {value for value in sensitive_values if value and value != REDACTED},
         key=lambda item: (-len(item), item),
     ):
-        redacted = redacted.replace(value, REDACTED)
+        redacted = _replace_outside_placeholders(redacted, value)
     redacted = _AUTHORIZATION_BEARER.sub(r"\1" + REDACTED, redacted)
     redacted = _TOKEN_FORM.sub(REDACTED, redacted)
     redacted = _ASSIGNED_SECRET.sub(lambda match: match.group("prefix") + REDACTED, redacted)
@@ -72,8 +72,8 @@ def redact_json(value: Any, sensitive_values: Sequence[str] = ()) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             rendered_key = str(key)
-            if is_sensitive_name(rendered_key) and isinstance(item, str):
-                result[rendered_key] = REDACTED
+            if is_sensitive_name(rendered_key):
+                result[rendered_key] = _redact_sensitive_descendants(item)
             else:
                 result[rendered_key] = redact_json(item, sensitive_values)
         return result
@@ -83,4 +83,24 @@ def redact_json(value: Any, sensitive_values: Sequence[str] = ()) -> Any:
         return [redact_json(item, sensitive_values) for item in value]
     if isinstance(value, str):
         return redact_text(value, sensitive_values)
+    return value
+
+
+def _replace_outside_placeholders(text: str, sensitive_value: str) -> str:
+    """Replace a literal secret without ever rewriting an existing placeholder."""
+    return REDACTED.join(
+        segment.replace(sensitive_value, REDACTED) for segment in text.split(REDACTED)
+    )
+
+
+def _redact_sensitive_descendants(value: Any) -> Any:
+    """Redact every descendant string owned by a sensitive mapping key."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_sensitive_descendants(item) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive_descendants(item) for item in value]
+    if isinstance(value, str):
+        return REDACTED
     return value

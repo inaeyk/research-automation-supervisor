@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -11,8 +12,11 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from research_automation_supervisor.cli import app
+from research_automation_supervisor.cli import _format_codex_result, app
 from research_automation_supervisor.codex_adapter import (
+    DEFAULT_LIMITS,
+    STDERR_LIMIT_BYTES,
+    STDOUT_LIMIT_BYTES,
     AdapterLimits,
     build_codex_command,
     execute_codex_request,
@@ -51,11 +55,16 @@ def request_data(role: str = "worker") -> dict[str, object]:
     }
 
 
-def prepared_request(tmp_path: Path, role: str = "worker") -> PreparedCodexRequest:
+def prepared_request(
+    tmp_path: Path,
+    role: str = "worker",
+    *,
+    prompt_bytes: bytes = b"One exact human-written prompt.\n",
+) -> PreparedCodexRequest:
     tmp_path.mkdir(parents=True, exist_ok=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (tmp_path / "prompt.md").write_bytes(b"One exact human-written prompt.\n")
+    (tmp_path / "prompt.md").write_bytes(prompt_bytes)
     request_path = tmp_path / "request.yaml"
     request_path.write_text(yaml.safe_dump(request_data(role)), encoding="utf-8")
     return load_codex_request(request_path, git_worktree_checker=lambda _: True)
@@ -121,14 +130,22 @@ def test_exact_process_construction_and_prompt_stdin(
     assert result.status == "succeeded"
     assert base64.b64decode(observation["prompt_base64"]) == prepared.prompt_bytes
     assert prepared.prompt_bytes.decode().strip() not in " ".join(argv)
-    assert argv[:3] == ["exec", "--json", "--output-last-message"]
+    assert argv[:5] == [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--output-last-message",
+    ]
     assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
     assert "model_reasoning_effort=xhigh" in argv
     assert 'web_search="disabled"' in argv
     assert "sandbox_workspace_write.network_access=false" in argv
     assert "features.skill_mcp_dependency_install=false" in argv
     assert argv[argv.index("--sandbox") + 1] == sandbox
-    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    exec_index = argv.index("exec")
+    assert argv.index("--ask-for-approval") < exec_index
+    assert "--ask-for-approval" not in argv[exec_index + 1 :]
     assert argv[argv.index("--cd") + 1] == str(prepared.workspace)
     assert observation["cwd"] == str(prepared.workspace)
     assert ("--ephemeral" in argv) is ephemeral
@@ -149,9 +166,66 @@ def test_build_command_has_no_prompt_and_only_role_owned_policy(tmp_path: Path) 
     prepared = prepared_request(tmp_path, "auditor")
     command = build_codex_command(prepared, "/tools/codex", Path("/tmp/final"))
 
-    assert command[0:3] == ["/tools/codex", "exec", "--json"]
+    assert command[0:5] == [
+        "/tools/codex",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+    ]
     assert "One exact human-written prompt" not in " ".join(command)
     assert command[-2:] == ["--ephemeral", "-"]
+
+
+def test_parser_aware_fake_rejects_post_exec_approval_option(tmp_path: Path) -> None:
+    rejected = subprocess.run(
+        [str(FAKE_CODEX), "exec", "--ask-for-approval", "never", "--help"],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        encoding="utf-8",
+        errors="replace",
+        timeout=5,
+    )
+    accepted = subprocess.run(
+        [str(FAKE_CODEX), "--ask-for-approval", "never", "exec", "--help"],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        encoding="utf-8",
+        errors="replace",
+        timeout=5,
+    )
+    duplicate = subprocess.run(
+        [
+            str(FAKE_CODEX),
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--ask-for-approval",
+            "never",
+            "--help",
+        ],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        encoding="utf-8",
+        errors="replace",
+        timeout=5,
+    )
+
+    assert rejected.returncode == 2
+    assert "before exec" in rejected.stderr
+    assert accepted.returncode == 0
+    assert duplicate.returncode == 2
+    assert "not accepted after exec" in duplicate.stderr
+
+
+def test_production_output_limit_defaults_are_exact() -> None:
+    assert STDOUT_LIMIT_BYTES == 100 * 1024 * 1024
+    assert STDERR_LIMIT_BYTES == 10 * 1024 * 1024
+    assert DEFAULT_LIMITS.stdout_bytes == 100 * 1024 * 1024
+    assert DEFAULT_LIMITS.stderr_bytes == 10 * 1024 * 1024
 
 
 def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path) -> None:
@@ -184,6 +258,12 @@ def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path
     assert metadata["thread_id"] == "thread-123"
     assert metadata["valid_event_count"] == 2
     assert metadata["malformed_event_count"] == 0
+    assert metadata["command"][:4] == [
+        str(FAKE_CODEX),
+        "--ask-for-approval",
+        "never",
+        "exec",
+    ]
     assert metadata["command"][-1] == "<PROMPT_FROM_STDIN>"
     assert "<FINAL_MESSAGE_TEMP>" in metadata["command"]
     assert not list(directory.glob(".metadata.json.*"))
@@ -217,24 +297,30 @@ def test_normalized_process_outcomes_leave_useful_artifacts(
 
     assert result.status == status
     assert {path.name for path in directory.iterdir()} >= ARTIFACT_NAMES
-    assert json.loads((directory / "result.json").read_text())["status"] == status
+    assert json.loads((directory / "result.json").read_text()) == result.to_dict()
     assert result.error is not None
 
 
 def test_launch_failure_is_normalized_with_artifacts(tmp_path: Path) -> None:
     prepared = prepared_request(tmp_path)
     missing_executable = tmp_path / "missing-codex"
+    secret = prepared.request.run_id
 
     result = run_prepared_codex(
         prepared,
         runs_dir=tmp_path / "runs",
         codex_executable=str(missing_executable),
-        environ=fake_environment(),
+        environ=fake_environment(DEMO_TOKEN=secret),
     )
+    raw_directory = tmp_path / "runs" / secret
+    persisted = json.loads((raw_directory / "result.json").read_text())
 
     assert result.status == "launch_failed"
     assert result.exit_code is None
-    assert {path.name for path in Path(result.artifact_directory).iterdir()} >= ARTIFACT_NAMES
+    assert result.run_id == "sanitized-result"
+    assert persisted == result.to_dict()
+    assert secret not in json.dumps(result.to_dict())
+    assert {path.name for path in raw_directory.iterdir()} >= ARTIFACT_NAMES
 
 
 def test_timeout_terminates_process_group_and_child(tmp_path: Path) -> None:
@@ -261,12 +347,42 @@ def test_timeout_terminates_process_group_and_child(tmp_path: Path) -> None:
     metadata = json.loads((Path(result.artifact_directory) / "metadata.json").read_text())
     assert metadata["terminating_signal"] in {15, 9}
     child_pid_path = prepared.workspace / ".fake-codex-child.pid"
-    if child_pid_path.exists():
-        child_pid = int(child_pid_path.read_text())
-        deadline = time.monotonic() + 2
-        while _process_is_live(child_pid) and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert not _process_is_live(child_pid)
+    child_ready_path = prepared.workspace / ".fake-codex-child.ready"
+    assert child_pid_path.exists(), "the timeout test must prove the child was created"
+    assert child_ready_path.exists(), "the child must install its signal policy before timeout"
+    child_pid = int(child_pid_path.read_text())
+    deadline = time.monotonic() + 2
+    while _process_is_live(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _process_is_live(child_pid)
+
+
+def test_normal_zero_leader_exit_cleans_up_sigterm_ignoring_child(tmp_path: Path) -> None:
+    prepared = prepared_request(tmp_path)
+    configure(
+        prepared,
+        stdout_lines=['{"type":"turn.completed"}'],
+        final="done",
+        spawn_child_sleep=30,
+        child_ignore_term=True,
+    )
+
+    result = run_fake(
+        prepared,
+        limits=AdapterLimits(termination_grace_seconds=0.05, io_poll_seconds=0.005),
+    )
+
+    child_pid_path = prepared.workspace / ".fake-codex-child.pid"
+    child_ready_path = prepared.workspace / ".fake-codex-child.ready"
+    assert child_pid_path.exists(), "the normal-exit test must prove the child was created"
+    assert child_ready_path.exists(), "the child must be ready before its leader exits"
+    child_pid = int(child_pid_path.read_text())
+    assert result.status == "succeeded"
+    assert result.exit_code == 0
+    deadline = time.monotonic() + 2
+    while _process_is_live(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _process_is_live(child_pid)
 
 
 @pytest.mark.parametrize(
@@ -352,17 +468,120 @@ def test_permission_like_assistant_prose_does_not_trigger_classification(tmp_pat
     assert not result.permission_evidence
 
 
-def test_invalid_subprocess_bytes_are_replaced_without_traceback(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "assistant_not_error",
+            "message": "permission denied",
+            "item": {"type": "agent_message", "text": "permission denied"},
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "permission denied was quoted in documentation",
+            },
+        },
+    ],
+)
+def test_unknown_events_and_successful_commands_cannot_supply_permission_evidence(
+    tmp_path: Path, event: dict[str, object]
+) -> None:
     prepared = prepared_request(tmp_path)
-    stdout = b'{"type":"note","text":"\xff"}\n'
-    configure(prepared, stdout_hex=stdout.hex(), final_hex=b"answer \xff".hex())
+    configure(
+        prepared,
+        stdout_lines=[json.dumps(event)],
+        final="failed",
+        exit_code=1,
+    )
+
+    result = run_fake(prepared)
+
+    assert result.status == "process_failed"
+    assert not result.permission_evidence
+
+
+def test_failed_command_item_can_supply_explicit_permission_evidence(tmp_path: Path) -> None:
+    prepared = prepared_request(tmp_path)
+    configure(
+        prepared,
+        stdout_lines=[
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "aggregated_output": "operation not permitted",
+                    },
+                }
+            )
+        ],
+        final="failed",
+        exit_code=1,
+    )
+
+    result = run_fake(prepared)
+
+    assert result.status == "permission_blocked"
+    assert result.permission_evidence
+
+
+def test_invalid_jsonl_utf8_is_hashed_and_classified_malformed(tmp_path: Path) -> None:
+    prepared = prepared_request(tmp_path)
+    malformed_line = b'{"type":"note","text":"\xff"}'
+    configure(
+        prepared,
+        stdout_hex=(malformed_line + b"\n").hex(),
+        final_hex=b"answer \xff".hex(),
+    )
 
     result = run_fake(prepared)
     directory = Path(result.artifact_directory)
+    metadata = json.loads((directory / "metadata.json").read_text())
 
-    assert result.status == "succeeded"
-    assert "\N{REPLACEMENT CHARACTER}" in (directory / "events.jsonl").read_text()
+    assert result.status == "malformed_event_stream"
+    assert result.event_count == 0
+    assert result.malformed_event_count == 1
+    assert (directory / "events.jsonl").read_bytes() == b""
+    assert metadata["malformed_event_sha256"] == [
+        hashlib.sha256(malformed_line).hexdigest()
+    ]
     assert "\N{REPLACEMENT CHARACTER}" in (directory / "final-message.md").read_text()
+
+
+@pytest.mark.parametrize("early_behavior", ["close_stdin_early", "skip_stdin"])
+def test_incomplete_stdin_and_broken_pipe_are_normalized(
+    tmp_path: Path, early_behavior: str
+) -> None:
+    prepared = prepared_request(tmp_path, prompt_bytes=b"x" * (1024 * 1024))
+    configure(
+        prepared,
+        stdout_lines=['{"type":"turn.completed"}'],
+        final="done",
+        **{early_behavior: True},
+    )
+
+    result = run_fake(prepared)
+    observation = json.loads(
+        (prepared.workspace / ".fake-codex-observation.json").read_text()
+    )
+
+    assert base64.b64decode(observation["prompt_base64"]) == b""
+    assert result.status == "process_failed"
+    assert result.exit_code == 0
+    assert json.loads(
+        (
+            prepared.request_path.parent
+            / "runs"
+            / prepared.request.run_id
+            / "result.json"
+        ).read_text()
+    ) == result.to_dict()
 
 
 def test_redaction_and_malformed_hashes_prevent_raw_secret_retention(tmp_path: Path) -> None:
@@ -403,6 +622,43 @@ def test_redaction_and_malformed_hashes_prevent_raw_secret_retention(tmp_path: P
     for artifact in directory.iterdir():
         assert secret not in artifact.read_text(encoding="utf-8")
         assert malformed not in artifact.read_text(encoding="utf-8")
+
+
+def test_one_sanitized_result_is_persisted_returned_and_rendered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = prepared_request(tmp_path)
+    secret = prepared.request.run_id
+    configure(
+        prepared,
+        stdout_lines=[json.dumps({"type": "note", "message": secret})],
+        stderr=f"diagnostic {secret}",
+        final=f"final {secret}",
+    )
+
+    result = run_fake(prepared, environ=fake_environment(DEMO_TOKEN=secret))
+    raw_directory = prepared.request_path.parent / "runs" / secret
+    persisted = json.loads((raw_directory / "result.json").read_text())
+
+    assert result.run_id == "sanitized-result"
+    assert secret not in result.artifact_directory
+    assert persisted == result.to_dict()
+    assert secret not in json.dumps(result.to_dict())
+    for artifact in raw_directory.iterdir():
+        assert secret not in artifact.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(
+        "research_automation_supervisor.cli.execute_codex_request",
+        lambda path, *, runs_dir: result,
+    )
+    human = CliRunner().invoke(app, ["run-codex", "request.yaml"])
+    machine = CliRunner().invoke(app, ["run-codex", "request.yaml", "--json"])
+    assert human.exit_code == 0
+    assert machine.exit_code == 0
+    assert secret not in human.stdout
+    assert secret not in machine.stdout
+    assert json.loads(machine.stdout) == persisted
+    assert _format_codex_result(result) in human.stdout
 
 
 def test_existing_run_directory_collision_is_refused(tmp_path: Path) -> None:
@@ -565,6 +821,24 @@ def test_stage1_cli_expected_and_internal_errors_have_no_traceback(
     assert "internal detail" not in invocation.stdout
 
 
+def test_stage1_cli_expected_errors_redact_sensitive_environment_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "CLI_ERROR_SECRET_VALUE_123"
+    monkeypatch.setenv("DEMO_TOKEN", secret)
+
+    def fail(path: Path, *, runs_dir: Path) -> CodexRunResult:
+        raise CodexRequestError(f"request contained {secret}")
+
+    monkeypatch.setattr("research_automation_supervisor.cli.execute_codex_request", fail)
+
+    invocation = CliRunner().invoke(app, ["run-codex", "request.yaml", "--json"])
+
+    assert invocation.exit_code == 2
+    assert secret not in invocation.stdout
+    assert "<REDACTED>" in invocation.stdout
+
+
 def _result(status: RunStatus) -> CodexRunResult:
     return CodexRunResult(
         run_id="run-1",
@@ -585,8 +859,11 @@ def _result(status: RunStatus) -> CodexRunResult:
 
 def _process_is_live(pid: int) -> bool:
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    except FileNotFoundError:
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
-    state = stat.split()[2]
-    return state != "Z"
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        state = stat_path.read_text(encoding="ascii").split()[2]
+        return state != "Z"
+    return True

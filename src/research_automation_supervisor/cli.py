@@ -9,7 +9,10 @@ from typing import Annotated, Never
 import typer
 
 from research_automation_supervisor import __version__
-from research_automation_supervisor.codex_adapter import execute_codex_request
+from research_automation_supervisor.codex_adapter import (
+    build_subprocess_environment,
+    execute_codex_request,
+)
 from research_automation_supervisor.codex_models import (
     CodexRunResult,
     RunStatus,
@@ -22,6 +25,7 @@ from research_automation_supervisor.errors import (
     CodexRequestError,
     ContractError,
 )
+from research_automation_supervisor.redaction import redact_text
 
 app = typer.Typer(
     add_completion=False,
@@ -163,21 +167,24 @@ def _render_codex_input_error(
     *,
     dependency: bool,
 ) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized_error = redact_text(error, sensitive_values)
+    sanitized_path = redact_text(str(path), sensitive_values)
     kind = "dependency" if dependency else "input"
     if as_json:
         typer.echo(
             _stable_json(
                 {
-                    "error": error,
+                    "error": sanitized_error,
                     "error_kind": kind,
                     "ok": False,
-                    "path": str(path),
+                    "path": sanitized_path,
                 }
             )
         )
     else:
         prefix = "Missing dependency" if dependency else "Invalid Codex request"
-        typer.echo(f"{prefix}: {error}", err=True)
+        typer.echo(f"{prefix}: {sanitized_error}", err=True)
     raise typer.Exit(code=3 if dependency else 2)
 
 

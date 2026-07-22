@@ -30,7 +30,11 @@ from research_automation_supervisor.codex_models import (
 )
 from research_automation_supervisor.doctor import MINIMUM_CODEX, _parse_codex_version
 from research_automation_supervisor.errors import CodexDependencyError, CodexRequestError
-from research_automation_supervisor.redaction import is_sensitive_name, redact_json, redact_text
+from research_automation_supervisor.redaction import (
+    is_sensitive_name,
+    redact_json,
+    redact_text,
+)
 
 STDOUT_LIMIT_BYTES = 100 * 1024 * 1024
 STDERR_LIMIT_BYTES = 10 * 1024 * 1024
@@ -48,9 +52,39 @@ _PERMISSION_PHRASES = (
     "network is disabled",
     "read-only file system",
 )
-_FAILURE_TYPE_MARKERS = ("error", "fail", "denial", "denied")
-_COMMAND_TYPE_MARKERS = ("command", "exec")
-_FAILED_STATUSES = ("error", "failed", "failure", "denied", "blocked")
+_FAILURE_EVENT_TYPES = frozenset(
+    {
+        "error",
+        "failure",
+        "denial",
+        "turn.error",
+        "turn.failed",
+        "turn.denied",
+        "item.error",
+        "item.failed",
+        "item.denied",
+        "command.error",
+        "command.failed",
+        "command.denied",
+    }
+)
+_EXPLICIT_PERMISSION_EVENT_TYPES = frozenset(
+    {"approval.required", "network.denied", "permission.denied", "sandbox.denied"}
+)
+_COMMAND_ITEM_TYPES = frozenset(
+    {"command", "command.execution", "command_execution", "exec", "exec_command"}
+)
+_FAILED_COMMAND_STATUSES = frozenset({"blocked", "denied", "error", "failed", "failure"})
+_FAILURE_BEARING_FIELDS = (
+    "aggregated_output",
+    "detail",
+    "error",
+    "failure",
+    "message",
+    "output",
+    "reason",
+    "stderr",
+)
 
 
 @dataclass(frozen=True)
@@ -112,11 +146,8 @@ class _EventProcessor:
         if not line.strip():
             return
         try:
-            value = json.loads(
-                line.decode("utf-8", errors="replace"),
-                parse_constant=_reject_json_constant,
-            )
-        except (json.JSONDecodeError, ValueError):
+            value = json.loads(line.decode("utf-8"), parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self.malformed_hashes.append(hashlib.sha256(line).hexdigest())
             return
         if not isinstance(value, dict):
@@ -285,20 +316,23 @@ def run_prepared_codex(
         permission_evidence,
     )
     summary, error = _status_messages(status, observation)
-    result = CodexRunResult(
-        run_id=prepared.request.run_id,
-        status=status,
-        exit_code=observation.exit_code,
-        started_at=_utc_string(started_at),
-        ended_at=_utc_string(ended_at),
-        duration_seconds=round(duration, 6),
-        artifact_directory=str(artifact_directory),
-        event_count=event_processor.event_count,
-        malformed_event_count=len(event_processor.malformed_hashes),
-        final_message_present=final_message_present,
-        permission_evidence=permission_evidence,
-        summary=summary,
-        error=error,
+    result = _sanitize_result(
+        CodexRunResult(
+            run_id=prepared.request.run_id,
+            status=status,
+            exit_code=observation.exit_code,
+            started_at=_utc_string(started_at),
+            ended_at=_utc_string(ended_at),
+            duration_seconds=round(duration, 6),
+            artifact_directory=str(artifact_directory),
+            event_count=event_processor.event_count,
+            malformed_event_count=len(event_processor.malformed_hashes),
+            final_message_present=final_message_present,
+            permission_evidence=permission_evidence,
+            summary=summary,
+            error=error,
+        ),
+        redaction_values,
     )
 
     metadata = _build_metadata(
@@ -321,7 +355,7 @@ def run_prepared_codex(
     )
     _atomic_write_json(
         artifact_directory / "result.json",
-        redact_json(result.to_dict(), redaction_values),
+        result.to_dict(),
     )
     return result
 
@@ -357,6 +391,8 @@ def build_codex_command(
     request = prepared.request
     command = [
         executable,
+        "--ask-for-approval",
+        prepared.policy.approval,
         "exec",
         "--json",
         "--output-last-message",
@@ -373,8 +409,6 @@ def build_codex_command(
         "features.skill_mcp_dependency_install=false",
         "--sandbox",
         prepared.policy.sandbox,
-        "--ask-for-approval",
-        prepared.policy.approval,
         "--ignore-user-config",
         "--ignore-rules",
         "--strict-config",
@@ -438,7 +472,7 @@ def _run_process(
     observation.launched = True
     if process.stdin is None or process.stdout is None or process.stderr is None:
         observation.launch_error = "Codex process pipes were unavailable"
-        _signal_process_group(process, signal.SIGKILL)
+        _emergency_process_group_cleanup(process, limits)
         observation.exit_code = process.wait()
         return
 
@@ -448,18 +482,30 @@ def _run_process(
         "stdout": process.stdout,
         "stderr": process.stderr,
     }
-    for name, stream in streams.items():
-        os.set_blocking(stream.fileno(), False)
-        selector.register(
-            stream,
-            selectors.EVENT_WRITE if name == "stdin" else selectors.EVENT_READ,
-            name,
-        )
+    try:
+        for name, stream in streams.items():
+            os.set_blocking(stream.fileno(), False)
+            selector.register(
+                stream,
+                selectors.EVENT_WRITE if name == "stdin" else selectors.EVENT_READ,
+                name,
+            )
+    except (KeyError, OSError, ValueError):
+        observation.launch_error = "Codex process pipes could not be configured"
+        for stream in streams.values():
+            if _is_registered(selector, stream):
+                _unregister_and_close(selector, stream)
+        selector.close()
+        _emergency_process_group_cleanup(process, limits)
+        observation.exit_code = process.wait()
+        return
 
     prompt_offset = 0
     deadline = started_monotonic + prepared.request.timeout_seconds
     termination_started: float | None = None
     killed = False
+    normal_cleanup_started: float | None = None
+    normal_cleanup_forced = False
     stdout_open = True
     stderr_open = True
 
@@ -473,7 +519,19 @@ def _run_process(
                     observation.stdin_error = prompt_offset < len(prepared.prompt_bytes)
                     _unregister_and_close(selector, process.stdin)
 
-            if observation.termination_reason is None and now >= deadline:
+                if (
+                    observation.termination_reason is None
+                    and normal_cleanup_started is None
+                    and _process_group_exists(process.pid)
+                ):
+                    normal_cleanup_started = now
+                    _signal_process_group(process, signal.SIGTERM)
+
+            if (
+                observation.termination_reason is None
+                and observation.exit_code is None
+                and now >= deadline
+            ):
                 observation.termination_reason = "timeout"
                 termination_started = now
                 _signal_process_group(process, signal.SIGTERM)
@@ -486,19 +544,40 @@ def _run_process(
                 _signal_process_group(process, signal.SIGKILL)
                 killed = True
 
+            if (
+                normal_cleanup_started is not None
+                and not normal_cleanup_forced
+                and _process_group_exists(process.pid)
+                and now - normal_cleanup_started >= limits.termination_grace_seconds
+            ):
+                _signal_process_group(process, signal.SIGKILL)
+                normal_cleanup_forced = True
+
             if observation.exit_code is not None and not stdout_open and not stderr_open:
-                if termination_started is None:
+                if termination_started is None and normal_cleanup_started is None:
                     break
-                if killed or not _process_group_exists(process.pid):
+                if (
+                    killed
+                    or normal_cleanup_forced
+                    or not _process_group_exists(process.pid)
+                ):
                     break
 
             timeout = limits.io_poll_seconds
-            if observation.termination_reason is None:
+            if observation.termination_reason is None and observation.exit_code is None:
                 timeout = min(timeout, max(0.0, deadline - now))
             elif termination_started is not None and not killed:
                 timeout = min(
                     timeout,
                     max(0.0, termination_started + limits.termination_grace_seconds - now),
+                )
+            if normal_cleanup_started is not None and not normal_cleanup_forced:
+                timeout = min(
+                    timeout,
+                    max(
+                        0.0,
+                        normal_cleanup_started + limits.termination_grace_seconds - now,
+                    ),
                 )
             try:
                 ready = selector.select(timeout)
@@ -565,6 +644,11 @@ def _run_process(
                         )
                         if termination_started is None:
                             termination_started = now
+    except BaseException:
+        _emergency_process_group_cleanup(process, limits)
+        if observation.exit_code is None:
+            observation.exit_code = process.wait()
+        raise
     finally:
         for stream in streams.values():
             if _is_registered(selector, stream):
@@ -629,6 +713,20 @@ def _process_group_exists(process_group_id: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _emergency_process_group_cleanup(
+    process: subprocess.Popen[bytes], limits: AdapterLimits
+) -> None:
+    """Contain descendants when an unexpected adapter-side failure interrupts I/O."""
+    if not _process_group_exists(process.pid):
+        return
+    _signal_process_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + limits.termination_grace_seconds
+    while _process_group_exists(process.pid) and time.monotonic() < deadline:
+        time.sleep(min(limits.io_poll_seconds, max(0.0, deadline - time.monotonic())))
+    if _process_group_exists(process.pid):
+        _signal_process_group(process, signal.SIGKILL)
 
 
 def _is_registered(selector: selectors.BaseSelector, stream: Any) -> bool:
@@ -784,6 +882,32 @@ def _status_messages(
     return message, None if status == "succeeded" else message
 
 
+def _sanitize_result(
+    result: CodexRunResult,
+    sensitive_values: Sequence[str],
+) -> CodexRunResult:
+    """Return the one type-safe sanitized result used by storage and all callers."""
+    redacted_run_id = redact_text(result.run_id, sensitive_values)
+    if redacted_run_id != result.run_id:
+        redacted_run_id = "sanitized-result"
+    return CodexRunResult(
+        schema_version=result.schema_version,
+        run_id=redacted_run_id,
+        status=result.status,
+        exit_code=result.exit_code,
+        started_at=result.started_at,
+        ended_at=result.ended_at,
+        duration_seconds=result.duration_seconds,
+        artifact_directory=redact_text(result.artifact_directory, sensitive_values),
+        event_count=result.event_count,
+        malformed_event_count=result.malformed_event_count,
+        final_message_present=result.final_message_present,
+        permission_evidence=result.permission_evidence,
+        summary=redact_text(result.summary, sensitive_values),
+        error=redact_text(result.error, sensitive_values) if result.error is not None else None,
+    )
+
+
 def _extract_identifier(event: Mapping[str, Any]) -> tuple[str | None, str | None]:
     for key in ("thread_id", "session_id"):
         value = event.get(key)
@@ -794,29 +918,28 @@ def _extract_identifier(event: Mapping[str, Any]) -> tuple[str | None, str | Non
 
 def _event_has_permission_evidence(event: Mapping[str, Any]) -> bool:
     event_type = event.get("type")
-    if isinstance(event_type, str) and any(
-        marker in event_type.casefold() for marker in _FAILURE_TYPE_MARKERS
-    ):
-        return _contains_permission_phrase(_all_strings(event))
+    normalized_event_type = event_type.casefold() if isinstance(event_type, str) else None
+    if normalized_event_type in _EXPLICIT_PERMISSION_EVENT_TYPES:
+        return True
+    if normalized_event_type in _FAILURE_EVENT_TYPES:
+        return _contains_permission_phrase(_failure_field_text(event))
 
     item = event.get("item")
     if not isinstance(item, Mapping):
         return False
     item_type = item.get("type")
-    if not isinstance(item_type, str) or not any(
-        marker in item_type.casefold() for marker in _COMMAND_TYPE_MARKERS
-    ):
+    if not isinstance(item_type, str) or item_type.casefold() not in _COMMAND_ITEM_TYPES:
         return False
     status = item.get("status")
     exit_code = item.get("exit_code")
     explicitly_failed = (
         isinstance(status, str)
-        and any(marker in status.casefold() for marker in _FAILED_STATUSES)
+        and status.casefold() in _FAILED_COMMAND_STATUSES
     ) or (isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0)
-    return explicitly_failed and _contains_permission_phrase(_all_strings(item))
+    return explicitly_failed and _contains_permission_phrase(_failure_field_text(item))
 
 
-def _all_strings(value: Any) -> str:
+def _failure_field_text(value: Mapping[str, Any]) -> str:
     strings: list[str] = []
 
     def collect(item: Any) -> None:
@@ -829,7 +952,9 @@ def _all_strings(value: Any) -> str:
             for nested in item:
                 collect(nested)
 
-    collect(value)
+    for field_name in _FAILURE_BEARING_FIELDS:
+        if field_name in value:
+            collect(value[field_name])
     return "\n".join(strings)
 
 

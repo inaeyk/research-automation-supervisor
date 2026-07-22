@@ -54,6 +54,36 @@ def test_recursive_redaction_preserves_non_string_scalar_types() -> None:
     assert redacted["items"][3]["Authorization"] == REDACTED
 
 
+def test_sensitive_composites_redact_every_descendant_string() -> None:
+    source = {
+        "token": {
+            "value": "plain-secret",
+            "nested": {"label": "also-secret", "count": 3, "enabled": True},
+            "items": ["list-secret", 17, None, {"deep": "deep-secret"}],
+        },
+        "credentials": [
+            {"username": "owned-string", "attempts": 2},
+            "direct-list-string",
+            False,
+        ],
+    }
+
+    redacted = redact_json(source)
+
+    assert redacted == {
+        "token": {
+            "value": REDACTED,
+            "nested": {"label": REDACTED, "count": 3, "enabled": True},
+            "items": [REDACTED, 17, None, {"deep": REDACTED}],
+        },
+        "credentials": [
+            {"username": REDACTED, "attempts": 2},
+            REDACTED,
+            False,
+        ],
+    }
+
+
 def test_redaction_is_idempotent_and_uses_removed_environment_values() -> None:
     secret = "SENSITIVE_ENV_VALUE_123"
     environment, names, values = build_subprocess_environment(
@@ -77,3 +107,27 @@ def test_redaction_is_idempotent_and_uses_removed_environment_values() -> None:
     }
     assert names == ("dbPASSWORDbackup", "Demo_Token")
     assert values == (secret, "another-value")
+
+
+def test_placeholder_overlapping_values_are_idempotent() -> None:
+    for sensitive_value in ("REDACTED", "<RED", "ACTED>", REDACTED):
+        source = f"secret={sensitive_value}; existing={REDACTED}"
+        once = redact_text(source, (sensitive_value,))
+        twice = redact_text(once, (sensitive_value,))
+        third = redact_text(twice, (sensitive_value,))
+
+        assert once == twice == third
+        assert "<<REDACTED>>" not in third
+
+
+def test_recursive_json_redaction_is_idempotent_with_existing_placeholders() -> None:
+    source = {
+        "ordinary": [REDACTED, "REDACTED", {"text": "already <REDACTED>"}],
+        "session": {"nested": [REDACTED, "raw", 1, True, None]},
+    }
+
+    once = redact_json(source, ("REDACTED",))
+    twice = redact_json(once, ("REDACTED",))
+
+    assert once == twice
+    assert once["session"] == {"nested": [REDACTED, REDACTED, 1, True, None]}

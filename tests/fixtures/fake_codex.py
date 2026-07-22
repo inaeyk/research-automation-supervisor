@@ -12,9 +12,26 @@ import time
 from pathlib import Path
 
 
+def _validate_exec_arguments(arguments: list[str]) -> str | None:
+    """Reject the real parser defect this fake is intended to detect."""
+    if arguments[:3] != ["--ask-for-approval", "never", "exec"]:
+        return "approval policy must be a global option before exec"
+    if "--ask-for-approval" in arguments[3:]:
+        return "approval policy is not accepted after exec"
+    return None
+
+
 def main() -> int:
     if sys.argv[1:] == ["--version"]:
         print("codex-cli 0.200.0")
+        return 0
+
+    parser_error = _validate_exec_arguments(sys.argv[1:])
+    if parser_error is not None:
+        print(f"fake codex parser error: {parser_error}", file=sys.stderr)
+        return 2
+    if "--help" in sys.argv[1:]:
+        print("fake codex exec help")
         return 0
 
     workspace = Path.cwd()
@@ -24,7 +41,14 @@ def main() -> int:
         if configuration_path.exists()
         else {}
     )
-    prompt = sys.stdin.buffer.read()
+    if configuration.get("close_stdin_early"):
+        sys.stdin.close()
+        prompt = b""
+        time.sleep(0.05)
+    elif configuration.get("skip_stdin"):
+        prompt = b""
+    else:
+        prompt = sys.stdin.buffer.read()
     observation = {
         "argv": sys.argv[1:],
         "cwd": str(workspace),
@@ -38,11 +62,17 @@ def main() -> int:
 
     child_sleep = configuration.get("spawn_child_sleep")
     if isinstance(child_sleep, (int, float)):
-        child_source = f"import time; time.sleep({float(child_sleep)!r})"
+        ready_path = workspace / ".fake-codex-child.ready"
+        child_source = (
+            "import pathlib, time; "
+            f"pathlib.Path({str(ready_path)!r}).write_text('ready', encoding='ascii'); "
+            f"time.sleep({float(child_sleep)!r})"
+        )
         if configuration.get("child_ignore_term"):
             child_source = (
-                "import signal, time; "
+                "import pathlib, signal, time; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"pathlib.Path({str(ready_path)!r}).write_text('ready', encoding='ascii'); "
                 f"time.sleep({float(child_sleep)!r})"
             )
         child = subprocess.Popen(
@@ -52,6 +82,16 @@ def main() -> int:
             stderr=subprocess.DEVNULL,
         )
         (workspace / ".fake-codex-child.pid").write_text(str(child.pid), encoding="ascii")
+        ready_deadline = time.monotonic() + 2.0
+        while (
+            not ready_path.exists()
+            and child.poll() is None
+            and time.monotonic() < ready_deadline
+        ):
+            time.sleep(0.005)
+        if not ready_path.exists():
+            print("fake child did not become ready", file=sys.stderr)
+            return 70
 
     sleep_seconds = configuration.get("sleep_seconds", 0)
     if isinstance(sleep_seconds, (int, float)) and sleep_seconds:

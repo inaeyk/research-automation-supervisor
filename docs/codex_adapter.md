@@ -44,7 +44,8 @@ Role policy is adapter-owned:
 The adapter uses a shell-free argument vector equivalent to:
 
 ```text
-codex exec --json
+codex --ask-for-approval never
+  exec --json
   --output-last-message <adapter temporary path>
   --model <validated model>
   -c model_reasoning_effort=<validated effort>
@@ -52,14 +53,15 @@ codex exec --json
   -c sandbox_workspace_write.network_access=false
   -c features.skill_mcp_dependency_install=false
   --sandbox <role policy>
-  --ask-for-approval never
   --ignore-user-config --ignore-rules --strict-config
   --cd <resolved workspace>
   [--ephemeral for auditors]
   -
 ```
 
-The process also uses the resolved workspace as its working directory. Prompt
+The approval option is global and therefore appears before `exec`; no
+`--ask-for-approval` occurrence is passed after `exec`. The process also uses
+the resolved workspace as its working directory. Prompt
 bytes go only to standard input. The adapter does not add search, extra writable
 directories, Git-check bypasses, full-auto, or sandbox-bypass flags. Environment
 variables with credential-shaped names are removed from a copied environment;
@@ -71,7 +73,10 @@ Each run exclusively creates `<runs-dir>/<run_id>` and never reuses it. Codex is
 started in a new process session. Standard output is streamed as JSONL and
 standard error is bounded. At the hard timeout, or when stdout exceeds 100 MiB
 or stderr exceeds 10 MiB, the whole process group receives termination, a fixed
-two-second grace period, and then a force-kill if required. There are no retries.
+two-second grace period, and then a force-kill if required. A normally exiting
+leader is also followed by a process-group check; remaining descendants receive
+the same TERM/grace/KILL cleanup before the adapter returns, without changing
+the leader's observed exit status or retrying it. There are no retries.
 
 The run directory contains:
 
@@ -84,9 +89,11 @@ The run directory contains:
   metadata;
 - `result.json`: the normalized outcome returned by the CLI.
 
-Malformed JSONL lines are not retained. Metadata stores only their count and
-SHA-256 hashes. Metadata and result finalization use atomic replacement, and
-failure runs retain the same useful artifact structure.
+JSONL is decoded as strict UTF-8. Malformed JSON, non-object values, and invalid
+UTF-8 lines are not retained; metadata stores only their count and hashes of the
+original line bytes. Metadata and result finalization use atomic replacement,
+and failure runs retain the same useful artifact structure. The persisted,
+returned, and CLI-rendered result are the same type-checked sanitized value.
 
 ## Outcomes and exit codes
 
@@ -112,11 +119,16 @@ structured failure/denial events. Assistant prose cannot trigger it.
 
 Redaction is recursive and idempotent. It covers authorization bearer headers,
 common API-token prefixes, credential-shaped assignments and JSON keys, and
-values removed from the subprocess environment. Non-string JSON scalars retain
-their types. Redaction is a best-effort content control, not a proof that an
-arbitrary unknown secret shape can be recognized. The human prompt remains the
-authoritative input and is never rewritten or printed by the CLI.
+values removed from the subprocess environment. A composite value owned by a
+sensitive key retains its mapping/list shape but every descendant string is
+replaced. Non-string JSON scalars retain their types, and existing placeholders
+are protected across repeated passes. Redaction is a best-effort content
+control, not a proof that an arbitrary unknown secret shape can be recognized.
+The human prompt remains the authoritative input and is never rewritten or
+printed by the CLI.
 
-Tests launch `tests/fixtures/fake_codex.py` (or inject discovery, environment,
-clock, and version boundaries). They do not invoke a real model, inspect user
-Codex configuration, log in, install software, or access the network.
+Tests launch a parser-aware `tests/fixtures/fake_codex.py` (or inject discovery,
+environment, clock, and version boundaries). The fake rejects approval options
+placed after `exec`, exercises broken stdin and descendant containment, and does
+not invoke a real model, inspect user Codex configuration, log in, install
+software, or access the network.
