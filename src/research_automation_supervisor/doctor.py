@@ -11,14 +11,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 
 MINIMUM_PYTHON = (3, 11)
 MINIMUM_CODEX = Version("0.144.0")
 COMMAND_TIMEOUT_SECONDS = 10.0
-_VERSION_TEXT = r"(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)"
 _CODEX_VERSION_OUTPUT = re.compile(
-    rf"(?:codex|codex-cli)(?:\s+version)?\s+v?{_VERSION_TEXT}",
+    r"(?:codex|codex-cli)(?: +version)? +v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+)",
     flags=re.IGNORECASE,
 )
 _GIT_VERSION_OUTPUT = re.compile(
@@ -279,12 +278,7 @@ def _parse_git_version(output: str) -> str | None:
 
 def _parse_codex_version(output: str) -> str | None:
     match = _CODEX_VERSION_OUTPUT.fullmatch(output.strip())
-    if match is None:
-        return None
-    try:
-        return str(Version(match.group(1)))
-    except InvalidVersion:
-        return None
+    return match.group("version") if match else None
 
 
 def _is_not_git_repository(result: CommandResult) -> bool:

@@ -333,6 +333,75 @@ def test_failed_codex_version_command_does_not_parse_stdout() -> None:
 @pytest.mark.parametrize(
     "output",
     [
+        "codex-cli 0.145.0\n",
+        "codex 0.145.0\n",
+        "codex-cli version 0.145.0\n",
+        "codex version 0.145.0\n",
+        "codex-cli v0.145.0\n",
+        "codex version v0.145.0\n",
+    ],
+)
+def test_plain_codex_version_prefixes_are_accepted(output: str) -> None:
+    results = successful_results()
+    results[(CODEX, "--version")] = CommandResult(0, output)
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.ok
+    assert report.codex.version == "0.145.0"
+    assert report.codex.supported
+
+
+@pytest.mark.parametrize(
+    ("output", "rejected_fragment"),
+    [
+        (
+            "codex-cli 0.145.0+SYNTHETICSECRETTOKEN\n",
+            "SYNTHETICSECRETTOKEN",
+        ),
+        ("codex-cli 0.145.0-token\n", "-token"),
+        ("codex-cli 0.145.0+token=SECRET\n", "token=SECRET"),
+        ("codex-cli 0.145.0+build.17\n", "+build.17"),
+        ("codex-cli 0.145.0-rc.1\n", "-rc.1"),
+        ("codex-cli 0.145.0 trailing-text\n", "trailing-text"),
+        ("codex-cli 0.145.0\ntrailing-text\n", "trailing-text"),
+        ("codex-cli\n0.145.0\n", "codex-cli\n0.145.0"),
+        ("codex-cli 0.145\n", "0.145"),
+        ("codex-cli 0.145.0.1\n", "0.145.0.1"),
+        ("codex-cli version unknown\n", "unknown"),
+    ],
+)
+def test_hostile_or_malformed_codex_version_is_rejected_and_sanitized(
+    output: str, rejected_fragment: str
+) -> None:
+    results = successful_results()
+    results[(CODEX, "--version")] = CommandResult(0, output)
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+    rendered = f"{json.dumps(report.to_dict(), sort_keys=True)}\n{_format_doctor(report)}"
+
+    assert report.codex.version is None
+    assert not report.codex.supported
+    assert report.codex.error == "Codex version could not be determined."
+    assert "Codex version could not be determined." in report.dependency_errors
+    assert not report.ok
+    assert output.strip() not in rendered
+    assert rejected_fragment not in rendered
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
         "runtime 99.0.0; codex version unknown\n",
         "wrapper 1.2.3\ncodex-cli 0.145.0\n",
         "version 0.145.0\n",

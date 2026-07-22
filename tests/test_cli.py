@@ -88,6 +88,45 @@ def hostile_git_suffix_report() -> DoctorReport:
     )
 
 
+def hostile_codex_version_report() -> DoctorReport:
+    root = Path("/repo")
+    git = "/tools/git"
+    codex = "/tools/codex"
+    responses = {
+        (git, "--version"): CommandResult(0, "git version 2.45.1\n"),
+        (git, "-C", str(root), "rev-parse", "--show-toplevel"): CommandResult(
+            0, f"{root}\n"
+        ),
+        (
+            git,
+            "--no-optional-locks",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ): CommandResult(0),
+        (codex, "--version"): CommandResult(
+            0, "codex-cli 0.145.0+SYNTHETICSECRETTOKEN\n"
+        ),
+        (codex, "login", "status"): CommandResult(0, "authenticated\n"),
+    }
+
+    def command_runner(args: Sequence[str], *, timeout: float) -> CommandResult:
+        assert timeout == 10.0
+        return responses[tuple(args)]
+
+    def which(command: str) -> str | None:
+        return {"git": git, "codex": codex}.get(command)
+
+    return run_doctor(
+        runner=command_runner,
+        which=which,
+        cwd=root,
+        python_version=(3, 11, 0),
+    )
+
+
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
 
@@ -317,4 +356,31 @@ def test_hostile_git_suffix_is_sanitized_and_exits_three(monkeypatch, as_json: b
         assert payload["git"]["version"] is None
     else:
         assert "Git: unavailable" in result.stdout
+        assert "Environment ready: no" in result.stdout
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_hostile_codex_version_is_sanitized_and_exits_three(
+    monkeypatch, as_json: bool
+) -> None:
+    report = hostile_codex_version_report()
+    monkeypatch.setattr("research_automation_supervisor.cli.run_doctor", lambda: report)
+    arguments = ["doctor"]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+    rendered = f"{result.stdout}\n{result.stderr}"
+
+    assert not report.ok
+    assert result.exit_code == 3
+    assert "SYNTHETICSECRETTOKEN" not in rendered
+    assert "+SYNTHETIC" not in rendered
+    assert "Codex version could not be determined." in rendered
+    if as_json:
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["codex"]["version"] is None
+    else:
+        assert "Codex: unavailable" in result.stdout
         assert "Environment ready: no" in result.stdout
