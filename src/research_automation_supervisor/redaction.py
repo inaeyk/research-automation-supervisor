@@ -50,12 +50,7 @@ def is_sensitive_name(name: str) -> bool:
 
 def redact_text(text: str, sensitive_values: Sequence[str] = ()) -> str:
     """Redact known credential shapes and explicitly supplied secret values."""
-    redacted = text
-    for value in sorted(
-        {value for value in sensitive_values if value and value != REDACTED},
-        key=lambda item: (-len(item), item),
-    ):
-        redacted = _replace_outside_placeholders(redacted, value)
+    redacted = _redact_sensitive_literals(text, sensitive_values)
     redacted = _AUTHORIZATION_BEARER.sub(r"\1" + REDACTED, redacted)
     redacted = _TOKEN_FORM.sub(REDACTED, redacted)
     redacted = _ASSIGNED_SECRET.sub(lambda match: match.group("prefix") + REDACTED, redacted)
@@ -86,11 +81,53 @@ def redact_json(value: Any, sensitive_values: Sequence[str] = ()) -> Any:
     return value
 
 
-def _replace_outside_placeholders(text: str, sensitive_value: str) -> str:
-    """Replace a literal secret without ever rewriting an existing placeholder."""
-    return REDACTED.join(
-        segment.replace(sensitive_value, REDACTED) for segment in text.split(REDACTED)
+def _redact_sensitive_literals(text: str, sensitive_values: Sequence[str]) -> str:
+    """Replace overlapping literals while preserving standalone placeholders."""
+    literals = sorted(
+        {value for value in sensitive_values if value and value != REDACTED},
+        key=lambda item: (-len(item), item),
     )
+    if not literals:
+        return text
+
+    placeholder_spans = [match.span() for match in re.finditer(re.escape(REDACTED), text)]
+    matcher = re.compile(f"(?=({'|'.join(re.escape(value) for value in literals)}))")
+    sensitive_spans: list[tuple[int, int]] = []
+    for match in matcher.finditer(text):
+        start, end = match.span(1)
+        containing_placeholder = next(
+            (
+                (placeholder_start, placeholder_end)
+                for placeholder_start, placeholder_end in placeholder_spans
+                if placeholder_start <= start and end <= placeholder_end
+            ),
+            None,
+        )
+        if containing_placeholder is not None:
+            continue
+        for placeholder_start, placeholder_end in placeholder_spans:
+            if start < placeholder_end and placeholder_start < end:
+                start = min(start, placeholder_start)
+                end = max(end, placeholder_end)
+        sensitive_spans.append((start, end))
+
+    if not sensitive_spans:
+        return text
+    merged_spans: list[tuple[int, int]] = []
+    for start, end in sorted(sensitive_spans):
+        if merged_spans and start <= merged_spans[-1][1]:
+            previous_start, previous_end = merged_spans[-1]
+            merged_spans[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged_spans.append((start, end))
+
+    pieces: list[str] = []
+    offset = 0
+    for start, end in merged_spans:
+        pieces.extend((text[offset:start], REDACTED))
+        offset = end
+    pieces.append(text[offset:])
+    return "".join(pieces)
 
 
 def _redact_sensitive_descendants(value: Any) -> Any:

@@ -110,14 +110,36 @@ def test_redaction_is_idempotent_and_uses_removed_environment_values() -> None:
 
 
 def test_placeholder_overlapping_values_are_idempotent() -> None:
-    for sensitive_value in ("REDACTED", "<RED", "ACTED>", REDACTED):
+    for sensitive_value in (
+        "prefix<REDACTED>suffix",
+        "x<REDACTED>",
+        "<REDACTED>suffix",
+        "REDACTED",
+        "<RED",
+        "ACTED>",
+        REDACTED,
+    ):
         source = f"secret={sensitive_value}; existing={REDACTED}"
         once = redact_text(source, (sensitive_value,))
         twice = redact_text(once, (sensitive_value,))
         third = redact_text(twice, (sensitive_value,))
 
         assert once == twice == third
+        if REDACTED in sensitive_value and sensitive_value != REDACTED:
+            assert sensitive_value not in once
+        assert f"existing={REDACTED}" in once
         assert "<<REDACTED>>" not in third
+
+
+def test_overlapping_sensitive_literals_are_merged_without_partial_disclosure() -> None:
+    source = f"value=abcdefg existing={REDACTED}"
+
+    once = redact_text(source, ("abcde", "cdefg", "abc"))
+    twice = redact_text(once, ("abcde", "cdefg", "abc"))
+
+    assert once == twice == f"value={REDACTED} existing={REDACTED}"
+    assert "ab" not in once
+    assert "fg" not in once
 
 
 def test_recursive_json_redaction_is_idempotent_with_existing_placeholders() -> None:

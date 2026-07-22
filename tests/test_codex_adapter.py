@@ -28,7 +28,11 @@ from research_automation_supervisor.codex_models import (
     RunStatus,
     load_codex_request,
 )
-from research_automation_supervisor.errors import CodexDependencyError, CodexRequestError
+from research_automation_supervisor.errors import (
+    CodexConfidentialityError,
+    CodexDependencyError,
+    CodexRequestError,
+)
 
 FAKE_CODEX = (Path(__file__).parent / "fixtures" / "fake_codex.py").resolve()
 ARTIFACT_NAMES = {
@@ -128,6 +132,7 @@ def test_exact_process_construction_and_prompt_stdin(
     argv = observation["argv"]
 
     assert result.status == "succeeded"
+    assert result.exit_code == 0
     assert base64.b64decode(observation["prompt_base64"]) == prepared.prompt_bytes
     assert prepared.prompt_bytes.decode().strip() not in " ".join(argv)
     assert argv[:5] == [
@@ -304,7 +309,7 @@ def test_normalized_process_outcomes_leave_useful_artifacts(
 def test_launch_failure_is_normalized_with_artifacts(tmp_path: Path) -> None:
     prepared = prepared_request(tmp_path)
     missing_executable = tmp_path / "missing-codex"
-    secret = prepared.request.run_id
+    secret = "LAUNCH_DIAGNOSTIC_SECRET_123"
 
     result = run_prepared_codex(
         prepared,
@@ -312,12 +317,14 @@ def test_launch_failure_is_normalized_with_artifacts(tmp_path: Path) -> None:
         codex_executable=str(missing_executable),
         environ=fake_environment(DEMO_TOKEN=secret),
     )
-    raw_directory = tmp_path / "runs" / secret
+    raw_directory = (tmp_path / "runs" / prepared.request.run_id).resolve()
     persisted = json.loads((raw_directory / "result.json").read_text())
 
     assert result.status == "launch_failed"
     assert result.exit_code is None
-    assert result.run_id == "sanitized-result"
+    assert result.run_id == prepared.request.run_id
+    assert Path(result.artifact_directory) == raw_directory
+    assert raw_directory.exists()
     assert persisted == result.to_dict()
     assert secret not in json.dumps(result.to_dict())
     assert {path.name for path in raw_directory.iterdir()} >= ARTIFACT_NAMES
@@ -545,6 +552,7 @@ def test_invalid_jsonl_utf8_is_hashed_and_classified_malformed(tmp_path: Path) -
     metadata = json.loads((directory / "metadata.json").read_text())
 
     assert result.status == "malformed_event_stream"
+    assert result.exit_code == 0
     assert result.event_count == 0
     assert result.malformed_event_count == 1
     assert (directory / "events.jsonl").read_bytes() == b""
@@ -552,6 +560,76 @@ def test_invalid_jsonl_utf8_is_hashed_and_classified_malformed(tmp_path: Path) -
         hashlib.sha256(malformed_line).hexdigest()
     ]
     assert "\N{REPLACEMENT CHARACTER}" in (directory / "final-message.md").read_text()
+
+
+def test_escaped_lone_surrogate_event_is_ascii_canonicalized(tmp_path: Path) -> None:
+    prepared = prepared_request(tmp_path)
+    configure(
+        prepared,
+        stdout_lines=[r'{"type":"note","text":"\ud800"}'],
+        final="done",
+    )
+
+    result = run_fake(prepared)
+    directory = Path(result.artifact_directory)
+    metadata = json.loads((directory / "metadata.json").read_text())
+    persisted = json.loads((directory / "result.json").read_text())
+
+    assert result.status == "succeeded"
+    assert result.exit_code == 0
+    assert result.event_count == 1
+    assert result.malformed_event_count == 0
+    assert (directory / "events.jsonl").read_bytes() == (
+        b'{"text":"\\ud800","type":"note"}\n'
+    )
+    assert metadata["valid_event_count"] == 1
+    assert metadata["malformed_event_count"] == 0
+    assert persisted == result.to_dict()
+    assert {path.name for path in directory.iterdir()} >= ARTIFACT_NAMES
+
+
+def test_event_processing_exception_becomes_malformed_with_complete_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_automation_supervisor import codex_adapter
+
+    prepared = prepared_request(tmp_path)
+    line = b'{"force_processing_failure":true,"type":"note"}'
+    configure(prepared, stdout_hex=(line + b"\n").hex(), final="done")
+    original_redact_json = codex_adapter.redact_json
+
+    def injected_redaction(value: object, sensitive_values: object = ()) -> object:
+        if isinstance(value, dict) and value.get("force_processing_failure") is True:
+            raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "injected event failure")
+        return original_redact_json(value, sensitive_values)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(codex_adapter, "redact_json", injected_redaction)
+
+    result = run_fake(prepared)
+    directory = Path(result.artifact_directory)
+    metadata = json.loads((directory / "metadata.json").read_text())
+    persisted = json.loads((directory / "result.json").read_text())
+
+    assert result.status == "malformed_event_stream"
+    assert result.exit_code == 0
+    assert result.event_count == 0
+    assert result.malformed_event_count == 1
+    assert (directory / "events.jsonl").read_bytes() == b""
+    assert metadata["valid_event_count"] == 0
+    assert metadata["malformed_event_count"] == 1
+    assert metadata["malformed_event_sha256"] == [hashlib.sha256(line).hexdigest()]
+    assert persisted == result.to_dict()
+    assert {path.name for path in directory.iterdir()} >= ARTIFACT_NAMES
+
+    monkeypatch.setattr(
+        "research_automation_supervisor.cli.execute_codex_request",
+        lambda path, *, runs_dir: result,
+    )
+    invocation = CliRunner().invoke(app, ["run-codex", "request.yaml", "--json"])
+    assert invocation.exit_code == 7
+    assert json.loads(invocation.stdout) == persisted
+    assert "Traceback" not in invocation.stdout
 
 
 @pytest.mark.parametrize("early_behavior", ["close_stdin_early", "skip_stdin"])
@@ -628,7 +706,7 @@ def test_one_sanitized_result_is_persisted_returned_and_rendered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prepared = prepared_request(tmp_path)
-    secret = prepared.request.run_id
+    secret = "prefix<REDACTED>suffix"
     configure(
         prepared,
         stdout_lines=[json.dumps({"type": "note", "message": secret})],
@@ -637,11 +715,15 @@ def test_one_sanitized_result_is_persisted_returned_and_rendered(
     )
 
     result = run_fake(prepared, environ=fake_environment(DEMO_TOKEN=secret))
-    raw_directory = prepared.request_path.parent / "runs" / secret
+    raw_directory = (
+        prepared.request_path.parent / "runs" / prepared.request.run_id
+    ).resolve()
     persisted = json.loads((raw_directory / "result.json").read_text())
 
-    assert result.run_id == "sanitized-result"
-    assert secret not in result.artifact_directory
+    assert result.run_id == prepared.request.run_id
+    assert Path(result.artifact_directory) == raw_directory
+    assert Path(result.artifact_directory).exists()
+    assert (Path(result.artifact_directory) / "result.json").exists()
     assert persisted == result.to_dict()
     assert secret not in json.dumps(result.to_dict())
     for artifact in raw_directory.iterdir():
@@ -659,6 +741,114 @@ def test_one_sanitized_result_is_persisted_returned_and_rendered(
     assert secret not in machine.stdout
     assert json.loads(machine.stdout) == persisted
     assert _format_codex_result(result) in human.stdout
+
+
+def test_every_request_locator_collision_is_rejected_before_directory_creation(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_request(tmp_path)
+    runs_dir = tmp_path / "runs"
+    artifact_directory = runs_dir.resolve() / prepared.request.run_id
+    locator_values = (
+        str(prepared.request_path),
+        prepared.request.run_id,
+        prepared.request.model,
+        str(prepared.workspace),
+        str(prepared.prompt_path),
+        str(runs_dir.resolve()),
+        str(artifact_directory),
+    )
+
+    for sensitive_value in locator_values:
+        with pytest.raises(
+            CodexConfidentialityError,
+            match="conflicts with a sensitive environment value",
+        ) as captured:
+            run_prepared_codex(
+                prepared,
+                runs_dir=runs_dir,
+                codex_executable=str(FAKE_CODEX),
+                environ=fake_environment(DEMO_TOKEN=sensitive_value),
+            )
+        assert sensitive_value not in str(captured.value)
+        assert not runs_dir.exists()
+
+
+def test_run_id_sensitive_collision_is_rejected_by_run_cli_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepared_request(tmp_path)
+    secret = prepared.request.run_id
+    monkeypatch.setenv("DEMO_TOKEN", secret)
+
+    def execute_with_collision(path: Path, *, runs_dir: Path) -> CodexRunResult:
+        return run_prepared_codex(
+            prepared,
+            runs_dir=runs_dir,
+            codex_executable=str(FAKE_CODEX),
+            environ=fake_environment(DEMO_TOKEN=secret),
+        )
+
+    monkeypatch.setattr(
+        "research_automation_supervisor.cli.execute_codex_request",
+        execute_with_collision,
+    )
+
+    for arguments in ([], ["--json"]):
+        runs_dir = tmp_path / f"cli-runs-{len(arguments)}"
+        invocation = CliRunner().invoke(
+            app,
+            [
+                "run-codex",
+                str(prepared.request_path),
+                "--runs-dir",
+                str(runs_dir),
+                *arguments,
+            ],
+        )
+
+        rendered = invocation.stdout + invocation.stderr
+        assert invocation.exit_code == 2
+        assert secret not in rendered
+        assert str(prepared.request_path) not in rendered
+        assert "sensitive environment value" in rendered
+        assert not runs_dir.exists()
+
+
+def test_validate_cli_rejects_confidentiality_collision_in_human_and_json_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepared_request(tmp_path)
+    secret = prepared.request.run_id
+    monkeypatch.setenv("DEMO_TOKEN", secret)
+    monkeypatch.setattr(
+        "research_automation_supervisor.cli.load_codex_request",
+        lambda path: prepared,
+    )
+
+    human = CliRunner().invoke(
+        app,
+        ["validate-codex-request", str(prepared.request_path)],
+    )
+    machine = CliRunner().invoke(
+        app,
+        ["validate-codex-request", str(prepared.request_path), "--json"],
+    )
+
+    assert human.exit_code == 2
+    assert machine.exit_code == 2
+    assert secret not in human.output
+    assert secret not in machine.stdout
+    assert str(prepared.request_path) not in human.output
+    assert str(prepared.request_path) not in machine.stdout
+    assert json.loads(machine.stdout) == {
+        "error": "Codex request conflicts with a sensitive environment value",
+        "error_kind": "input",
+        "ok": False,
+        "path": "<REDACTED>",
+    }
 
 
 def test_existing_run_directory_collision_is_refused(tmp_path: Path) -> None:

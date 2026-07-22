@@ -25,5 +25,9 @@ class CodexRequestError(CodexAdapterError):
     """A Codex request or one of its referenced inputs is invalid."""
 
 
+class CodexConfidentialityError(CodexRequestError):
+    """A request locator collides with a removed sensitive environment value."""
+
+
 class CodexDependencyError(CodexAdapterError):
     """A required local executable is missing or unusable."""

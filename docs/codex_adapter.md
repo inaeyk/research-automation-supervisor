@@ -31,6 +31,15 @@ directory. The workspace must be a directory in a Git worktree. The prompt must
 be a nonempty regular UTF-8 file of at most 1 MiB. It is read once before launch
 and only its byte count and SHA-256 are recorded.
 
+Before successful validation output, the adapter compares every nonempty value
+removed from a credential-shaped environment variable against the request file
+locator, run ID, model, resolved workspace, and resolved prompt path. A run also
+checks the supplied and resolved runs directory and the exact prospective
+`<runs-dir>/<run_id>` artifact directory. Any collision is rejected as a generic
+input error (exit 2), without rendering the value or locator and before creating
+the run directory. Accepted runs therefore retain an exact, existing artifact
+directory rather than redacting or renaming a required locator.
+
 ## Fixed policy and command
 
 Role policy is adapter-owned:
@@ -91,9 +100,13 @@ The run directory contains:
 
 JSONL is decoded as strict UTF-8. Malformed JSON, non-object values, and invalid
 UTF-8 lines are not retained; metadata stores only their count and hashes of the
-original line bytes. Metadata and result finalization use atomic replacement,
-and failure runs retain the same useful artifact structure. The persisted,
-returned, and CLI-rendered result are the same type-checked sanitized value.
+original line bytes. Canonical events and JSON artifacts use ASCII-safe JSON
+escaping, so an escaped lone surrogate cannot cause a later UTF-8 encoding
+failure. Any unexpected per-line parsing, recursive-redaction, or canonical
+serialization error is handled as a malformed line using the same hash-only
+policy. Metadata and result finalization use atomic replacement, and failure
+runs retain the same useful artifact structure. The persisted, returned, and
+CLI-rendered result are the same type-checked sanitized value.
 
 ## Outcomes and exit codes
 
@@ -122,10 +135,13 @@ common API-token prefixes, credential-shaped assignments and JSON keys, and
 values removed from the subprocess environment. A composite value owned by a
 sensitive key retains its mapping/list shape but every descendant string is
 replaced. Non-string JSON scalars retain their types, and existing placeholders
-are protected across repeated passes. Redaction is a best-effort content
-control, not a proof that an arbitrary unknown secret shape can be recognized.
-The human prompt remains the authoritative input and is never rewritten or
-printed by the CLI.
+are protected across repeated passes. Removed literals are matched together in
+deterministic longest-first order; overlapping spans are merged before one
+replacement is made. A standalone `<REDACTED>` is protected, while a longer
+sensitive value containing that complete placeholder is replaced in full.
+Redaction is a best-effort content control, not a proof that an arbitrary
+unknown secret shape can be recognized. The human prompt remains the
+authoritative input and is never rewritten or printed by the CLI.
 
 Tests launch a parser-aware `tests/fixtures/fake_codex.py` (or inject discovery,
 environment, clock, and version boundaries). The fake rejects approval options

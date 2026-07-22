@@ -12,6 +12,8 @@ from research_automation_supervisor import __version__
 from research_automation_supervisor.codex_adapter import (
     build_subprocess_environment,
     execute_codex_request,
+    validate_locator_confidentiality,
+    validate_request_confidentiality,
 )
 from research_automation_supervisor.codex_models import (
     CodexRunResult,
@@ -21,6 +23,7 @@ from research_automation_supervisor.codex_models import (
 from research_automation_supervisor.contract import load_contract
 from research_automation_supervisor.doctor import DoctorReport, run_doctor
 from research_automation_supervisor.errors import (
+    CodexConfidentialityError,
     CodexDependencyError,
     CodexRequestError,
     ContractError,
@@ -105,9 +108,24 @@ def validate_codex_request(
 ) -> None:
     """Load and validate a Codex request without writing files or launching Codex."""
     try:
+        _, _, sensitive_values = build_subprocess_environment()
+        validate_locator_confidentiality((path,), sensitive_values)
         prepared = load_codex_request(path)
+        validate_request_confidentiality(
+            prepared,
+            sensitive_values,
+            request_locator=path,
+        )
     except CodexDependencyError as exc:
         _render_codex_input_error(str(exc), path, as_json, dependency=True)
+    except CodexConfidentialityError as exc:
+        _render_codex_input_error(
+            str(exc),
+            path,
+            as_json,
+            dependency=False,
+            hide_locator=True,
+        )
     except CodexRequestError as exc:
         _render_codex_input_error(str(exc), path, as_json, dependency=False)
     except Exception:
@@ -142,6 +160,14 @@ def run_codex(
         result = execute_codex_request(path, runs_dir=runs_dir)
     except CodexDependencyError as exc:
         _render_codex_input_error(str(exc), path, as_json, dependency=True)
+    except CodexConfidentialityError as exc:
+        _render_codex_input_error(
+            str(exc),
+            path,
+            as_json,
+            dependency=False,
+            hide_locator=True,
+        )
     except CodexRequestError as exc:
         _render_codex_input_error(str(exc), path, as_json, dependency=False)
     except Exception:
@@ -166,10 +192,11 @@ def _render_codex_input_error(
     as_json: bool,
     *,
     dependency: bool,
+    hide_locator: bool = False,
 ) -> Never:
     _, _, sensitive_values = build_subprocess_environment()
     sanitized_error = redact_text(error, sensitive_values)
-    sanitized_path = redact_text(str(path), sensitive_values)
+    sanitized_path = "<REDACTED>" if hide_locator else redact_text(str(path), sensitive_values)
     kind = "dependency" if dependency else "input"
     if as_json:
         typer.echo(

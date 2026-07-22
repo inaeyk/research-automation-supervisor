@@ -29,7 +29,11 @@ from research_automation_supervisor.codex_models import (
     load_codex_request,
 )
 from research_automation_supervisor.doctor import MINIMUM_CODEX, _parse_codex_version
-from research_automation_supervisor.errors import CodexDependencyError, CodexRequestError
+from research_automation_supervisor.errors import (
+    CodexConfidentialityError,
+    CodexDependencyError,
+    CodexRequestError,
+)
 from research_automation_supervisor.redaction import (
     is_sensitive_name,
     redact_json,
@@ -147,30 +151,29 @@ class _EventProcessor:
             return
         try:
             value = json.loads(line.decode("utf-8"), parse_constant=_reject_json_constant)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            self.malformed_hashes.append(hashlib.sha256(line).hexdigest())
-            return
-        if not isinstance(value, dict):
+            if not isinstance(value, dict):
+                raise ValueError("JSONL event is not an object")
+            redacted = redact_json(value, self.sensitive_values)
+            rendered = json.dumps(
+                redacted,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            permission_evidence = _event_has_permission_evidence(value)
+            kind, identifier = _extract_identifier(value)
+        except Exception:
             self.malformed_hashes.append(hashlib.sha256(line).hexdigest())
             return
 
         self.event_count += 1
-        if _event_has_permission_evidence(value):
+        if permission_evidence:
             self.permission_evidence = True
-        if self.identifier_value is None:
-            kind, identifier = _extract_identifier(value)
-            if identifier is not None:
-                self.identifier_kind = kind
-                self.identifier_value = identifier
-        redacted = redact_json(value, self.sensitive_values)
-        rendered = json.dumps(
-            redacted,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        self.destination.write(rendered.encode("utf-8") + b"\n")
+        if self.identifier_value is None and identifier is not None:
+            self.identifier_kind = kind
+            self.identifier_value = identifier
+        self.destination.write(rendered.encode("ascii") + b"\n")
         self.destination.flush()
 
 
@@ -193,15 +196,23 @@ def execute_codex_request(
     version_probe: VersionProbe | None = None,
 ) -> CodexRunResult:
     """Validate one request and execute exactly one deterministic Codex process."""
+    environment, _, sensitive_values = build_subprocess_environment(environ)
+    validate_locator_confidentiality((request_path,), sensitive_values)
     prepared = load_codex_request(
         request_path,
         git_worktree_checker=git_worktree_checker,
     )
+    resolved_runs_dir = validate_request_confidentiality(
+        prepared,
+        sensitive_values,
+        request_locator=request_path,
+        runs_dir=runs_dir,
+    )
+    assert resolved_runs_dir is not None
     executable = codex_executable or which("codex")
     if executable is None:
         raise CodexDependencyError("Codex executable is required")
     executable_path = str(Path(executable).resolve())
-    environment, _, _ = build_subprocess_environment(environ)
     probe = version_probe or probe_codex_version
     codex_version = probe(executable_path, environment, prepared.workspace)
     if codex_version is not None and Version(codex_version) < MINIMUM_CODEX:
@@ -217,7 +228,7 @@ def execute_codex_request(
 
     return run_prepared_codex(
         prepared,
-        runs_dir=runs_dir,
+        runs_dir=resolved_runs_dir,
         codex_executable=executable_path,
         environ=environ,
         limits=limits,
@@ -240,7 +251,16 @@ def run_prepared_codex(
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
-    artifact_directory = _create_artifact_directory(runs_dir, prepared.request.run_id)
+    resolved_runs_dir = validate_request_confidentiality(
+        prepared,
+        sensitive_values,
+        runs_dir=runs_dir,
+    )
+    assert resolved_runs_dir is not None
+    artifact_directory = _create_artifact_directory(
+        resolved_runs_dir,
+        prepared.request.run_id,
+    )
     redaction_values = tuple(sensitive_values)
     _initialize_artifacts(artifact_directory, prepared, redaction_values)
 
@@ -380,6 +400,54 @@ def build_subprocess_environment(
         tuple(sorted(removed_names, key=lambda item: (item.casefold(), item))),
         tuple(sorted(set(sensitive_values), key=lambda item: (-len(item), item))),
     )
+
+
+def validate_request_confidentiality(
+    prepared: PreparedCodexRequest,
+    sensitive_values: Sequence[str],
+    *,
+    request_locator: Path | None = None,
+    runs_dir: Path | None = None,
+) -> Path | None:
+    """Reject request-derived locators containing removed environment values."""
+    locators = [
+        str(prepared.request_path),
+        prepared.request.run_id,
+        prepared.request.role,
+        prepared.request.model,
+        prepared.request.reasoning_effort,
+        str(prepared.workspace),
+        str(prepared.prompt_path),
+        prepared.prompt_sha256,
+        prepared.policy.sandbox,
+        prepared.policy.approval,
+    ]
+    if request_locator is not None:
+        locators.append(str(request_locator))
+
+    resolved_runs_dir: Path | None = None
+    if runs_dir is not None:
+        resolved_runs_dir = _resolve_runs_directory(runs_dir)
+        artifact_directory = resolved_runs_dir / prepared.request.run_id
+        locators.extend(
+            (str(runs_dir), str(resolved_runs_dir), str(artifact_directory))
+        )
+
+    validate_locator_confidentiality(locators, sensitive_values)
+    return resolved_runs_dir
+
+
+def validate_locator_confidentiality(
+    locators: Sequence[str | Path],
+    sensitive_values: Sequence[str],
+) -> None:
+    """Reject exact structural strings containing removed environment values."""
+    rendered_locators = tuple(str(locator) for locator in locators)
+    literals = tuple(value for value in sensitive_values if value)
+    if any(value in locator for value in literals for locator in rendered_locators):
+        raise CodexConfidentialityError(
+            "Codex request conflicts with a sensitive environment value"
+        )
 
 
 def build_codex_command(
@@ -744,6 +812,13 @@ def _unregister_and_close(selector: selectors.BaseSelector, stream: Any) -> None
         stream.close()
 
 
+def _resolve_runs_directory(runs_dir: Path) -> Path:
+    try:
+        return runs_dir.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise CodexRequestError("runs directory could not be resolved") from exc
+
+
 def _create_artifact_directory(runs_dir: Path, run_id: str) -> Path:
     try:
         runs_dir.mkdir(parents=True, exist_ok=True)
@@ -751,7 +826,7 @@ def _create_artifact_directory(runs_dir: Path, run_id: str) -> Path:
             raise CodexRequestError("runs directory is not a directory")
         artifact_directory = runs_dir / run_id
         artifact_directory.mkdir(exist_ok=False)
-        return artifact_directory.resolve()
+        return artifact_directory
     except FileExistsError as exc:
         raise CodexRequestError(f"run directory already exists for run_id '{run_id}'") from exc
     except CodexRequestError:
@@ -887,18 +962,15 @@ def _sanitize_result(
     sensitive_values: Sequence[str],
 ) -> CodexRunResult:
     """Return the one type-safe sanitized result used by storage and all callers."""
-    redacted_run_id = redact_text(result.run_id, sensitive_values)
-    if redacted_run_id != result.run_id:
-        redacted_run_id = "sanitized-result"
     return CodexRunResult(
         schema_version=result.schema_version,
-        run_id=redacted_run_id,
+        run_id=result.run_id,
         status=result.status,
         exit_code=result.exit_code,
         started_at=result.started_at,
         ended_at=result.ended_at,
         duration_seconds=result.duration_seconds,
-        artifact_directory=redact_text(result.artifact_directory, sensitive_values),
+        artifact_directory=result.artifact_directory,
         event_count=result.event_count,
         malformed_event_count=result.malformed_event_count,
         final_message_present=result.final_message_present,
@@ -979,7 +1051,7 @@ def _write_text(path: Path, value: str) -> None:
 def _atomic_write_json(path: Path, value: object) -> None:
     rendered = json.dumps(
         value,
-        ensure_ascii=False,
+        ensure_ascii=True,
         allow_nan=False,
         indent=2,
         sort_keys=True,
