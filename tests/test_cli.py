@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,11 @@ from research_automation_supervisor import __version__
 from research_automation_supervisor.cli import app
 from research_automation_supervisor.doctor import (
     CodexDiagnostic,
+    CommandResult,
     DoctorReport,
     GitDiagnostic,
     PythonDiagnostic,
+    run_doctor,
 )
 
 runner = CliRunner()
@@ -43,6 +46,45 @@ def ready_report() -> DoctorReport:
             True, "0.144.0", True, authenticated=True, login_status="authenticated"
         ),
         dependency_errors=(),
+    )
+
+
+def hostile_git_suffix_report() -> DoctorReport:
+    root = Path("/repo")
+    git = "/tools/git"
+    codex = "/tools/codex"
+    responses = {
+        (git, "--version"): CommandResult(
+            0, "git version 2.45.1 (token=AUDIT_SECRET_SENTINEL)\n"
+        ),
+        (git, "-C", str(root), "rev-parse", "--show-toplevel"): CommandResult(
+            0, f"{root}\n"
+        ),
+        (
+            git,
+            "--no-optional-locks",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ): CommandResult(0),
+        (codex, "--version"): CommandResult(0, "codex-cli 0.145.0\n"),
+        (codex, "login", "status"): CommandResult(0, "authenticated\n"),
+    }
+
+    def command_runner(args: Sequence[str], *, timeout: float) -> CommandResult:
+        assert timeout == 10.0
+        return responses[tuple(args)]
+
+    def which(command: str) -> str | None:
+        return {"git": git, "codex": codex}.get(command)
+
+    return run_doctor(
+        runner=command_runner,
+        which=which,
+        cwd=root,
+        python_version=(3, 11, 0),
     )
 
 
@@ -140,6 +182,33 @@ def test_duplicate_yaml_key_uses_json_error_and_exit_two(tmp_path: Path) -> None
     assert "Traceback" not in result.stdout
 
 
+@pytest.mark.parametrize("as_json", [False, True])
+def test_unsafe_python_yaml_tag_uses_sanitized_exit_two(
+    tmp_path: Path, as_json: bool
+) -> None:
+    sentinel = "AUDIT_SECRET_SENTINEL"
+    path = tmp_path / "unsafe-tag.yaml"
+    path.write_text(
+        "goal: !!python/object/apply:os.system " f"['{sentinel}']\n",
+        encoding="utf-8",
+    )
+    arguments = ["validate-contract", str(path)]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+    rendered = f"{result.stdout}\n{result.stderr}"
+
+    assert result.exit_code == 2
+    assert "could not determine a constructor" in rendered
+    assert sentinel not in rendered
+    assert "Traceback" not in rendered
+    if as_json:
+        assert json.loads(result.stdout)["ok"] is False
+    else:
+        assert "Invalid contract:" in result.stderr
+
+
 def test_doctor_human_output(monkeypatch) -> None:
     monkeypatch.setattr("research_automation_supervisor.cli.run_doctor", ready_report)
 
@@ -224,3 +293,28 @@ def test_doctor_operational_failure_is_rendered_and_exits_three(monkeypatch) -> 
     assert "Inside Git repository: indeterminate" in result.stdout
     assert "Environment ready: no" in result.stdout
     assert f"ERROR: {error}" in result.stdout
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_hostile_git_suffix_is_sanitized_and_exits_three(monkeypatch, as_json: bool) -> None:
+    report = hostile_git_suffix_report()
+    monkeypatch.setattr("research_automation_supervisor.cli.run_doctor", lambda: report)
+    arguments = ["doctor"]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+    rendered = f"{result.stdout}\n{result.stderr}"
+
+    assert not report.ok
+    assert result.exit_code == 3
+    assert "AUDIT_SECRET_SENTINEL" not in rendered
+    assert "token=" not in rendered
+    assert "Git version could not be determined." in rendered
+    if as_json:
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["git"]["version"] is None
+    else:
+        assert "Git: unavailable" in result.stdout
+        assert "Environment ready: no" in result.stdout

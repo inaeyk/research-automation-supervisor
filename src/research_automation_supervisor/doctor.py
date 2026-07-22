@@ -22,10 +22,8 @@ _CODEX_VERSION_OUTPUT = re.compile(
     flags=re.IGNORECASE,
 )
 _GIT_VERSION_OUTPUT = re.compile(
-    r"git version\s+(?P<version>\d+(?:\.\d+){1,3})"
-    r"(?:\.[A-Za-z][0-9A-Za-z.-]*)?"
-    r"(?:\s+\([^()\r\n]*\))?",
-    flags=re.IGNORECASE,
+    r"git version +(?P<version>\d+(?:\.\d+){1,3})"
+    r"(?:\.windows\.\d+(?:\.\d+)*| \(Apple Git-\d+(?:\.\d+)*\))?"
 )
 
 

@@ -258,6 +258,61 @@ def test_vendor_decorated_git_version_returns_only_numeric_version() -> None:
     assert "Apple" not in str(report.to_dict())
 
 
+def test_windows_decorated_git_version_returns_only_numeric_version() -> None:
+    results = successful_results()
+    results[(GIT, "--version")] = CommandResult(0, "git version 2.42.0.windows.2\n")
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.ok
+    assert report.git.version == "2.42.0"
+    assert "windows" not in str(report.to_dict())
+
+
+@pytest.mark.parametrize(
+    ("output", "rejected_fragment"),
+    [
+        ("git version 2.45.1 ()\n", "()"),
+        ("git version 2.45.1 (unknown)\n", "unknown"),
+        (
+            "git version 2.45.1 (token=AUDIT_SECRET_SENTINEL)\n",
+            "AUDIT_SECRET_SENTINEL",
+        ),
+        ("git version 2.45.1 (Apple)\n", "(Apple)"),
+        ("git version 2.45.1 (Apple Git-)\n", "Apple Git-"),
+        ("git version 2.45.1 (Apple\nGit-154)\n", "Apple\nGit-154"),
+        ("git version 2.45.1 (Apple Git-154) trailing\n", "trailing"),
+        ("git version 2.45.1.vendor.2\n", ".vendor.2"),
+    ],
+)
+def test_hostile_or_malformed_git_suffix_is_rejected_and_sanitized(
+    output: str, rejected_fragment: str
+) -> None:
+    results = successful_results()
+    results[(GIT, "--version")] = CommandResult(0, output)
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+    rendered = f"{json.dumps(report.to_dict(), sort_keys=True)}\n{_format_doctor(report)}"
+
+    assert report.git.version is None
+    assert report.git.error == "Git version could not be determined."
+    assert "Git version could not be determined." in report.dependency_errors
+    assert not report.ok
+    assert output.strip() not in rendered
+    assert rejected_fragment not in rendered
+    assert "AUDIT_SECRET_SENTINEL" not in rendered
+
+
 def test_failed_codex_version_command_does_not_parse_stdout() -> None:
     results = successful_results()
     results[(CODEX, "--version")] = CommandResult(1, "codex-cli 99.0.0\n")

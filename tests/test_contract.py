@@ -139,6 +139,21 @@ def test_invalid_utf8_is_a_sanitized_load_error(tmp_path: Path) -> None:
         load_contract(path)
 
 
+def test_unsafe_python_yaml_tag_is_rejected_and_sanitized(tmp_path: Path) -> None:
+    sentinel = "AUDIT_SECRET_SENTINEL"
+    path = tmp_path / "unsafe-tag.yaml"
+    path.write_text(
+        "goal: !!python/object/apply:os.system " f"['{sentinel}']\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContractLoadError) as error:
+        load_contract(path)
+
+    assert "could not determine a constructor" in str(error.value)
+    assert sentinel not in str(error.value)
+
+
 def test_nested_unknown_fields_are_rejected(tmp_path: Path) -> None:
     data = valid_contract_data()
     data["acceptance_tests"] = [
