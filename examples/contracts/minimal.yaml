@@ -1,0 +1,22 @@
+schema_version: 1
+stage_id: AUTOMATION-0
+title: Deterministic foundation
+goal: Validate the reusable supervisor foundation.
+allowed_paths:
+  - src/**
+  - tests/**
+protected_paths:
+  - STAGE_0_CONTRACT.md
+  - CODEX_STAGE_0_PROMPT.md
+acceptance_tests:
+  - id: ruff
+    command: ruff check .
+    timeout_seconds: 120
+  - id: mypy
+    command: mypy src
+    timeout_seconds: 120
+  - id: pytest
+    command: pytest -q
+    timeout_seconds: 300
+max_repair_rounds: 3
+checkpoint_after: true
