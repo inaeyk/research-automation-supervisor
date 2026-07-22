@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from research_automation_supervisor.doctor import (
     GitDiagnostic,
     PythonDiagnostic,
     run_doctor,
+    subprocess_runner,
 )
 
 GIT = "/tools/git"
@@ -55,6 +58,7 @@ def successful_results(*, dirty: bool = False) -> dict[tuple[str, ...], CommandR
         ),
         (
             GIT,
+            "--no-optional-locks",
             "-C",
             str(CWD),
             "status",
@@ -200,6 +204,60 @@ def test_failed_git_version_command_does_not_parse_stdout() -> None:
     assert not report.ok
 
 
+def test_unknown_git_version_is_rejected() -> None:
+    results = successful_results()
+    results[(GIT, "--version")] = CommandResult(0, "git version unknown\n")
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.git.version is None
+    assert report.git.error == "Git version could not be determined."
+    assert not report.ok
+
+
+def test_credential_shaped_git_version_is_not_rendered() -> None:
+    secret = "SHOULD_NOT_RENDER"
+    results = successful_results()
+    results[(GIT, "--version")] = CommandResult(0, f"git version token={secret}\n")
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+    rendered = f"{json.dumps(report.to_dict(), sort_keys=True)}\n{_format_doctor(report)}"
+
+    assert report.git.version is None
+    assert report.git.error == "Git version could not be determined."
+    assert not report.ok
+    assert secret not in rendered
+    assert "token=" not in rendered
+
+
+def test_vendor_decorated_git_version_returns_only_numeric_version() -> None:
+    results = successful_results()
+    results[(GIT, "--version")] = CommandResult(
+        0, "git version 2.39.5 (Apple Git-154)\n"
+    )
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.ok
+    assert report.git.version == "2.39.5"
+    assert "Apple" not in str(report.to_dict())
+
+
 def test_failed_codex_version_command_does_not_parse_stdout() -> None:
     results = successful_results()
     results[(CODEX, "--version")] = CommandResult(1, "codex-cli 99.0.0\n")
@@ -284,7 +342,15 @@ def test_repository_root_can_differ_from_current_directory() -> None:
         0, f"{root}\n"
     )
     results[
-        (GIT, "-C", str(root), "status", "--porcelain", "--untracked-files=normal")
+        (
+            GIT,
+            "--no-optional-locks",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        )
     ] = CommandResult(0, "")
     runner = FakeRunner(results)
 
@@ -298,9 +364,73 @@ def test_repository_root_can_differ_from_current_directory() -> None:
     assert report.ok
     assert report.git.repository_root == str(root)
     assert (
-        (GIT, "-C", str(root), "status", "--porcelain", "--untracked-files=normal"),
+        (
+            GIT,
+            "--no-optional-locks",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ),
         10.0,
     ) in runner.calls
+
+
+def test_git_status_disables_optional_locks() -> None:
+    runner = FakeRunner(successful_results())
+
+    report = run_doctor(
+        runner=runner,
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+
+    assert report.ok
+    status_calls = [call for call, _ in runner.calls if call[0] == GIT and "status" in call]
+    assert status_calls == [
+        (
+            GIT,
+            "--no-optional-locks",
+            "-C",
+            str(CWD),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        )
+    ]
+
+
+def test_invalid_subprocess_encoding_is_sanitized_and_stable() -> None:
+    invalid_result = subprocess_runner(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'git version \\xff\\n')",
+        ],
+        timeout=10.0,
+    )
+    results = successful_results()
+    results[(GIT, "--version")] = invalid_result
+
+    report = run_doctor(
+        runner=FakeRunner(results),
+        which=which_with("git", "codex"),
+        cwd=CWD,
+        python_version=(3, 11, 0),
+    )
+    json_output = json.dumps(report.to_dict(), indent=2, sort_keys=True)
+    human_output = _format_doctor(report)
+
+    assert invalid_result.returncode == 0
+    assert "\N{REPLACEMENT CHARACTER}" in invalid_result.stdout
+    assert report.git.version is None
+    assert report.git.error == "Git version could not be determined."
+    assert not report.ok
+    assert "\N{REPLACEMENT CHARACTER}" not in json_output
+    assert "\N{REPLACEMENT CHARACTER}" not in human_output
+    assert "Traceback" not in f"{json_output}\n{human_output}"
 
 
 def test_operational_error_defensively_prevents_ready_report() -> None:

@@ -11,9 +11,11 @@ Stage 0 is a deterministic, read-only foundation. It has three layers:
 - `cli.py` translates those services into human-readable or stable JSON output and
   applies the public exit-code contract.
 
-All subprocesses use argument vectors and explicit timeouts. Diagnostic output
-never includes the raw output of `codex login status`; only a normalized status is
-reported. Stage 0 performs no workflow execution and owns no mutable global state.
+All subprocesses use argument vectors, explicit timeouts, and deterministic UTF-8
+decoding with replacement for malformed bytes. Git status disables optional locks
+to prevent index refresh side effects. Diagnostic output never includes the raw
+output of `codex login status`; only a normalized status is reported. Stage 0
+performs no workflow execution and owns no mutable global state.
 
 Diagnostic repository membership is tri-valued: `true` and `false` are confirmed
 results, while `null` means the probe failed or could not establish an answer.

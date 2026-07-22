@@ -21,6 +21,12 @@ _CODEX_VERSION_OUTPUT = re.compile(
     rf"(?:codex|codex-cli)(?:\s+version)?\s+v?{_VERSION_TEXT}",
     flags=re.IGNORECASE,
 )
+_GIT_VERSION_OUTPUT = re.compile(
+    r"git version\s+(?P<version>\d+(?:\.\d+){1,3})"
+    r"(?:\.[A-Za-z][0-9A-Za-z.-]*)?"
+    r"(?:\s+\([^()\r\n]*\))?",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -108,7 +114,8 @@ def subprocess_runner(args: Sequence[str], *, timeout: float) -> CommandResult:
         list(args),
         capture_output=True,
         check=False,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
@@ -192,7 +199,16 @@ def _check_git(runner: CommandRunner, executable: str | None, cwd: Path) -> GitD
         )
     root = str(Path(root_text).resolve())
     status_result = _safe_run(
-        runner, [executable, "-C", root, "status", "--porcelain", "--untracked-files=normal"]
+        runner,
+        [
+            executable,
+            "--no-optional-locks",
+            "-C",
+            root,
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ],
     )
     clean = (
         status_result.returncode == 0 and not status_result.stdout.strip()
@@ -254,13 +270,13 @@ def _safe_run(
 ) -> CommandResult | None:
     try:
         return runner(args, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, UnicodeError, subprocess.SubprocessError):
         return None
 
 
 def _parse_git_version(output: str) -> str | None:
-    match = re.fullmatch(r"git version\s+([^\s]+)", output.strip(), flags=re.IGNORECASE)
-    return match.group(1) if match else None
+    match = _GIT_VERSION_OUTPUT.fullmatch(output.strip())
+    return match.group("version") if match else None
 
 
 def _parse_codex_version(output: str) -> str | None:
