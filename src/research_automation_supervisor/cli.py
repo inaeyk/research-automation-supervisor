@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Never
+from typing import Annotated, Never, cast
 
 import typer
 
@@ -27,12 +27,41 @@ from research_automation_supervisor.errors import (
     CodexDependencyError,
     CodexRequestError,
     ContractError,
+    ShadowDependencyError,
+    ShadowInputError,
+    ShadowLockError,
+    ShadowStateError,
     WorkflowDependencyError,
     WorkflowInputError,
     WorkflowLockError,
     WorkflowStateError,
 )
 from research_automation_supervisor.redaction import redact_text
+from research_automation_supervisor.shadow_engine import (
+    abort_shadow_calibration as abort_shadow,
+)
+from research_automation_supervisor.shadow_engine import (
+    record_shadow_review as record_review,
+)
+from research_automation_supervisor.shadow_engine import (
+    resume_shadow_calibration as resume_shadow,
+)
+from research_automation_supervisor.shadow_engine import (
+    run_shadow_calibration as run_shadow,
+)
+from research_automation_supervisor.shadow_engine import (
+    shadow_calibration_exit_code,
+)
+from research_automation_supervisor.shadow_engine import (
+    shadow_calibration_report as read_shadow_report,
+)
+from research_automation_supervisor.shadow_engine import (
+    shadow_calibration_status as read_shadow_status,
+)
+from research_automation_supervisor.shadow_engine import (
+    validate_shadow_spec as validate_shadow,
+)
+from research_automation_supervisor.shadow_models import ShadowResult
 from research_automation_supervisor.workflow_engine import (
     abort_substage as abort_workflow,
 )
@@ -359,6 +388,216 @@ def abort_substage_command(
     _render_workflow_result_and_exit(result, as_json)
 
 
+@app.command("validate-shadow-spec")
+def validate_shadow_spec_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="YAML shadow-calibration specification."),
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate frozen Stage 3 inputs without writes or launches."""
+    try:
+        prepared = validate_shadow(path)
+    except (ShadowInputError, WorkflowInputError) as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except (ShadowDependencyError, WorkflowDependencyError) as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError, WorkflowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    result = {
+        "ok": True,
+        "path": str(path),
+        "calibration_id": prepared.specification.calibration_id,
+        "source_stage2_run": str(prepared.source.run_directory),
+        "decision_count": len(prepared.source.decisions),
+    }
+    if as_json:
+        typer.echo(_stable_json(result))
+    else:
+        typer.echo(
+            f"Valid shadow calibration "
+            f"{prepared.specification.calibration_id}: {path}\n"
+            f"Source Stage 2 run: {prepared.source.run_directory}\n"
+            f"Decision points: {len(prepared.source.decisions)}"
+        )
+
+
+@app.command("run-shadow-calibration")
+def run_shadow_calibration_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="YAML shadow-calibration specification."),
+    ],
+    runs_dir: Annotated[
+        Path,
+        typer.Option(
+            "--runs-dir",
+            help="Directory under which the exclusive shadow run is created.",
+        ),
+    ] = Path("runs/shadow"),
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Run only the persistent blind supervisor retrospectively."""
+    try:
+        result = run_shadow(path, runs_dir=runs_dir)
+    except (ShadowInputError, WorkflowInputError) as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except (ShadowDependencyError, WorkflowDependencyError) as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError, WorkflowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    _render_shadow_result_and_exit(result, as_json)
+
+
+@app.command("resume-shadow-calibration")
+def resume_shadow_calibration_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Existing shadow-calibration run.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Recover an interrupted shadow run without duplicate launch."""
+    try:
+        result = resume_shadow(run_directory)
+    except ShadowInputError as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except ShadowDependencyError as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    _render_shadow_result_and_exit(result, as_json)
+
+
+@app.command("shadow-calibration-status")
+def shadow_calibration_status_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Shadow-calibration run to inspect.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Read Stage 3 status without writes or launches."""
+    try:
+        result = read_shadow_status(run_directory)
+    except ShadowInputError as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except ShadowDependencyError as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    if as_json:
+        typer.echo(_stable_json(result.to_dict()))
+    else:
+        typer.echo(_format_shadow_result(result))
+
+
+@app.command("record-shadow-review")
+def record_shadow_review_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Shadow-calibration run.")
+    ],
+    proposal_id: Annotated[
+        str, typer.Argument(help="Exact proposal ID to review.")
+    ],
+    review_path: Annotated[
+        Path, typer.Argument(help="Strict human-review YAML file.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Record one immutable structured human semantic review."""
+    try:
+        result = record_review(run_directory, proposal_id, review_path)
+    except ShadowInputError as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except ShadowDependencyError as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    _render_shadow_result_and_exit(result, as_json)
+
+
+@app.command("shadow-calibration-report")
+def shadow_calibration_report_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Shadow-calibration run to report.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Build a read-only deterministic calibration/readiness report."""
+    try:
+        report = read_shadow_report(run_directory)
+    except ShadowInputError as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except ShadowDependencyError as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    if as_json:
+        typer.echo(_stable_json(report))
+    else:
+        readiness = cast(dict[str, object], report["readiness"])
+        typer.echo(
+            "\n".join(
+                (
+                    f"Calibration: {report['calibration_id']}",
+                    f"Status: {report['status']}",
+                    f"Readiness: {readiness['status']}",
+                    "Readiness is informational only; automation remains disabled.",
+                )
+            )
+        )
+
+
+@app.command("abort-shadow-calibration")
+def abort_shadow_calibration_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Shadow-calibration run to abort.")
+    ],
+    reason: Annotated[
+        str, typer.Option("--reason", help="Human abort reason.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Abort a non-running, nonterminal Stage 3 calibration."""
+    try:
+        result = abort_shadow(run_directory, reason)
+    except ShadowInputError as exc:
+        _render_shadow_error(str(exc), as_json, 2)
+    except ShadowDependencyError as exc:
+        _render_shadow_error(str(exc), as_json, 3)
+    except (ShadowLockError, ShadowStateError) as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_shadow_internal_error(as_json)
+    _render_shadow_result_and_exit(result, as_json)
+
+
 def _stable_json(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True)
 
@@ -371,6 +610,82 @@ def _render_workflow_result_and_exit(result: WorkflowResult, as_json: bool) -> N
     exit_code = workflow_exit_code(result.status)
     if exit_code:
         raise typer.Exit(code=exit_code)
+
+
+def _render_shadow_result_and_exit(
+    result: ShadowResult, as_json: bool
+) -> None:
+    if as_json:
+        typer.echo(_stable_json(result.to_dict()))
+    else:
+        typer.echo(_format_shadow_result(result))
+    exit_code = shadow_calibration_exit_code(result.status)
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
+def _format_shadow_result(result: ShadowResult) -> str:
+    return "\n".join(
+        (
+            f"Calibration: {result.calibration_id}",
+            f"Status: {result.status}",
+            f"Summary: {result.summary}",
+            f"Supervisor session: "
+            f"{result.supervisor_session_id or 'not available'}",
+            f"Proposals: {result.proposal_count}",
+            f"Comparisons: {result.comparison_count}",
+            f"Reviews: {result.review_count}",
+            f"Disqualifications: {result.disqualification_count}",
+            f"Readiness: {result.readiness} (informational only)",
+            f"Pause reason: {result.pause_reason or 'none'}",
+            f"Artifacts: {result.artifact_directory}",
+        )
+    )
+
+
+def _render_shadow_error(
+    error: str,
+    as_json: bool,
+    exit_code: int,
+) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized = redact_text(error, sensitive_values)
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {
+                    "error": sanitized,
+                    "error_kind": (
+                        "input"
+                        if exit_code == 2
+                        else "dependency"
+                        if exit_code == 3
+                        else "integrity"
+                    ),
+                    "ok": False,
+                }
+            )
+        )
+    else:
+        typer.echo(f"Shadow calibration error: {sanitized}", err=True)
+    raise typer.Exit(code=exit_code)
+
+
+def _render_shadow_internal_error(as_json: bool) -> Never:
+    message = "Unexpected internal shadow-calibration failure."
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {
+                    "error": message,
+                    "error_kind": "internal",
+                    "ok": False,
+                }
+            )
+        )
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
 
 
 def _format_workflow_result(result: WorkflowResult) -> str:

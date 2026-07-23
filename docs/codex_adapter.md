@@ -164,12 +164,13 @@ software, or access the network.
 
 ## Stage 2 adapter extension
 
-The workflow engine may supply one of two fixed engine-owned output schemas and
-may request `exec resume` with one explicit worker thread ID. Neither control is
-available in a human substage specification. Resume moves workspace and sandbox
-policy to global CLI options where necessary, retains every Stage 1 safety
-configuration, passes the exact ID immediately after `exec resume`, and still
-delivers the prompt only through stdin. `--last` and `--all` are rejected.
+The workflow or shadow engine may supply a fixed engine-owned output schema and
+may request `exec resume` with one explicit persistent worker or supervisor
+thread ID. Neither control is available in a human Stage 1 request or Stage 2
+substage specification. Resume moves workspace and sandbox policy to global CLI
+options where necessary, retains every Stage 1 safety configuration, passes the
+exact ID immediately after `exec resume`, and still delivers the prompt only
+through stdin. Auditors remain non-resumable. `--last` and `--all` are rejected.
 
 Metadata now retains every distinct ID seen in an explicit structured
 `thread.started` event, the resume ID (when present), the output-schema hash,
@@ -178,3 +179,9 @@ three captured output artifacts. The workflow derives session evidence again
 from canonical events rather than trusting replacement metadata. It requires
 one unambiguous initial worker ID and the same ID on every resume. Auditors
 continue to use fresh non-resumed ephemeral runs.
+
+Stage 3 applies the same proof to one initial read-only, non-ephemeral
+`supervisor` session and exact-ID supervisor resumes. It fixes read-only
+sandboxing, approval `never`, disabled network/web, ignored user configuration
+and rules, model/reasoning/workspace/schema, and stdin-only blind input on every
+turn.

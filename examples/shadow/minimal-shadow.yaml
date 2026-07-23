@@ -1,0 +1,13 @@
+schema_version: 1
+calibration_id: minimal-shadow
+title: Minimal retrospective blind calibration
+source_stage2_run: ../../runs/workflows/minimal-substage-REPLACE_WITH_RUN_TOKEN
+supervisor_policy_path: supervisor-policy.md
+project_context_paths:
+  - project-context.md
+supervisor_model: gpt-5.6-sol
+supervisor_reasoning_effort: high
+supervisor_timeout_seconds: 1800
+max_proposal_bytes: 262144
+minimum_reviewed_proposals: 2
+required_consecutive_acceptable: 2

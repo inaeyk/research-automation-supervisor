@@ -270,10 +270,14 @@ def run_prepared_codex(
     assert resolved_runs_dir is not None
     resolved_output_schema = _validate_output_schema(output_schema, sensitive_values)
     if resume_thread_id is not None:
-        if prepared.request.role != "worker":
-            raise CodexRequestError("only the persistent worker role may resume a thread")
+        if prepared.request.role not in {"worker", "supervisor"}:
+            raise CodexRequestError(
+                "only a persistent worker or supervisor may resume a thread"
+            )
         if not resume_thread_id.strip() or resume_thread_id in {"--last", "--all"}:
-            raise CodexRequestError("an explicit worker thread ID is required for resume")
+            raise CodexRequestError(
+                "an explicit persistent thread ID is required for resume"
+            )
         validate_locator_confidentiality((resume_thread_id,), sensitive_values)
     artifact_directory = _create_artifact_directory(
         resolved_runs_dir,
@@ -529,11 +533,13 @@ def build_codex_command(
     """Construct the fixed shell-free Codex argument vector."""
     request = prepared.request
     if resume_thread_id is not None and (
-        request.role != "worker"
+        request.role not in {"worker", "supervisor"}
         or not resume_thread_id.strip()
         or resume_thread_id in {"--last", "--all"}
     ):
-        raise CodexRequestError("resume requires one exact persistent worker thread ID")
+        raise CodexRequestError(
+            "resume requires one exact persistent worker or supervisor thread ID"
+        )
     if resume_thread_id is None:
         command = [
             executable,

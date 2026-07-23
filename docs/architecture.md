@@ -33,3 +33,12 @@ runner, strict action/journal proof models in `workflow_integrity.py`, and the
 durable state engine described in `workflow_engine.md`. The composition remains
 deterministic: models return schema-validated advice and results, while
 engine-owned state rules alone select transitions.
+
+Stage 3 is a separate retrospective reader and calibration engine described in
+`shadow_calibration.md`. `shadow_sources.py` reuses trusted Stage 2 integrity
+readers and prompt builders to reconstruct point-in-time decisions.
+`shadow_prompts.py` assembles non-persisted blind inputs. `shadow_engine.py`
+owns the persistent read-only supervisor, post-proposal comparison ordering,
+durable state, and exact-once recovery. `shadow_review.py` is the only semantic
+quality boundary: immutable human reviews feed an informational readiness
+calculation that cannot enable automation.

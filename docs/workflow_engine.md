@@ -193,6 +193,7 @@ synchronous and covers exactly one substage. Stage 2 has no intelligent
 supervisor, model-written prompts, contract mutation, multi-substage advance,
 Git publishing or worktrees, notifications, background services, package
 installation, API calls, or project-specific research logic. A later stage may
-place an intelligent planning supervisor outside this deterministic boundary;
-it must not weaken the frozen human approval and evidence guarantees described
-here.
+place an intelligent planning supervisor outside this deterministic boundary.
+Stage 3 now provides only a retrospective blind supervisor: it cannot intercept
+a live action, send a proposal, or weaken the frozen human approval and evidence
+guarantees described here.

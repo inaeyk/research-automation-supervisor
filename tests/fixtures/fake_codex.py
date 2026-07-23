@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline fake for exercising the Stage 1 Codex process boundary."""
+"""Offline fake for exercising the Stage 1/2/3 Codex process boundary."""
 
 from __future__ import annotations
 
@@ -61,7 +61,10 @@ def _select_configuration(configuration: dict[str, object]) -> tuple[dict[str, o
 
 
 def _validate_stage2_policy(arguments: list[str], configuration: dict[str, object]) -> str | None:
-    if not configuration.get("require_stage2_policy"):
+    if not (
+        configuration.get("require_stage2_policy")
+        or configuration.get("require_stage3_policy")
+    ):
         return None
     required_pairs = (
         ("--ask-for-approval", "never"),

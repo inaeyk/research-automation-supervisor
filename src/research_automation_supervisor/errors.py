@@ -51,3 +51,23 @@ class WorkflowStateError(WorkflowError):
 
 class WorkflowLockError(WorkflowError):
     """A workflow run cannot be locked safely for mutation."""
+
+
+class ShadowError(SupervisorError):
+    """Base class for expected Stage 3 shadow-calibration errors."""
+
+
+class ShadowInputError(ShadowError):
+    """A shadow specification, review, path, or command is invalid."""
+
+
+class ShadowDependencyError(ShadowError):
+    """A required local shadow-calibration dependency is unavailable."""
+
+
+class ShadowStateError(ShadowError):
+    """Durable shadow-calibration evidence violates an invariant."""
+
+
+class ShadowLockError(ShadowError):
+    """A shadow-calibration run cannot be locked safely."""
