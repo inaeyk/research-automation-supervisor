@@ -98,6 +98,230 @@ RESULT_FILE = "result.json"
 JOURNAL_FILE = "journal.jsonl"
 LOCK_FILE = "workflow.lock"
 
+JournalSemanticForm = tuple[str, str | None, str, str | None, bool, str]
+_TRANSPORT_FAILURE_STATUSES = frozenset(
+    {
+        "launch_failed",
+        "timed_out",
+        "output_limit_exceeded",
+        "permission_blocked",
+        "malformed_event_stream",
+        "process_failed",
+        "missing_final_message",
+    }
+)
+
+
+def _build_journal_semantic_forms() -> frozenset[JournalSemanticForm]:
+    """Return every exact event/state/action/reason form Stage 2 may persist."""
+    forms: set[JournalSemanticForm] = set()
+
+    def transition(previous: str | None, new: str, *reasons: str) -> None:
+        forms.update(
+            ("transition", previous, new, None, False, reason)
+            for reason in reasons
+        )
+
+    transition(None, "initialized", "workflow_initialized")
+    transition("initialized", "worker_running", "initial_worker_requested")
+    transition("initialized", "aborted", "human_abort")
+    transition(
+        "worker_running",
+        "scope_checking",
+        "worker_reported_completed",
+    )
+    transition("scope_checking", "tests_running", "scope_check_passed")
+    transition("scope_checking", "repair_pending", "scope_check_failed")
+    transition(
+        "scope_checking",
+        "repair_limit_paused",
+        "scope_check_failed_repair_limit",
+    )
+    transition("tests_running", "auditor_running", "fixed_tests_passed")
+    transition("tests_running", "repair_pending", "fixed_test_failed")
+    transition(
+        "tests_running",
+        "repair_limit_paused",
+        "fixed_test_failed_repair_limit",
+    )
+    transition("auditor_running", "completed", "auditor_passed")
+    transition(
+        "auditor_running",
+        "checkpoint_paused",
+        "auditor_passed_checkpoint",
+    )
+    transition(
+        "auditor_running",
+        "repair_pending",
+        "auditor_repairable_failure",
+    )
+    transition(
+        "auditor_running",
+        "repair_limit_paused",
+        "auditor_repairable_failure_repair_limit",
+    )
+    transition(
+        "repair_pending",
+        "worker_running",
+        "automatic_repair_worker_resume",
+    )
+    transition(
+        "human_paused",
+        "worker_running",
+        "human_continuation_requested",
+    )
+    transition(
+        "repair_limit_paused",
+        "worker_running",
+        "human_continuation_requested",
+    )
+    transition("human_paused", "aborted", "human_abort")
+    transition("repair_limit_paused", "aborted", "human_abort")
+
+    recoverable_states = (
+        "initialized",
+        "worker_running",
+        "scope_checking",
+        "tests_running",
+        "auditor_running",
+        "repair_pending",
+    )
+    recovery_pause_reasons = (
+        "frozen_or_repository_drift",
+        "frozen_input_drift",
+        "repository_identity_drift",
+        "recovery_input_or_state_invalid",
+    )
+    for previous in recoverable_states:
+        transition(previous, "human_paused", *recovery_pause_reasons)
+        transition(previous, "failed", "workflow_state_invariant_failed")
+
+    transition(
+        "worker_running",
+        "human_paused",
+        "worker_adapter_input_or_dependency_failure",
+        "worker_thread_id_missing_or_ambiguous",
+        "worker_thread_id_changed_or_missing",
+        "worker_structured_result_invalid",
+        "worker_blocked",
+        "worker_needs_human",
+        "continuation_interrupted_before_launch",
+        "uncertain_in_flight_action",
+        *(f"worker_{status}" for status in _TRANSPORT_FAILURE_STATUSES),
+    )
+    transition(
+        "scope_checking",
+        "human_paused",
+        "git_evidence_failure",
+        "patch_evidence_incomplete",
+    )
+    transition(
+        "tests_running",
+        "human_paused",
+        "uncertain_in_flight_action",
+    )
+    transition(
+        "auditor_running",
+        "human_paused",
+        "auditor_adapter_input_or_dependency_failure",
+        "auditor_structured_result_invalid",
+        "auditor_escalated",
+        "auditor_pass_state_invariant_failed",
+        "patch_evidence_missing",
+        "patch_evidence_incomplete",
+        "uncertain_in_flight_action",
+        *(f"auditor_{status}" for status in _TRANSPORT_FAILURE_STATUSES),
+    )
+    transition(
+        "repair_pending",
+        "human_paused",
+        "missing_worker_thread_id",
+    )
+
+    evidence_reasons = {
+        "worker_running": (
+            "worker_result_validated",
+            "worker_pause_evidence_saved",
+        ),
+        "scope_checking": ("git_scope_evidence_collected",),
+        "tests_running": ("fixed_tests_finalized",),
+        "auditor_running": ("auditor_result_validated",),
+        "human_paused": ("escalation_package_written",),
+        "repair_limit_paused": ("escalation_package_written",),
+    }
+    for workflow_status, reasons in evidence_reasons.items():
+        forms.update(
+            (
+                "evidence",
+                workflow_status,
+                workflow_status,
+                None,
+                False,
+                reason,
+            )
+            for reason in reasons
+        )
+
+    action_states = {
+        "worker": "worker_running",
+        "auditor": "auditor_running",
+        "test": "tests_running",
+    }
+    for action_kind, workflow_status in action_states.items():
+        forms.add(
+            (
+                "action_intent",
+                workflow_status,
+                workflow_status,
+                action_kind,
+                True,
+                f"{action_kind}_action_intent",
+            )
+        )
+        forms.add(
+            (
+                "action_completion",
+                workflow_status,
+                workflow_status,
+                action_kind,
+                True,
+                f"{action_kind}_action_completed",
+            )
+        )
+    return frozenset(forms)
+
+
+JOURNAL_SEMANTIC_FORMS = _build_journal_semantic_forms()
+_EVIDENCE_UPDATE_FIELDS = {
+    "worker_result_validated": frozenset(
+        {
+            "worker_thread_id",
+            "latest_worker_action_id",
+            "latest_worker_result_path",
+            "continuation_path",
+            "continuation_sha256",
+            "summary",
+        }
+    ),
+    "worker_pause_evidence_saved": frozenset(
+        {"latest_git_evidence_path", "scope_compliant"}
+    ),
+    "git_scope_evidence_collected": frozenset(
+        {"latest_git_evidence_path", "scope_compliant"}
+    ),
+    "fixed_tests_finalized": frozenset({"latest_tests_path", "tests_passed"}),
+    "auditor_result_validated": frozenset(
+        {
+            "latest_audit_action_id",
+            "latest_audit_result_path",
+            "prior_audit_result_paths",
+            "contract_satisfied",
+            "summary",
+        }
+    ),
+    "escalation_package_written": frozenset(),
+}
+
 
 class CodexInvoker(Protocol):
     def __call__(
@@ -1271,7 +1495,18 @@ def _action_completion(
     action_id: str,
     record: Mapping[str, Any],
 ) -> WorkflowState:
+    action_kind = record.get("kind")
+    if action_kind not in {"worker", "auditor", "test"}:
+        raise WorkflowStateError("completed action kind is invalid")
     completed = tuple(dict.fromkeys((*context.state.completed_action_ids, action_id)))
+    updates: dict[str, object] = {
+        "pending_action": None,
+        "completed_action_ids": completed,
+    }
+    if action_kind == "worker":
+        updates["latest_worker_action_id"] = action_id
+    elif action_kind == "auditor":
+        updates["latest_audit_action_id"] = action_id
     return _journal_event(
         context.run_directory,
         context.state,
@@ -1279,14 +1514,14 @@ def _action_completion(
         previous_state=context.state.status,
         new_state=context.state.status,
         action_id=action_id,
-        action_kind=cast(Any, record.get("kind")),
-        reason="external_action_completed",
+        action_kind=cast(Any, action_kind),
+        reason=f"{action_kind}_action_completed",
         artifact_hashes={
             str(context.run_directory / "actions" / f"{action_id}.json"): _sha256_path(
                 context.run_directory / "actions" / f"{action_id}.json"
             ),
         },
-        updates={"pending_action": None, "completed_action_ids": completed},
+        updates=updates,
         utc_now=context.services.utc_now,
     )
 
@@ -1551,7 +1786,8 @@ def _journal_event(
     }
     entry_hash = hashlib.sha256(_canonical_json(body)).hexdigest()
     entry = {**body, "entry_hash": entry_hash}
-    parse_journal_entry(entry)
+    parsed_entry = parse_journal_entry(entry)
+    _validate_journal_entry_semantic_form(parsed_entry)
     journal = run_directory / JOURNAL_FILE
     try:
         with journal.open("ab") as handle:
@@ -1614,6 +1850,37 @@ def _read_valid_journal(run_directory: Path) -> list[JournalEntry]:
     return entries
 
 
+def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
+    form: JournalSemanticForm = (
+        entry.event_type,
+        entry.previous_state,
+        entry.new_state,
+        entry.action_kind,
+        entry.action_id is not None,
+        entry.reason,
+    )
+    if form not in JOURNAL_SEMANTIC_FORMS:
+        raise WorkflowStateError(
+            "workflow journal event, state, action, and reason semantics are invalid"
+        )
+    if entry.event_type == "evidence" and (
+        set(entry.state_updates)
+        != _EVIDENCE_UPDATE_FIELDS.get(entry.reason, frozenset())
+    ):
+        raise WorkflowStateError(
+            "workflow journal evidence reason contradicts its state update semantics"
+        )
+    if (
+        entry.event_type == "transition"
+        and entry.new_state in {"human_paused", "repair_limit_paused", "failed"}
+        and entry.reason != "human_abort"
+        and entry.state_updates.get("pause_reason") != entry.reason
+    ):
+        raise WorkflowStateError(
+            "workflow journal pause reason contradicts its transition reason"
+        )
+
+
 def _validate_journal_semantics(
     run_directory: Path,
     entries: Sequence[JournalEntry],
@@ -1622,32 +1889,6 @@ def _validate_journal_semantics(
     """Validate state continuity, action lifecycle, and recursively cited evidence."""
     if not entries:
         raise WorkflowStateError("workflow journal is empty")
-    legal_transitions: dict[str, set[str]] = {
-        "initialized": {"worker_running", "aborted", "human_paused"},
-        "worker_running": {"scope_checking", "human_paused", "failed"},
-        "scope_checking": {
-            "tests_running",
-            "repair_pending",
-            "human_paused",
-            "repair_limit_paused",
-        },
-        "tests_running": {
-            "auditor_running",
-            "repair_pending",
-            "human_paused",
-            "repair_limit_paused",
-        },
-        "auditor_running": {
-            "completed",
-            "checkpoint_paused",
-            "repair_pending",
-            "human_paused",
-            "repair_limit_paused",
-        },
-        "repair_pending": {"worker_running", "human_paused"},
-        "human_paused": {"worker_running", "aborted"},
-        "repair_limit_paused": {"worker_running", "aborted"},
-    }
     mutable_fields = {
         "status",
         "repair_round",
@@ -1699,8 +1940,14 @@ def _validate_journal_semantics(
     test_counts: dict[int, int] = {}
     open_action_id: str | None = None
     completed: list[str] = []
+    completed_by_kind: dict[str, list[str]] = {
+        "worker": [],
+        "auditor": [],
+        "test": [],
+    }
     prior_auditor_thread_ids: set[str] = set()
     for index, entry in enumerate(entries):
+        _validate_journal_entry_semantic_form(entry)
         timestamp = _parse_utc_timestamp(entry.timestamp)
         if previous_timestamp is not None and timestamp < previous_timestamp:
             raise WorkflowStateError("workflow journal timestamps are reordered")
@@ -1712,7 +1959,6 @@ def _validate_journal_semantics(
                 or entry.new_state != "initialized"
                 or entry.action_id is not None
                 or entry.action_kind is not None
-                or entry.reason != "workflow_initialized"
                 or entry.state_updates
             ):
                 raise WorkflowStateError("workflow journal initialization is invalid")
@@ -1724,10 +1970,6 @@ def _validate_journal_semantics(
         if not set(entry.state_updates).issubset(mutable_fields):
             raise WorkflowStateError("workflow journal updates unsupported state fields")
         if entry.event_type == "transition":
-            if entry.action_id is not None or entry.action_kind is not None:
-                raise WorkflowStateError("workflow transition unexpectedly names an action")
-            if entry.new_state not in legal_transitions.get(cast(str, current_status), set()):
-                raise WorkflowStateError("workflow journal contains an illegal state transition")
             if entry.state_updates.get("status") != entry.new_state:
                 raise WorkflowStateError("workflow transition status update is contradictory")
             transition_paths = _state_update_path_locators(entry.state_updates)
@@ -1753,8 +1995,6 @@ def _validate_journal_semantics(
             if "status" in entry.state_updates:
                 raise WorkflowStateError("non-transition journal entry updates status")
         if entry.event_type == "evidence":
-            if entry.action_id is not None or entry.action_kind is not None:
-                raise WorkflowStateError("evidence entry unexpectedly names an action")
             _validate_evidence_mapping(entry)
         elif entry.event_type == "action_intent":
             if (
@@ -1763,7 +2003,6 @@ def _validate_journal_semantics(
                 or open_action_id is not None
                 or entry.action_id in intents
                 or set(entry.state_updates) != {"pending_action"}
-                or entry.reason != f"{entry.action_kind}_action_intent"
             ):
                 raise WorkflowStateError("journal action intent lifecycle is invalid")
             try:
@@ -1813,18 +2052,22 @@ def _validate_journal_semantics(
             intents[pending.action_id] = pending
             open_action_id = pending.action_id
         elif entry.event_type == "action_completion":
+            expected_completion_updates = {
+                "pending_action",
+                "completed_action_ids",
+            }
+            if entry.action_kind == "worker":
+                expected_completion_updates.add("latest_worker_action_id")
+            elif entry.action_kind == "auditor":
+                expected_completion_updates.add("latest_audit_action_id")
             if (
                 entry.action_id is None
                 or entry.action_kind is None
                 or entry.action_id != open_action_id
                 or entry.action_id not in intents
                 or entry.action_id in completed
-                or set(entry.state_updates) != {
-                    "pending_action",
-                    "completed_action_ids",
-                }
+                or set(entry.state_updates) != expected_completion_updates
                 or entry.state_updates.get("pending_action") is not None
-                or entry.reason != "external_action_completed"
             ):
                 raise WorkflowStateError("journal action completion lifecycle is invalid")
             pending = intents[entry.action_id]
@@ -1841,6 +2084,13 @@ def _validate_journal_semantics(
             _verify_durable_action_record(run_directory, pending, state)
             completed_record = parse_action_record(_read_json(action_path))
             if (
+                completed_record.action_id != entry.action_id
+                or completed_record.kind != pending.kind
+            ):
+                raise WorkflowStateError(
+                    "verified action record kind or identity contradicts its lifecycle"
+                )
+            if (
                 isinstance(completed_record, CodexActionRecord)
                 and completed_record.kind == "auditor"
             ):
@@ -1850,7 +2100,30 @@ def _validate_journal_semantics(
                     raise WorkflowStateError("journal reuses a fresh auditor session")
                 prior_auditor_thread_ids.update(completed_record.thread_started_ids)
             completed.append(entry.action_id)
+            completed_by_kind[pending.kind].append(entry.action_id)
             open_action_id = None
+        if entry.event_type not in {"action_intent", "action_completion"} and (
+            "pending_action" in entry.state_updates
+            or "completed_action_ids" in entry.state_updates
+        ):
+            raise WorkflowStateError("non-action journal entry mutates action lifecycle")
+        latest_fields = {
+            "latest_worker_action_id": "worker",
+            "latest_audit_action_id": "auditor",
+        }
+        for field, action_kind in latest_fields.items():
+            if field not in entry.state_updates:
+                continue
+            latest_for_kind = (
+                completed_by_kind[action_kind][-1]
+                if completed_by_kind[action_kind]
+                else None
+            )
+            candidate = entry.state_updates[field]
+            if candidate is not None and candidate != latest_for_kind:
+                raise WorkflowStateError(
+                    "workflow latest action identity contradicts verified action kind"
+                )
         replayed.update(entry.state_updates)
         current_status = entry.new_state
     if state is not None:
@@ -1858,6 +2131,20 @@ def _validate_journal_semantics(
             raise WorkflowStateError("workflow state does not match journal state history")
         if tuple(completed) != state.completed_action_ids:
             raise WorkflowStateError("workflow completed actions contradict the journal")
+        for field, action_kind in (
+            ("latest_worker_action_id", "worker"),
+            ("latest_audit_action_id", "auditor"),
+        ):
+            candidate = getattr(state, field)
+            latest_for_kind = (
+                completed_by_kind[action_kind][-1]
+                if completed_by_kind[action_kind]
+                else None
+            )
+            if candidate is not None and candidate != latest_for_kind:
+                raise WorkflowStateError(
+                    "workflow latest action identity contradicts verified action kind"
+                )
         expected_pending = intents[open_action_id] if open_action_id is not None else None
         if expected_pending != state.pending_action:
             raise WorkflowStateError("workflow pending action contradicts the journal")

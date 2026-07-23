@@ -571,6 +571,7 @@ def load_substage_specification(
     require_clean: bool = True,
 ) -> PreparedSubstage:
     """Read once, resolve, and fully validate a Stage 2 substage specification."""
+    specification_locator = _absolute_locator(path)
     specification_path = _resolve_regular_file(path, "substage specification")
     specification_bytes = _read_utf8_file(
         specification_path,
@@ -594,42 +595,51 @@ def load_substage_specification(
         details = "; ".join(_format_validation_error(error) for error in exc.errors())
         raise WorkflowInputError(f"substage specification validation failed: {details}") from exc
 
-    parent = specification_path.parent
-    workspace = _resolve_directory(parent, specification.workspace, "workspace")
+    resolved_parent = specification_path.parent
+    locator_parent = specification_locator.parent
+    workspace = _resolve_directory(
+        resolved_parent, specification.workspace, "workspace"
+    )
     repository_root, baseline_commit, baseline_branch, clean_status = _git_baseline(workspace)
     if require_clean and clean_status:
         raise WorkflowInputError("workspace must be clean, including untracked files")
 
-    contract = _load_human_file(parent, specification.contract_path, "contract")
+    contract = _load_human_file(
+        locator_parent,
+        specification.contract_path,
+        "contract",
+        workspace,
+        specification.protected_paths,
+    )
     worker_initial = _load_human_file(
-        parent, specification.worker_initial_prompt_path, "worker initial prompt"
+        locator_parent,
+        specification.worker_initial_prompt_path,
+        "worker initial prompt",
+        workspace,
+        specification.protected_paths,
     )
     worker_repair = _load_human_file(
-        parent, specification.worker_repair_prompt_path, "worker repair prompt"
+        locator_parent,
+        specification.worker_repair_prompt_path,
+        "worker repair prompt",
+        workspace,
+        specification.protected_paths,
     )
-    auditor = _load_human_file(parent, specification.auditor_prompt_path, "auditor prompt")
+    auditor = _load_human_file(
+        locator_parent,
+        specification.auditor_prompt_path,
+        "auditor prompt",
+        workspace,
+        specification.protected_paths,
+    )
 
     prepared_tests = tuple(
         PreparedWorkflowTest(
             specification=test,
-            cwd=_resolve_test_cwd(parent, workspace, test.cwd),
+            cwd=_resolve_test_cwd(resolved_parent, workspace, test.cwd),
         )
         for test in specification.acceptance_tests
     )
-
-    for human_file, label in (
-        (contract, "contract"),
-        (worker_initial, "worker initial prompt"),
-        (worker_repair, "worker repair prompt"),
-        (auditor, "auditor prompt"),
-    ):
-        _validate_human_locator(
-            human_file.locator_path,
-            human_file.path,
-            workspace,
-            specification.protected_paths,
-            label,
-        )
 
     structural = [
         str(path),
@@ -676,7 +686,7 @@ def load_substage_specification(
         raise WorkflowInputError("substage contains a structural redaction collision")
 
     return PreparedSubstage(
-        specification_locator_path=_absolute_locator(path),
+        specification_locator_path=specification_locator,
         specification_path=specification_path,
         specification_bytes=specification_bytes,
         specification_sha256=hashlib.sha256(specification_bytes).hexdigest(),
@@ -702,12 +712,17 @@ def load_continuation_instruction(
 ) -> HumanFile:
     """Read once and validate one exact human continuation instruction."""
     locator = _absolute_locator(path)
+    _validate_supplied_human_locator(
+        locator,
+        workspace,
+        protected_paths,
+        "continuation instruction",
+    )
     resolved = _resolve_regular_file(path, "continuation instruction")
-    _validate_human_locator(
+    _validate_resolved_human_locator(
         locator,
         resolved,
         workspace,
-        protected_paths,
         "continuation instruction",
     )
     content = _read_utf8_file(
@@ -764,26 +779,80 @@ def _parse_model_json(
 
 
 def _resolve_regular_file(path: Path, label: str) -> Path:
-    locator = _absolute_locator(path)
+    """Reject every symlink in the supplied lexical chain before resolution."""
+    invalid_message = (
+        f"{label} path is invalid and must not be a symbolic link or non-regular file"
+    )
     try:
-        file_status = locator.lstat()
+        supplied = os.fspath(path)
+        if (
+            supplied.endswith(os.sep)
+            and supplied not in {os.sep, Path(path).anchor}
+        ):
+            raise OSError
+        candidate = Path(path)
+        if candidate.is_absolute():
+            current = Path(candidate.anchor)
+            components = candidate.parts[1:]
+        else:
+            current = Path.cwd()
+            _inspect_directory_chain(current)
+            components = candidate.parts
+        final_status: os.stat_result | None = None
+        for index, component in enumerate(components):
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                current = current.parent
+                final_status = current.lstat()
+                if stat.S_ISLNK(final_status.st_mode):
+                    raise OSError
+                continue
+            current = current / component
+            final_status = current.lstat()
+            if stat.S_ISLNK(final_status.st_mode):
+                raise OSError
+            if index < len(components) - 1:
+                if not stat.S_ISDIR(final_status.st_mode):
+                    raise OSError
+            elif not stat.S_ISREG(final_status.st_mode):
+                raise OSError
+        if final_status is None:
+            final_status = current.lstat()
+        if not stat.S_ISREG(final_status.st_mode):
+            raise OSError
     except (FileNotFoundError, OSError, ValueError) as exc:
-        raise WorkflowInputError(f"{label} path could not be resolved") from exc
-    if stat.S_ISLNK(file_status.st_mode):
-        raise WorkflowInputError(f"{label} must not be a symbolic link")
-    if not stat.S_ISREG(file_status.st_mode):
-        raise WorkflowInputError(f"{label} is not a regular file")
+        raise WorkflowInputError(invalid_message) from exc
+    locator = _absolute_locator(path)
     try:
         resolved = locator.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise WorkflowInputError(f"{label} path could not be resolved") from exc
+        raise WorkflowInputError(invalid_message) from exc
     try:
-        resolved_status = resolved.stat()
+        resolved_status = resolved.lstat()
     except OSError as exc:
-        raise WorkflowInputError(f"{label} path could not be resolved") from exc
-    if not stat.S_ISREG(resolved_status.st_mode):
-        raise WorkflowInputError(f"{label} is not a regular file")
+        raise WorkflowInputError(invalid_message) from exc
+    if (
+        resolved != locator
+        or stat.S_ISLNK(resolved_status.st_mode)
+        or not stat.S_ISREG(resolved_status.st_mode)
+        or (resolved_status.st_dev, resolved_status.st_ino)
+        != (final_status.st_dev, final_status.st_ino)
+    ):
+        raise WorkflowInputError(invalid_message)
     return resolved
+
+
+def _inspect_directory_chain(path: Path) -> None:
+    """Inspect one absolute trusted base from its anchor without following links."""
+    if not path.is_absolute():
+        raise OSError
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current = current / component
+        status = current.lstat()
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+            raise OSError
 
 
 def _resolve_directory(parent: Path, value: str, label: str) -> Path:
@@ -799,12 +868,25 @@ def _resolve_directory(parent: Path, value: str, label: str) -> Path:
     return resolved
 
 
-def _load_human_file(parent: Path, value: str, label: str) -> HumanFile:
+def _load_human_file(
+    parent: Path,
+    value: str,
+    label: str,
+    workspace: Path,
+    protected_paths: Sequence[str],
+) -> HumanFile:
     candidate = Path(value)
     if not candidate.is_absolute():
         candidate = parent / candidate
     locator = _absolute_locator(candidate)
+    _validate_supplied_human_locator(
+        locator,
+        workspace,
+        protected_paths,
+        label,
+    )
     path = _resolve_regular_file(candidate, label)
+    _validate_resolved_human_locator(locator, path, workspace, label)
     content = _read_utf8_file(path, label, limit=MAX_HUMAN_FILE_BYTES)
     return HumanFile(
         locator_path=locator,
@@ -821,9 +903,8 @@ def _absolute_locator(path: Path) -> Path:
         raise WorkflowInputError("input path could not be normalized") from exc
 
 
-def _validate_human_locator(
+def _validate_supplied_human_locator(
     locator: Path,
-    resolved: Path,
     workspace: Path | None,
     protected_paths: Sequence[str],
     label: str,
@@ -833,8 +914,6 @@ def _validate_human_locator(
     supplied_relative = _relative_to(locator, workspace)
     if supplied_relative is None:
         return
-    if _relative_to(resolved, workspace) is None:
-        raise WorkflowInputError(f"{label} locator escapes the workspace")
     try:
         normalized = normalize_relative_path(supplied_relative)
     except ValueError as exc:
@@ -844,6 +923,20 @@ def _validate_human_locator(
             "contract, prompt, and continuation files inside the workspace "
             "must match protected_paths"
         )
+
+
+def _validate_resolved_human_locator(
+    locator: Path,
+    resolved: Path,
+    workspace: Path | None,
+    label: str,
+) -> None:
+    if (
+        workspace is not None
+        and _relative_to(locator, workspace) is not None
+        and _relative_to(resolved, workspace) is None
+    ):
+        raise WorkflowInputError(f"{label} locator is invalid")
 
 
 def _read_utf8_file(path: Path, label: str, limit: int | None) -> bytes:

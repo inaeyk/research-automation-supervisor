@@ -346,6 +346,230 @@ def _rehash_journal(run_directory: Path, mutate: Callable[[list[dict[str, Any]]]
     _write_json(state_path, state)
 
 
+def _rewrite_state_and_result_field(
+    run_directory: Path,
+    field: str,
+    value: object,
+) -> None:
+    for name in ("state.json", "result.json"):
+        path = run_directory / name
+        snapshot = json.loads(path.read_text())
+        snapshot[field] = value
+        _write_json(path, snapshot)
+
+
+def _invoke_existing_workflow_operation(
+    operation: str,
+    run_directory: Path,
+    fake: Path,
+    instruction: Path,
+) -> object:
+    if operation == "status":
+        return substage_status(run_directory)
+    if operation == "resume":
+        return resume_substage(run_directory, services=services(fake))
+    if operation == "continue":
+        return continue_substage(run_directory, instruction, services=services(fake))
+    return abort_substage(run_directory, "stop", services=services(fake))
+
+
+@pytest.mark.parametrize("operation", ["status", "resume", "continue", "abort"])
+def test_rehashed_invalid_reason_code_is_rejected_by_every_existing_run_path(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    responses = [codex_response("worker", "worker", worker_result("blocked"))]
+    spec, _, fake = create_workflow_tree(tmp_path, responses=responses)
+    paused = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
+    run_directory = Path(paused.artifact_directory)
+    instruction = tmp_path / "instruction.md"
+    instruction.write_text("Continue exactly.\n", encoding="utf-8")
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        entry = next(
+            item for item in entries if item["reason"] == "initial_worker_requested"
+        )
+        entry["reason"] = "syntactically_valid_but_undefined_reason"
+
+    _rehash_journal(run_directory, mutate)
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        _invoke_existing_workflow_operation(
+            operation,
+            run_directory,
+            fake,
+            instruction,
+        )
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+
+
+def test_rehashed_defined_but_wrong_evidence_reason_is_rejected(tmp_path: Path) -> None:
+    responses = [codex_response("worker", "worker", worker_result("blocked"))]
+    spec, _, fake = create_workflow_tree(tmp_path, responses=responses)
+    paused = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
+    run_directory = Path(paused.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        entry = next(
+            item for item in entries if item["reason"] == "worker_result_validated"
+        )
+        entry["reason"] = "worker_pause_evidence_saved"
+
+    _rehash_journal(run_directory, mutate)
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+
+@pytest.mark.parametrize("operation", ["status", "resume", "continue", "abort"])
+def test_rehashed_worker_id_in_latest_auditor_field_is_rejected_everywhere(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    responses = [codex_response("worker", "worker", worker_result("blocked"))]
+    spec, _, fake = create_workflow_tree(tmp_path, responses=responses)
+    paused = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
+    run_directory = Path(paused.artifact_directory)
+    instruction = tmp_path / "instruction.md"
+    instruction.write_text("Continue exactly.\n", encoding="utf-8")
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        entry = next(
+            item for item in entries if item["reason"] == "worker_result_validated"
+        )
+        entry["state_updates"]["latest_audit_action_id"] = "worker-r000"
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(
+        run_directory,
+        "latest_audit_action_id",
+        "worker-r000",
+    )
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        _invoke_existing_workflow_operation(
+            operation,
+            run_directory,
+            fake,
+            instruction,
+        )
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("latest_worker_action_id", "auditor-r000"),
+        ("latest_audit_action_id", "nonexistent-r999"),
+    ],
+)
+def test_rehashed_latest_action_wrong_kind_or_nonexistent_id_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path)
+    completed = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
+    run_directory = Path(completed.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        entries[-1]["state_updates"][field] = value
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(run_directory, field, value)
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+
+def test_rehashed_earlier_worker_cannot_replace_latest_completed_worker(
+    tmp_path: Path,
+) -> None:
+    responses = [
+        codex_response("worker", "worker", worker_result()),
+        codex_response(
+            "worker",
+            "worker",
+            worker_result(),
+            expected_resume_thread_id="worker",
+            write_files={"src/ready.txt": "ready\n"},
+        ),
+        codex_response("auditor", "auditor", auditor_result()),
+    ]
+    spec, _, fake = create_workflow_tree(
+        tmp_path,
+        responses=responses,
+        test_requires_marker=True,
+    )
+    completed = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
+    run_directory = Path(completed.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        latest_update = next(
+            item
+            for item in reversed(entries)
+            if "latest_worker_action_id" in item["state_updates"]
+        )
+        latest_update["state_updates"]["latest_worker_action_id"] = "worker-r000"
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(
+        run_directory,
+        "latest_worker_action_id",
+        "worker-r000",
+    )
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+
+@pytest.mark.parametrize("corruption", ["record_kind", "completion_kind"])
+def test_rehashed_action_kind_mutations_cannot_change_verified_lifecycle(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path)
+    completed = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
+    run_directory = Path(completed.artifact_directory)
+    worker_record = run_directory / "actions/worker-r000.json"
+
+    if corruption == "record_kind":
+        value = json.loads(worker_record.read_text())
+        value["kind"] = "auditor"
+        _write_json(worker_record, value)
+        replacement_hash = hashlib.sha256(worker_record.read_bytes()).hexdigest()
+
+        def mutate(entries: list[dict[str, Any]]) -> None:
+            completion = next(
+                item
+                for item in entries
+                if item["event_type"] == "action_completion"
+                and item["action_id"] == "worker-r000"
+            )
+            completion["artifact_hashes"][str(worker_record)] = replacement_hash
+
+    else:
+
+        def mutate(entries: list[dict[str, Any]]) -> None:
+            completion = next(
+                item
+                for item in entries
+                if item["event_type"] == "action_completion"
+                and item["action_id"] == "worker-r000"
+            )
+            completion["action_kind"] = "auditor"
+            completion["reason"] = "auditor_action_completed"
+
+    _rehash_journal(run_directory, mutate)
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+
 @pytest.mark.parametrize(
     "corruption",
     [

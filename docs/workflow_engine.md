@@ -15,18 +15,22 @@ substage identity and workspace, four human-authored file locators, fixed worker
 and auditor model policies, ordered acceptance tests, allowed/protected path
 patterns, a repair limit from zero through ten, and `checkpoint_after`.
 
-All referenced paths resolve from the specification directory. The supplied
-specification, contract, prompt, and continuation leaves are inspected with
-`lstat` before resolution and must be regular non-symlink files. For a supplied
-human-file locator inside the workspace, protected-pattern matching is applied
-to its normalized supplied workspace-relative path; resolution and final
-workspace containment are checked separately. This prevents an unprotected
-locator or a linked parent from escaping to an external file. Test commands are
-nonempty YAML argv sequences, never shell strings, and each test cwd must be
-inside the workspace. Contract and prompt files are nonempty UTF-8 regular files
-of at most 2 MiB. The workspace must begin at a clean Git `HEAD`, including no
-untracked files. Files inside the workspace that define the contract or prompts
-must match a protected pattern. Protected paths always win over allowed paths.
+All referenced paths resolve from the specification directory. Before
+resolution, one shared lexical-chain validator applies `lstat` from the supplied
+path anchor through every existing component of the specification, contract,
+prompt, or continuation locator. Any linked component (including a linked base
+or parent), broken link, non-directory intermediate, or non-regular final file
+is rejected. The final resolved file must retain the checked leaf identity. For
+a supplied human-file locator inside the workspace, protected-pattern matching
+is applied first to its normalized supplied workspace-relative path; resolution
+and final workspace containment are checked separately. This prevents an
+unprotected locator or a linked parent from escaping to an external file. Test
+commands are nonempty YAML argv sequences, never shell strings, and each test
+cwd must be inside the workspace. Contract and prompt files are nonempty UTF-8
+regular files of at most 2 MiB. The workspace must begin at a clean Git `HEAD`,
+including no untracked files. Files inside the workspace that define the
+contract or prompts must match a protected pattern. Protected paths always win
+over allowed paths.
 
 The minimal format is shown in
 `examples/workflows/minimal-substage.yaml`. Validation also rejects duplicate or
@@ -125,7 +129,13 @@ malformed metadata require human action. State and result snapshots use atomic
 replacement and directory fsync where supported. The append-only journal has an
 exact schema, monotonic sequence numbers and UTC timestamps, legal
 prior/new-state transitions, deterministic action identity and kind, reason
-codes, artifact mappings, state updates, and a SHA-256 hash chain.
+codes, artifact mappings, state updates, and a SHA-256 hash chain. Each entry
+must match one closed semantic form keyed by event type, prior state, new state,
+action kind, action-ID presence, and its one defined reason; syntactically valid
+but undefined or state-inappropriate reasons are rejected even after the chain
+is rehashed. Evidence reasons are also bound to their exact state-update field
+sets, and pause transitions must record the same deterministic pause reason.
+Action completion reasons are kind-specific.
 
 Worker, auditor, and test actions have deterministic IDs. Before launch, the
 journal freezes the round, run/action identity, role, workspace, model and
@@ -151,13 +161,18 @@ Every operation that reads an existing workflow recomputes every journal-cited
 hash. Completion action records are recursively checked against all Stage 1 or
 test files; test suites are checked against action records; Git evidence is
 checked against its exact patch locator, size, and hash; state is replayed from
-the journal and compared with both snapshots. Missing, replaced, truncated, or
-contradictory evidence cannot report a completed status. An unmatched intent is
-never relaunched: fully proved artifacts are finalized exactly once, while
-uncertain artifacts cause a durable human pause. A completion journaled before
-snapshot replacement is replayed without relaunch. Frozen source hashes,
-repository root, `HEAD`, and branch/detached identity are checked before
-continued work, and the engine never guesses or rolls back files.
+the journal and compared with both snapshots. Replay independently derives the
+latest completed worker, auditor, and fixed-test action lifecycles from verified
+typed records. The durable latest-worker and latest-auditor fields may be null
+or name only the latest verified completion of their corresponding kind; IDs
+cannot cross roles, cite an earlier or nonexistent action, or rely on a prefix
+alone. Missing, replaced, truncated, or contradictory evidence cannot report a
+completed status. An unmatched intent is never relaunched: fully proved
+artifacts are finalized exactly once, while uncertain artifacts cause a durable
+human pause. A completion journaled before snapshot replacement is replayed
+without relaunch. Frozen source hashes, repository root, `HEAD`, and
+branch/detached identity are checked before continued work, and the engine
+never guesses or rolls back files.
 
 The run directory contains normalized specification and frozen hashes,
 baseline, state/result snapshots, the journal, action records, worker/test/audit
