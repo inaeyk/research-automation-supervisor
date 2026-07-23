@@ -21,6 +21,7 @@ from typing import IO, Any, Protocol, cast
 from pydantic import ValidationError
 
 from research_automation_supervisor.codex_adapter import (
+    DEFAULT_LIMITS,
     build_subprocess_environment,
     run_prepared_codex,
 )
@@ -50,6 +51,20 @@ from research_automation_supervisor.test_runner import (
     run_test_attempt,
     skipped_test_result,
 )
+from research_automation_supervisor.workflow_integrity import (
+    CodexActionRecord,
+    JournalEntry,
+    PromptHandoff,
+    TestActionRecord,
+    parse_action_record,
+    parse_journal_entry,
+    sha256_regular_file,
+    verify_codex_action_record,
+    verify_codex_artifacts,
+    verify_hash_mapping,
+    verify_test_action_record,
+    verify_test_artifacts,
+)
 from research_automation_supervisor.workflow_models import (
     ACTIVE_STATUSES,
     PAUSED_STATUSES,
@@ -64,8 +79,6 @@ from research_automation_supervisor.workflow_models import (
     WorkflowState,
     load_continuation_instruction,
     load_substage_specification,
-    parse_auditor_result,
-    parse_worker_result,
 )
 from research_automation_supervisor.workflow_prompts import (
     AUDITOR_OUTPUT_SCHEMA,
@@ -239,8 +252,9 @@ def run_substage(
             previous_state=None,
             new_state="initialized",
             action_id=None,
+            action_kind=None,
             reason="workflow_initialized",
-            artifact_hashes=_frozen_artifact_hashes(prepared, baseline),
+            artifact_hashes=_frozen_artifact_hashes(run_directory),
             updates={},
             utc_now=services.utc_now,
         )
@@ -277,6 +291,7 @@ def resume_substage(
     with _WorkflowLock(resolved, services.utc_now):
         state = _load_state(resolved)
         state = _reconcile_state_with_journal(resolved, state)
+        _validate_normalized_action_intents(resolved, state)
         if state.status in TERMINAL_STATUSES or state.status in PAUSED_STATUSES:
             raise WorkflowInputError("workflow state cannot be resumed automatically")
         if not _raw_frozen_inputs_match(resolved, state):
@@ -345,6 +360,8 @@ def continue_substage(
     resolved = _resolve_run_directory(run_directory)
     with _WorkflowLock(resolved, services.utc_now):
         state = _load_state(resolved)
+        state = _reconcile_state_with_journal(resolved, state)
+        _validate_normalized_action_intents(resolved, state)
         if state.status not in PAUSED_STATUSES:
             raise WorkflowInputError(
                 "human continuation is allowed only from a human or limit pause"
@@ -366,6 +383,8 @@ def continue_substage(
         instruction = load_continuation_instruction(
             instruction_path,
             sensitive_values=sensitive_values,
+            workspace=context.prepared.workspace,
+            protected_paths=context.prepared.specification.protected_paths,
         )
         next_round = context.state.repair_round + 1
         context.continuation = instruction
@@ -389,6 +408,9 @@ def substage_status(run_directory: Path) -> WorkflowResult:
     resolved = _resolve_run_directory(run_directory)
     state = _load_state(resolved)
     _validate_journal(resolved, state)
+    _validate_normalized_action_intents(resolved, state)
+    if not _raw_frozen_inputs_match(resolved, state):
+        raise WorkflowStateError("frozen workflow inputs no longer match durable state")
     result = _load_result(resolved)
     if result != state.to_result():
         raise WorkflowStateError("workflow state and result snapshots disagree")
@@ -405,6 +427,12 @@ def abort_substage(
     resolved = _resolve_run_directory(run_directory)
     with _WorkflowLock(resolved, services.utc_now):
         state = _load_state(resolved)
+        state = _reconcile_state_with_journal(resolved, state)
+        _validate_normalized_action_intents(resolved, state)
+        if not _raw_frozen_inputs_match(resolved, state):
+            raise WorkflowInputError("frozen workflow inputs changed before abort")
+        if not _raw_repository_matches(state, services):
+            raise WorkflowInputError("repository identity changed before abort")
         if state.status in TERMINAL_STATUSES:
             raise WorkflowInputError("terminal workflows cannot be aborted")
         if state.status in ACTIVE_STATUSES:
@@ -420,6 +448,7 @@ def abort_substage(
             previous_state=state.status,
             new_state="aborted",
             action_id=None,
+            action_kind=None,
             reason="human_abort",
             artifact_hashes={},
             updates={
@@ -463,6 +492,7 @@ def _drive(context: _WorkflowContext) -> WorkflowResult:
             previous_state=context.state.status,
             new_state="failed",
             action_id=None,
+            action_kind=None,
             reason="workflow_state_invariant_failed",
             artifact_hashes={},
             updates={
@@ -528,12 +558,20 @@ def _handle_worker(context: _WorkflowContext) -> None:
     record = _read_action_record(context.run_directory, action_id)
     if record is None:
         prompt = _worker_prompt(context)
-        _write_json(context.run_directory / "handoffs" / f"{action_id}.json", prompt.manifest())
+        handoff_path = context.run_directory / "handoffs" / f"{action_id}.json"
+        _write_json(handoff_path, prompt.manifest())
         role = "worker"
         request = _prepared_codex_request(context, action_id, role, prompt)
         stage1_parent = context.run_directory / "worker" / "codex"
         expected_artifact = stage1_parent / action_id
-        context.state = _action_intent(context, action_id, "worker", expected_artifact)
+        context.state = _codex_action_intent(
+            context,
+            request,
+            "worker",
+            expected_artifact,
+            handoff_path,
+            context.worker_schema,
+        )
         try:
             result = context.services.codex_invoker(
                 request,
@@ -557,8 +595,10 @@ def _handle_worker(context: _WorkflowContext) -> None:
                 "The worker adapter could not complete safely.",
             )
             return
-        record = _finalize_codex_action(context, action_id, "worker", result)
+        record = _finalize_codex_action(context, result)
         context.state = _action_completion(context, action_id, record)
+    else:
+        record = _verified_existing_action_record(context, action_id, "worker")
     _consume_worker_record(context, action_id, record)
 
 
@@ -704,6 +744,7 @@ def _handle_scope(context: _WorkflowContext) -> None:
 def _handle_tests(context: _WorkflowContext) -> None:
     results: list[TestAttemptResult] = []
     failed = False
+    first_failure_action_id: str | None = None
     for index, prepared_test in enumerate(context.prepared.acceptance_tests):
         action_id = _test_action_id(context.state.repair_round, index, prepared_test)
         destination = (
@@ -715,23 +756,31 @@ def _handle_tests(context: _WorkflowContext) -> None:
         record = _read_action_record(context.run_directory, action_id)
         if failed:
             if record is None:
-                result = skipped_test_result(prepared_test, destination, action_id)
-                record = _write_action_record(
-                    context.run_directory,
+                context.state = _test_action_intent(
+                    context,
                     action_id,
-                    {
-                        "schema_version": 1,
-                        "action_id": action_id,
-                        "kind": "test",
-                        "complete": True,
-                        "result_path": str(destination / "result.json"),
-                        "result": result.to_dict(),
-                    },
+                    prepared_test,
+                    destination,
+                    skipped_after_action_id=first_failure_action_id,
                 )
-            results.append(_test_result_from_record(record))
+                result = skipped_test_result(prepared_test, destination, action_id)
+                record = _finalize_test_action(context, result)
+                context.state = _action_completion(context, action_id, record)
+            else:
+                record = _verified_existing_action_record(context, action_id, "test")
+            skipped = _test_result_from_record(record)
+            if skipped.status != "skipped":
+                raise WorkflowStateError("test after the first failure was not skipped")
+            results.append(skipped)
             continue
         if record is None:
-            context.state = _action_intent(context, action_id, "test", destination)
+            context.state = _test_action_intent(
+                context,
+                action_id,
+                prepared_test,
+                destination,
+                skipped_after_action_id=None,
+            )
             result = context.services.test_invoker(
                 prepared_test,
                 destination,
@@ -739,22 +788,15 @@ def _handle_tests(context: _WorkflowContext) -> None:
                 environ=context.services.environ,
             )
             _validate_runtime_durability(context)
-            record = _write_action_record(
-                context.run_directory,
-                action_id,
-                {
-                    "schema_version": 1,
-                    "action_id": action_id,
-                    "kind": "test",
-                    "complete": True,
-                    "result_path": str(destination / "result.json"),
-                    "result": result.to_dict(),
-                },
-            )
+            record = _finalize_test_action(context, result)
             context.state = _action_completion(context, action_id, record)
+        else:
+            record = _verified_existing_action_record(context, action_id, "test")
         result = _test_result_from_record(record)
         results.append(result)
         failed = not result.passed
+        if failed:
+            first_failure_action_id = action_id
     suite = TestSuiteResult(passed=not failed, results=tuple(results))
     suite_path = (
         context.run_directory
@@ -815,11 +857,19 @@ def _handle_auditor(context: _WorkflowContext) -> None:
             tests,
             prior,
         )
-        _write_json(context.run_directory / "handoffs" / f"{action_id}.json", prompt.manifest())
+        handoff_path = context.run_directory / "handoffs" / f"{action_id}.json"
+        _write_json(handoff_path, prompt.manifest())
         request = _prepared_codex_request(context, action_id, "auditor", prompt)
         stage1_parent = context.run_directory / "audits" / "codex"
         expected_artifact = stage1_parent / action_id
-        context.state = _action_intent(context, action_id, "auditor", expected_artifact)
+        context.state = _codex_action_intent(
+            context,
+            request,
+            "auditor",
+            expected_artifact,
+            handoff_path,
+            context.auditor_schema,
+        )
         try:
             result = context.services.codex_invoker(
                 request,
@@ -839,8 +889,10 @@ def _handle_auditor(context: _WorkflowContext) -> None:
                 "The auditor adapter could not complete safely.",
             )
             return
-        record = _finalize_codex_action(context, action_id, "auditor", result)
+        record = _finalize_codex_action(context, result)
         context.state = _action_completion(context, action_id, record)
+    else:
+        record = _verified_existing_action_record(context, action_id, "auditor")
     _consume_auditor_record(context, action_id, record)
 
 
@@ -1013,60 +1065,190 @@ def _prepared_codex_request(
 
 def _finalize_codex_action(
     context: _WorkflowContext,
-    action_id: str,
-    kind: str,
-    result: CodexRunResult,
+    returned_result: CodexRunResult | None = None,
 ) -> dict[str, Any]:
-    artifact = Path(result.artifact_directory)
-    metadata = _read_json(artifact / "metadata.json")
-    thread_ids_value = metadata.get("thread_started_ids")
-    thread_ids = (
-        [item for item in thread_ids_value if isinstance(item, str)]
-        if isinstance(thread_ids_value, list)
-        else []
+    pending = context.state.pending_action
+    if pending is None or pending.kind not in {"worker", "auditor"}:
+        raise WorkflowStateError("Codex completion has no matching prior intent")
+    proof = verify_codex_artifacts(
+        pending,
+        known_worker_thread_id=context.state.worker_thread_id,
     )
+    if returned_result is not None and returned_result != proof.adapter_result:
+        raise WorkflowStateError("returned Codex result contradicts durable Stage 1 evidence")
     structured_path: str | None = None
-    structured_valid = False
-    if result.status == "succeeded":
-        try:
-            final_bytes = (artifact / "final-message.md").read_bytes()
-            parsed = (
-                parse_worker_result(final_bytes)
-                if kind == "worker"
-                else parse_auditor_result(final_bytes)
-            )
-            destination = context.run_directory / (
-                "worker" if kind == "worker" else "audits"
-            ) / f"{action_id}.structured.json"
-            _write_json(destination, parsed.model_dump(mode="json"))
-            structured_path = str(destination)
-            structured_valid = True
-        except (OSError, WorkflowInputError):
-            structured_valid = False
-    record = {
-        "schema_version": 1,
-        "action_id": action_id,
-        "kind": kind,
-        "complete": True,
-        "stage1_artifact_directory": str(artifact),
-        "adapter_result": result.to_dict(),
-        "thread_started_ids": thread_ids,
-        "structured_result_valid": structured_valid,
-        "structured_result_path": structured_path,
-    }
-    return _write_action_record(context.run_directory, action_id, record)
+    structured_sha256: str | None = None
+    if proof.structured_result is not None:
+        destination = context.run_directory / (
+            "worker" if pending.kind == "worker" else "audits"
+        ) / f"{pending.action_id}.structured.json"
+        _write_json(destination, proof.structured_result.model_dump(mode="json"))
+        structured_path = str(destination)
+        structured_sha256 = _sha256_path(destination)
+    record = CodexActionRecord(
+        schema_version=1,
+        action_id=pending.action_id,
+        kind=cast(Any, pending.kind),
+        repair_round=pending.repair_round,
+        complete=True,
+        run_id=pending.run_id,
+        stage1_artifact_directory=pending.artifact_path,
+        artifact_hashes=proof.artifact_hashes,
+        handoff_path=cast(str, pending.handoff_path),
+        handoff_sha256=cast(str, pending.handoff_sha256),
+        output_schema_path=cast(str, pending.output_schema_path),
+        output_schema_sha256=cast(str, pending.output_schema_sha256),
+        adapter_result=proof.adapter_result,
+        thread_started_ids=proof.thread_started_ids,
+        structured_result_valid=proof.structured_result is not None,
+        structured_result_path=structured_path,
+        structured_result_sha256=structured_sha256,
+    )
+    return _write_action_record(
+        context.run_directory,
+        pending.action_id,
+        record.model_dump(mode="json"),
+    )
 
 
-def _action_intent(
+def _finalize_test_action(
     context: _WorkflowContext,
-    action_id: str,
+    returned_result: TestAttemptResult | None = None,
+) -> dict[str, Any]:
+    pending = context.state.pending_action
+    if pending is None or pending.kind != "test":
+        raise WorkflowStateError("fixed-test completion has no matching prior intent")
+    result = verify_test_artifacts(pending)
+    if returned_result is not None and returned_result != result:
+        raise WorkflowStateError("returned fixed-test result contradicts durable evidence")
+    result_path = Path(pending.artifact_path) / "result.json"
+    artifact_hashes = {str(result_path): _sha256_path(result_path)}
+    for name in ("stdout.log", "stderr.log"):
+        path = Path(pending.artifact_path) / name
+        artifact_hashes[str(path)] = _sha256_path(path)
+    record = TestActionRecord(
+        schema_version=1,
+        action_id=pending.action_id,
+        kind="test",
+        repair_round=pending.repair_round,
+        complete=True,
+        result_path=str(result_path),
+        result_sha256=artifact_hashes[str(result_path)],
+        artifact_hashes=artifact_hashes,
+        result=result,
+    )
+    return _write_action_record(
+        context.run_directory,
+        pending.action_id,
+        record.model_dump(mode="json"),
+    )
+
+
+def _codex_action_intent(
+    context: _WorkflowContext,
+    request: PreparedCodexRequest,
     kind: str,
     artifact: Path,
+    handoff_path: Path,
+    output_schema_path: Path,
 ) -> WorkflowState:
+    _, removed_names, _ = build_subprocess_environment(context.services.environ)
+    pending = PendingAction(
+        action_id=request.request.run_id,
+        kind=cast(Any, kind),
+        repair_round=context.state.repair_round,
+        run_id=request.request.run_id,
+        artifact_path=str(artifact),
+        workspace=str(request.workspace),
+        role=cast(Any, kind),
+        codex_executable=context.codex_executable,
+        model=request.request.model,
+        reasoning_effort=request.request.reasoning_effort,
+        sandbox=request.policy.sandbox,
+        approval_policy=request.policy.approval,
+        ephemeral=request.policy.ephemeral,
+        network_policy="disabled",
+        prompt_sha256=request.prompt_sha256,
+        output_schema_path=str(output_schema_path),
+        output_schema_sha256=_sha256_path(output_schema_path),
+        handoff_path=str(handoff_path),
+        handoff_sha256=_sha256_path(handoff_path),
+        resume_thread_id=(
+            context.state.worker_thread_id
+            if kind == "worker" and context.state.repair_round > 0
+            else None
+        ),
+        test_id=None,
+        argv=(),
+        cwd=None,
+        timeout_seconds=request.request.timeout_seconds,
+        transport_stdout_limit_bytes=DEFAULT_LIMITS.stdout_bytes,
+        transport_stderr_limit_bytes=DEFAULT_LIMITS.stderr_bytes,
+        max_stdout_bytes=None,
+        max_stderr_bytes=None,
+        removed_environment_variable_names=removed_names,
+        skipped_after_action_id=None,
+        started_at=_utc_string(context.services.utc_now()),
+    )
+    return _journal_event(
+        context.run_directory,
+        context.state,
+        event_type="action_intent",
+        previous_state=context.state.status,
+        new_state=context.state.status,
+        action_id=request.request.run_id,
+        action_kind=cast(Any, kind),
+        reason=f"{kind}_action_intent",
+        artifact_hashes={
+            str(handoff_path): _sha256_path(handoff_path),
+            str(output_schema_path): _sha256_path(output_schema_path),
+        },
+        updates={"pending_action": pending},
+        utc_now=context.services.utc_now,
+    )
+
+
+def _test_action_intent(
+    context: _WorkflowContext,
+    action_id: str,
+    prepared_test: PreparedWorkflowTest,
+    artifact: Path,
+    *,
+    skipped_after_action_id: str | None,
+) -> WorkflowState:
+    _, removed_names, _ = build_subprocess_environment(context.services.environ)
+    test = prepared_test.specification
     pending = PendingAction(
         action_id=action_id,
-        kind=cast(Any, kind),
+        kind="test",
+        repair_round=context.state.repair_round,
+        run_id=action_id,
         artifact_path=str(artifact),
+        workspace=str(context.prepared.workspace),
+        role="fixed_test",
+        codex_executable=None,
+        model=None,
+        reasoning_effort=None,
+        sandbox="none",
+        approval_policy="never",
+        ephemeral=False,
+        network_policy="offline_test_no_credentials",
+        prompt_sha256=None,
+        output_schema_path=None,
+        output_schema_sha256=None,
+        handoff_path=None,
+        handoff_sha256=None,
+        resume_thread_id=None,
+        test_id=test.id,
+        argv=test.argv,
+        cwd=str(prepared_test.cwd),
+        timeout_seconds=test.timeout_seconds,
+        transport_stdout_limit_bytes=None,
+        transport_stderr_limit_bytes=None,
+        max_stdout_bytes=test.max_stdout_bytes,
+        max_stderr_bytes=test.max_stderr_bytes,
+        removed_environment_variable_names=removed_names,
+        skipped_after_action_id=skipped_after_action_id,
         started_at=_utc_string(context.services.utc_now()),
     )
     return _journal_event(
@@ -1076,7 +1258,8 @@ def _action_intent(
         previous_state=context.state.status,
         new_state=context.state.status,
         action_id=action_id,
-        reason=f"{kind}_action_intent",
+        action_kind="test",
+        reason="test_action_intent",
         artifact_hashes={},
         updates={"pending_action": pending},
         utc_now=context.services.utc_now,
@@ -1096,11 +1279,12 @@ def _action_completion(
         previous_state=context.state.status,
         new_state=context.state.status,
         action_id=action_id,
+        action_kind=cast(Any, record.get("kind")),
         reason="external_action_completed",
         artifact_hashes={
-            "action_record": _sha256_path(
+            str(context.run_directory / "actions" / f"{action_id}.json"): _sha256_path(
                 context.run_directory / "actions" / f"{action_id}.json"
-            )
+            ),
         },
         updates={"pending_action": None, "completed_action_ids": completed},
         utc_now=context.services.utc_now,
@@ -1111,53 +1295,16 @@ def _recover_pending_action(context: _WorkflowContext) -> WorkflowState:
     pending = context.state.pending_action
     if pending is None:
         return context.state
-    record = _read_action_record(context.run_directory, pending.action_id)
-    if record is None and pending.kind in {"worker", "auditor"}:
-        artifact = Path(pending.artifact_path)
-        required = (
-            "request.normalized.json",
-            "prompt.sha256",
-            "events.jsonl",
-            "stderr.log",
-            "final-message.md",
-            "metadata.json",
-            "result.json",
-        )
-        if all((artifact / name).is_file() for name in required):
-            try:
-                adapter_result = CodexRunResult.model_validate(
-                    _read_json(artifact / "result.json")
-                )
-            except (ValidationError, WorkflowStateError):
-                adapter_result = None
-            if adapter_result is not None and adapter_result.artifact_directory == str(artifact):
-                record = _finalize_codex_action(
-                    context,
-                    pending.action_id,
-                    pending.kind,
-                    adapter_result,
-                )
-    if record is None and pending.kind == "test":
-        result_path = Path(pending.artifact_path) / "result.json"
-        if result_path.is_file():
-            try:
-                test_result = TestAttemptResult.model_validate(_read_json(result_path))
-            except (ValidationError, WorkflowStateError):
-                test_result = None
-            if test_result is not None and test_result.action_id == pending.action_id:
-                record = _write_action_record(
-                    context.run_directory,
-                    pending.action_id,
-                    {
-                        "schema_version": 1,
-                        "action_id": pending.action_id,
-                        "kind": "test",
-                        "complete": True,
-                        "result_path": str(result_path),
-                        "result": test_result.to_dict(),
-                    },
-                )
-    if record is None or record.get("complete") is not True:
+    try:
+        record = _read_action_record(context.run_directory, pending.action_id)
+        if record is None:
+            record = (
+                _finalize_codex_action(context)
+                if pending.kind in {"worker", "auditor"}
+                else _finalize_test_action(context)
+            )
+        _verify_action_record(context, pending, record)
+    except WorkflowStateError:
         return _pause(
             context,
             "human_paused",
@@ -1165,6 +1312,88 @@ def _recover_pending_action(context: _WorkflowContext) -> WorkflowState:
             "An action intent has no complete artifact set; execution will not be guessed.",
         )
     return _action_completion(context, pending.action_id, record)
+
+
+def _verified_existing_action_record(
+    context: _WorkflowContext,
+    action_id: str,
+    expected_kind: str,
+) -> dict[str, Any]:
+    pending = _intent_for_action(context.run_directory, action_id)
+    if pending.kind != expected_kind:
+        raise WorkflowStateError("action record kind contradicts its journal intent")
+    record = _read_action_record(context.run_directory, action_id)
+    if record is None:
+        raise WorkflowStateError("completed action record is missing")
+    _verify_action_record(context, pending, record)
+    return record
+
+
+def _verify_action_record(
+    context: _WorkflowContext,
+    pending: PendingAction,
+    record_value: Mapping[str, Any],
+) -> None:
+    record = parse_action_record(dict(record_value))
+    if isinstance(record, CodexActionRecord):
+        proof = verify_codex_artifacts(
+            pending,
+            known_worker_thread_id=context.state.worker_thread_id,
+        )
+        if pending.kind == "auditor" and proof.thread_started_ids:
+            prior_auditor_ids: set[str] = set()
+            for completed_id in context.state.completed_action_ids:
+                if (
+                    completed_id == pending.action_id
+                    or not completed_id.startswith("auditor-")
+                ):
+                    continue
+                prior_value = _read_action_record(
+                    context.run_directory,
+                    completed_id,
+                )
+                if prior_value is None:
+                    raise WorkflowStateError("prior fresh-auditor action record is missing")
+                prior = parse_action_record(prior_value)
+                if isinstance(prior, CodexActionRecord):
+                    prior_auditor_ids.update(prior.thread_started_ids)
+            if prior_auditor_ids.intersection(proof.thread_started_ids):
+                raise WorkflowStateError("fresh auditor session evidence was reused")
+        verify_codex_action_record(record, pending, proof)
+        return
+    result = verify_test_artifacts(pending)
+    verify_test_action_record(record, pending, result)
+    predecessor = pending.skipped_after_action_id
+    if result.status == "skipped":
+        if predecessor is None:
+            raise WorkflowStateError("skipped fixed test has no first-failure action")
+        predecessor_value = _read_action_record(context.run_directory, predecessor)
+        if predecessor_value is None:
+            raise WorkflowStateError("skipped fixed test references a missing failure")
+        predecessor_record = parse_action_record(predecessor_value)
+        if (
+            not isinstance(predecessor_record, TestActionRecord)
+            or predecessor_record.result.passed
+            or predecessor_record.result.status == "skipped"
+            or not _skip_predecessor_matches(pending, predecessor_record)
+        ):
+            raise WorkflowStateError("skipped fixed test does not follow a recorded failure")
+
+
+def _intent_for_action(run_directory: Path, action_id: str) -> PendingAction:
+    matches: list[PendingAction] = []
+    for entry in _read_valid_journal(run_directory):
+        if entry.event_type != "action_intent" or entry.action_id != action_id:
+            continue
+        try:
+            matches.append(
+                PendingAction.model_validate(entry.state_updates.get("pending_action"))
+            )
+        except ValidationError as exc:
+            raise WorkflowStateError("journal action intent is invalid") from exc
+    if len(matches) != 1:
+        raise WorkflowStateError("action does not have exactly one matching journal intent")
+    return matches[0]
 
 
 def _transition(
@@ -1211,6 +1440,7 @@ def _transition(
         previous_state=context.state.status,
         new_state=new_status,
         action_id=None,
+        action_kind=None,
         reason=reason,
         artifact_hashes=_artifact_hashes_from_updates(updates),
         updates=values,
@@ -1230,6 +1460,7 @@ def _update_state(
         previous_state=context.state.status,
         new_state=context.state.status,
         action_id=None,
+        action_kind=None,
         reason=reason,
         artifact_hashes=_artifact_hashes_from_updates(updates),
         updates=updates,
@@ -1259,13 +1490,30 @@ def _pause(
         previous_state=context.state.status,
         new_state=status,
         action_id=None,
+        action_kind=None,
         reason=reason,
         artifact_hashes={},
         updates=values,
         utc_now=context.services.utc_now,
     )
     context.state = state
-    _write_escalation(context, reason, sanitized_summary)
+    escalation_paths = _write_escalation(context, reason, sanitized_summary)
+    state = _journal_event(
+        context.run_directory,
+        context.state,
+        event_type="evidence",
+        previous_state=context.state.status,
+        new_state=context.state.status,
+        action_id=None,
+        action_kind=None,
+        reason="escalation_package_written",
+        artifact_hashes={
+            str(path): _sha256_path(path) for path in escalation_paths
+        },
+        updates={},
+        utc_now=context.services.utc_now,
+    )
+    context.state = state
     return state
 
 
@@ -1277,11 +1525,14 @@ def _journal_event(
     previous_state: str | None,
     new_state: str,
     action_id: str | None,
+    action_kind: str | None,
     reason: str,
     artifact_hashes: Mapping[str, str],
     updates: Mapping[str, object],
     utc_now: Callable[[], datetime],
 ) -> WorkflowState:
+    if state.journal_sequence:
+        _validate_journal(run_directory, state)
     timestamp = _utc_string(utc_now())
     sequence = state.journal_sequence + 1
     body = {
@@ -1291,6 +1542,7 @@ def _journal_event(
         "previous_state": previous_state,
         "new_state": new_state,
         "action_id": action_id,
+        "action_kind": action_kind,
         "timestamp": timestamp,
         "reason": reason,
         "artifact_hashes": dict(sorted(artifact_hashes.items())),
@@ -1299,6 +1551,7 @@ def _journal_event(
     }
     entry_hash = hashlib.sha256(_canonical_json(body)).hexdigest()
     entry = {**body, "entry_hash": entry_hash}
+    parse_journal_entry(entry)
     journal = run_directory / JOURNAL_FILE
     try:
         with journal.open("ab") as handle:
@@ -1323,36 +1576,610 @@ def _journal_event(
 def _validate_journal(run_directory: Path, state: WorkflowState) -> None:
     entries = _read_valid_journal(run_directory)
     sequence = len(entries)
-    previous_hash = entries[-1]["entry_hash"] if entries else ZERO_HASH
-    if sequence != state.journal_sequence or previous_hash != state.journal_hash:
+    previous_hash = entries[-1].entry_hash if entries else ZERO_HASH
+    if (
+        sequence != state.journal_sequence
+        or previous_hash != state.journal_hash
+        or not entries
+        or state.updated_at != entries[-1].timestamp
+    ):
         raise WorkflowStateError("workflow state does not agree with the journal head")
+    _validate_journal_semantics(run_directory, entries, state)
 
 
-def _read_valid_journal(run_directory: Path) -> list[dict[str, Any]]:
+def _read_valid_journal(run_directory: Path) -> list[JournalEntry]:
     journal = run_directory / JOURNAL_FILE
     previous_hash = ZERO_HASH
     try:
         lines = journal.read_bytes().splitlines()
     except OSError as exc:
         raise WorkflowStateError("workflow journal could not be read") from exc
-    entries: list[dict[str, Any]] = []
+    entries: list[JournalEntry] = []
     for sequence, raw in enumerate(lines, start=1):
         try:
-            value = json.loads(raw.decode("ascii"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            value = json.loads(raw.decode("ascii"), parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise WorkflowStateError("workflow journal is malformed") from exc
-        if not isinstance(value, dict):
-            raise WorkflowStateError("workflow journal entry is not an object")
-        entry_hash = value.get("entry_hash")
-        body = {key: item for key, item in value.items() if key != "entry_hash"}
-        if body.get("sequence") != sequence or body.get("previous_hash") != previous_hash:
+        entry = parse_journal_entry(value)
+        body = entry.model_dump(mode="json", exclude={"entry_hash"})
+        if entry.sequence != sequence or entry.previous_hash != previous_hash:
             raise WorkflowStateError("workflow journal sequence or hash chain is invalid")
         computed = hashlib.sha256(_canonical_json(body)).hexdigest()
-        if entry_hash != computed:
+        if entry.entry_hash != computed:
             raise WorkflowStateError("workflow journal hash chain is invalid")
+        verify_hash_mapping(entry.artifact_hashes)
         previous_hash = computed
-        entries.append(cast(dict[str, Any], value))
+        entries.append(entry)
+    _validate_journal_semantics(run_directory, entries, None)
     return entries
+
+
+def _validate_journal_semantics(
+    run_directory: Path,
+    entries: Sequence[JournalEntry],
+    state: WorkflowState | None,
+) -> None:
+    """Validate state continuity, action lifecycle, and recursively cited evidence."""
+    if not entries:
+        raise WorkflowStateError("workflow journal is empty")
+    legal_transitions: dict[str, set[str]] = {
+        "initialized": {"worker_running", "aborted", "human_paused"},
+        "worker_running": {"scope_checking", "human_paused", "failed"},
+        "scope_checking": {
+            "tests_running",
+            "repair_pending",
+            "human_paused",
+            "repair_limit_paused",
+        },
+        "tests_running": {
+            "auditor_running",
+            "repair_pending",
+            "human_paused",
+            "repair_limit_paused",
+        },
+        "auditor_running": {
+            "completed",
+            "checkpoint_paused",
+            "repair_pending",
+            "human_paused",
+            "repair_limit_paused",
+        },
+        "repair_pending": {"worker_running", "human_paused"},
+        "human_paused": {"worker_running", "aborted"},
+        "repair_limit_paused": {"worker_running", "aborted"},
+    }
+    mutable_fields = {
+        "status",
+        "repair_round",
+        "worker_thread_id",
+        "latest_worker_action_id",
+        "latest_audit_action_id",
+        "latest_worker_result_path",
+        "latest_audit_result_path",
+        "latest_git_evidence_path",
+        "latest_tests_path",
+        "prior_audit_result_paths",
+        "completed_action_ids",
+        "pending_action",
+        "repair_trigger",
+        "continuation_path",
+        "continuation_sha256",
+        "tests_passed",
+        "scope_compliant",
+        "contract_satisfied",
+        "pause_reason",
+        "summary",
+    }
+    current_status: str | None = None
+    current_round = 0
+    replayed: dict[str, object] = {
+        "status": "initialized",
+        "repair_round": 0,
+        "worker_thread_id": None,
+        "latest_worker_action_id": None,
+        "latest_audit_action_id": None,
+        "latest_worker_result_path": None,
+        "latest_audit_result_path": None,
+        "latest_git_evidence_path": None,
+        "latest_tests_path": None,
+        "prior_audit_result_paths": [],
+        "completed_action_ids": [],
+        "pending_action": None,
+        "repair_trigger": None,
+        "continuation_path": None,
+        "continuation_sha256": None,
+        "tests_passed": False,
+        "scope_compliant": False,
+        "contract_satisfied": False,
+        "pause_reason": None,
+        "summary": "Workflow initialized.",
+    }
+    previous_timestamp: datetime | None = None
+    intents: dict[str, PendingAction] = {}
+    test_counts: dict[int, int] = {}
+    open_action_id: str | None = None
+    completed: list[str] = []
+    prior_auditor_thread_ids: set[str] = set()
+    for index, entry in enumerate(entries):
+        timestamp = _parse_utc_timestamp(entry.timestamp)
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            raise WorkflowStateError("workflow journal timestamps are reordered")
+        previous_timestamp = timestamp
+        if index == 0:
+            if (
+                entry.event_type != "transition"
+                or entry.previous_state is not None
+                or entry.new_state != "initialized"
+                or entry.action_id is not None
+                or entry.action_kind is not None
+                or entry.reason != "workflow_initialized"
+                or entry.state_updates
+            ):
+                raise WorkflowStateError("workflow journal initialization is invalid")
+            current_status = "initialized"
+            _verify_initial_artifact_mapping(run_directory, entry.artifact_hashes)
+            continue
+        if entry.previous_state != current_status:
+            raise WorkflowStateError("workflow journal state history is discontinuous")
+        if not set(entry.state_updates).issubset(mutable_fields):
+            raise WorkflowStateError("workflow journal updates unsupported state fields")
+        if entry.event_type == "transition":
+            if entry.action_id is not None or entry.action_kind is not None:
+                raise WorkflowStateError("workflow transition unexpectedly names an action")
+            if entry.new_state not in legal_transitions.get(cast(str, current_status), set()):
+                raise WorkflowStateError("workflow journal contains an illegal state transition")
+            if entry.state_updates.get("status") != entry.new_state:
+                raise WorkflowStateError("workflow transition status update is contradictory")
+            transition_paths = _state_update_path_locators(entry.state_updates)
+            if set(entry.artifact_hashes) != transition_paths:
+                raise WorkflowStateError(
+                    "workflow transition artifact mapping is invalid"
+                )
+            next_round = entry.state_updates.get("repair_round", current_round)
+            if (
+                type(next_round) is not int
+                or next_round < current_round
+                or next_round > current_round + 1
+                or (
+                    next_round != current_round
+                    and entry.new_state != "worker_running"
+                )
+            ):
+                raise WorkflowStateError("workflow repair-round history is invalid")
+            current_round = next_round
+        else:
+            if entry.new_state != current_status:
+                raise WorkflowStateError("non-transition journal entry changed workflow state")
+            if "status" in entry.state_updates:
+                raise WorkflowStateError("non-transition journal entry updates status")
+        if entry.event_type == "evidence":
+            if entry.action_id is not None or entry.action_kind is not None:
+                raise WorkflowStateError("evidence entry unexpectedly names an action")
+            _validate_evidence_mapping(entry)
+        elif entry.event_type == "action_intent":
+            if (
+                entry.action_id is None
+                or entry.action_kind is None
+                or open_action_id is not None
+                or entry.action_id in intents
+                or set(entry.state_updates) != {"pending_action"}
+                or entry.reason != f"{entry.action_kind}_action_intent"
+            ):
+                raise WorkflowStateError("journal action intent lifecycle is invalid")
+            try:
+                pending = PendingAction.model_validate(entry.state_updates["pending_action"])
+            except ValidationError as exc:
+                raise WorkflowStateError("journal action intent is malformed") from exc
+            if (
+                pending.action_id != entry.action_id
+                or pending.kind != entry.action_kind
+                or pending.repair_round != current_round
+                or not _deterministic_action_id(pending)
+                or (
+                    pending.kind == "worker"
+                    and current_status != "worker_running"
+                )
+                or (
+                    pending.kind == "auditor"
+                    and current_status != "auditor_running"
+                )
+                or (pending.kind == "test" and current_status != "tests_running")
+            ):
+                raise WorkflowStateError("journal action intent semantics are invalid")
+            if pending.kind == "test":
+                expected_test_index = test_counts.get(current_round, 0)
+                if not pending.action_id.startswith(
+                    f"test-r{current_round:03d}-{expected_test_index:03d}-"
+                ):
+                    raise WorkflowStateError(
+                        "fixed-test actions are not in specification order"
+                    )
+                test_counts[current_round] = expected_test_index + 1
+            expected_intent_hashes: dict[str, str] = {}
+            if pending.kind in {"worker", "auditor"}:
+                if (
+                    pending.handoff_path is None
+                    or pending.handoff_sha256 is None
+                    or pending.output_schema_path is None
+                    or pending.output_schema_sha256 is None
+                ):
+                    raise WorkflowStateError("Codex action intent artifacts are incomplete")
+                expected_intent_hashes = {
+                    pending.handoff_path: pending.handoff_sha256,
+                    pending.output_schema_path: pending.output_schema_sha256,
+                }
+            if entry.artifact_hashes != expected_intent_hashes:
+                raise WorkflowStateError("journal action intent artifact mapping is invalid")
+            intents[pending.action_id] = pending
+            open_action_id = pending.action_id
+        elif entry.event_type == "action_completion":
+            if (
+                entry.action_id is None
+                or entry.action_kind is None
+                or entry.action_id != open_action_id
+                or entry.action_id not in intents
+                or entry.action_id in completed
+                or set(entry.state_updates) != {
+                    "pending_action",
+                    "completed_action_ids",
+                }
+                or entry.state_updates.get("pending_action") is not None
+                or entry.reason != "external_action_completed"
+            ):
+                raise WorkflowStateError("journal action completion lifecycle is invalid")
+            pending = intents[entry.action_id]
+            if pending.kind != entry.action_kind:
+                raise WorkflowStateError("journal action completion kind is mismatched")
+            expected_completed = [*completed, entry.action_id]
+            if entry.state_updates.get("completed_action_ids") != expected_completed:
+                raise WorkflowStateError("journal completed-action history is contradictory")
+            action_path = run_directory / "actions" / f"{entry.action_id}.json"
+            if entry.artifact_hashes != {
+                str(action_path): sha256_regular_file(action_path)
+            }:
+                raise WorkflowStateError("journal action completion locator is invalid")
+            _verify_durable_action_record(run_directory, pending, state)
+            completed_record = parse_action_record(_read_json(action_path))
+            if (
+                isinstance(completed_record, CodexActionRecord)
+                and completed_record.kind == "auditor"
+            ):
+                if prior_auditor_thread_ids.intersection(
+                    completed_record.thread_started_ids
+                ):
+                    raise WorkflowStateError("journal reuses a fresh auditor session")
+                prior_auditor_thread_ids.update(completed_record.thread_started_ids)
+            completed.append(entry.action_id)
+            open_action_id = None
+        replayed.update(entry.state_updates)
+        current_status = entry.new_state
+    if state is not None:
+        if current_status != state.status:
+            raise WorkflowStateError("workflow state does not match journal state history")
+        if tuple(completed) != state.completed_action_ids:
+            raise WorkflowStateError("workflow completed actions contradict the journal")
+        expected_pending = intents[open_action_id] if open_action_id is not None else None
+        if expected_pending != state.pending_action:
+            raise WorkflowStateError("workflow pending action contradicts the journal")
+        state_values = state.model_dump(mode="json")
+        if state.repair_round != current_round:
+            raise WorkflowStateError("workflow repair round contradicts the journal")
+        if any(state_values[name] != value for name, value in replayed.items()):
+            raise WorkflowStateError("workflow state snapshot contradicts journal replay")
+        _validate_supporting_state_artifacts(run_directory, state, entries)
+
+
+def _verify_initial_artifact_mapping(
+    run_directory: Path,
+    mapping: Mapping[str, str],
+) -> None:
+    expected_names = {
+        "spec.normalized.json",
+        "spec.sha256",
+        "contract.sha256",
+        "prompts.sha256.json",
+        "baseline.json",
+        "handoffs/worker-output-schema.json",
+        "handoffs/auditor-output-schema.json",
+    }
+    expected_paths = {str(run_directory / name) for name in expected_names}
+    if set(mapping) != expected_paths:
+        raise WorkflowStateError("workflow initialization artifact mapping is incomplete")
+
+
+def _validate_evidence_mapping(entry: JournalEntry) -> None:
+    path_updates = _state_update_path_locators(entry.state_updates)
+    expected_paths = set(path_updates)
+    for locator in tuple(path_updates):
+        path = Path(locator)
+        if path.name == "evidence.json" and path.parent.parent.name == "git":
+            try:
+                evidence = GitEvidence.model_validate(_read_json(path))
+            except ValidationError as exc:
+                raise WorkflowStateError("Git evidence artifact is invalid") from exc
+            expected_paths.add(evidence.patch_artifact)
+    if entry.reason == "escalation_package_written":
+        if entry.state_updates or not entry.artifact_hashes:
+            raise WorkflowStateError("escalation evidence journal entry is invalid")
+        for locator in entry.artifact_hashes:
+            path = Path(locator)
+            if path.name not in {"package.json", "README.md"} or "escalation" not in path.parts:
+                raise WorkflowStateError("escalation artifact locator is invalid")
+        expected_paths = set(entry.artifact_hashes)
+    if set(entry.artifact_hashes) != expected_paths:
+        raise WorkflowStateError("journal evidence mapping omits a state artifact locator")
+    for locator in entry.artifact_hashes:
+        path = Path(locator)
+        if path.name == "evidence.json" and path.parent.parent.name == "git":
+            _verify_git_evidence_artifact(path)
+        elif path.name == "suite.json" and path.parent.parent.name == "tests":
+            _verify_test_suite_artifact(path)
+
+
+def _state_update_path_locators(updates: Mapping[str, object]) -> set[str]:
+    return {
+        item
+        for name, value in updates.items()
+        if (name.endswith("_path") or name == "prior_audit_result_paths")
+        and value is not None
+        for item in (value if isinstance(value, list) else [value])
+        if isinstance(item, str)
+    }
+
+
+def _verify_git_evidence_artifact(path: Path) -> None:
+    try:
+        evidence = GitEvidence.model_validate(_read_json(path))
+    except ValidationError as exc:
+        raise WorkflowStateError("Git evidence artifact is invalid") from exc
+    patch = Path(evidence.patch_artifact)
+    if patch != path.parent / "patch.txt":
+        raise WorkflowStateError("Git patch locator is not exact")
+    try:
+        content = patch.read_bytes()
+    except OSError as exc:
+        raise WorkflowStateError("Git patch artifact is missing") from exc
+    if len(content) != evidence.patch_stored_byte_count:
+        raise WorkflowStateError("Git patch stored byte count does not match")
+    if evidence.patch_complete and (
+        len(content) != evidence.patch_byte_count
+        or hashlib.sha256(content).hexdigest() != evidence.patch_sha256
+    ):
+        raise WorkflowStateError("complete Git patch evidence hash does not match")
+    if not evidence.patch_complete:
+        try:
+            lines = content.decode("ascii").splitlines()
+            marker = json.loads(lines[1])
+        except (UnicodeDecodeError, IndexError, json.JSONDecodeError) as exc:
+            raise WorkflowStateError("truncated Git patch marker is invalid") from exc
+        if (
+            len(lines) != 2
+            or lines[0] != "PATCH EVIDENCE TRUNCATED; AUDIT MUST NOT RUN"
+            or not isinstance(marker, dict)
+            or set(marker)
+            != {"complete", "patch_byte_count", "patch_sha256", "reason"}
+            or marker.get("complete") is not False
+            or marker.get("patch_byte_count") != evidence.patch_byte_count
+            or marker.get("patch_sha256") != evidence.patch_sha256
+            or marker.get("reason")
+            != "patch evidence exceeds the 25 MiB workflow limit"
+        ):
+            raise WorkflowStateError("truncated Git patch marker contradicts evidence")
+
+
+def _verify_test_suite_artifact(path: Path) -> None:
+    try:
+        suite = TestSuiteResult.model_validate(_read_json(path))
+    except ValidationError as exc:
+        raise WorkflowStateError("fixed-test suite artifact is invalid") from exc
+    failed = False
+    for result in suite.results:
+        if failed and result.status != "skipped":
+            raise WorkflowStateError("fixed-test suite did not skip after the first failure")
+        if not failed and result.status == "skipped":
+            raise WorkflowStateError("fixed-test suite skipped before a recorded failure")
+        run_directory = path.parents[2]
+        action = parse_action_record(
+            _read_json(run_directory / "actions" / f"{result.action_id}.json")
+        )
+        if not isinstance(action, TestActionRecord) or action.result != result:
+            raise WorkflowStateError("fixed-test suite contradicts its action record")
+        failed = failed or not result.passed
+    if suite.passed != (not failed):
+        raise WorkflowStateError("fixed-test suite pass flag is contradictory")
+
+
+def _validate_supporting_state_artifacts(
+    run_directory: Path,
+    state: WorkflowState,
+    entries: Sequence[JournalEntry],
+) -> None:
+    _verify_initial_state_artifacts(run_directory, state)
+    recorded_paths = {
+        locator for entry in entries for locator in entry.artifact_hashes
+    }
+    state_paths = [
+        state.latest_worker_result_path,
+        state.latest_audit_result_path,
+        state.latest_git_evidence_path,
+        state.latest_tests_path,
+        state.continuation_path,
+        *state.prior_audit_result_paths,
+    ]
+    if any(path is not None and path not in recorded_paths for path in state_paths):
+        raise WorkflowStateError("workflow state cites evidence absent from the journal")
+    if (
+        state.latest_worker_action_id is not None
+        and state.latest_worker_action_id not in state.completed_action_ids
+    ) or (
+        state.latest_audit_action_id is not None
+        and state.latest_audit_action_id not in state.completed_action_ids
+    ):
+        raise WorkflowStateError("workflow latest action IDs are not completed actions")
+    if state.latest_git_evidence_path is not None:
+        _verify_git_evidence_artifact(Path(state.latest_git_evidence_path))
+    if state.latest_tests_path is not None:
+        _verify_test_suite_artifact(Path(state.latest_tests_path))
+    if state.status in {"completed", "checkpoint_paused"}:
+        if (
+            state.latest_worker_action_id is None
+            or state.latest_audit_action_id is None
+            or state.latest_worker_result_path is None
+            or state.latest_audit_result_path is None
+            or state.latest_git_evidence_path is None
+            or state.latest_tests_path is None
+            or not state.tests_passed
+            or not state.scope_compliant
+            or not state.contract_satisfied
+            or state.pending_action is not None
+        ):
+            raise WorkflowStateError("closed workflow lacks complete supporting evidence")
+        try:
+            audit = AuditorModelResult.model_validate(
+                _read_json(Path(state.latest_audit_result_path))
+            )
+        except ValidationError as exc:
+            raise WorkflowStateError("closed workflow auditor result is invalid") from exc
+        if audit.verdict != "pass":
+            raise WorkflowStateError("closed workflow does not have a passing fresh audit")
+
+
+def _verify_initial_state_artifacts(
+    run_directory: Path,
+    state: WorkflowState,
+) -> None:
+    try:
+        if (run_directory / "spec.sha256").read_text(encoding="ascii") != (
+            state.specification_sha256 + "\n"
+        ):
+            raise WorkflowStateError("frozen specification hash artifact contradicts state")
+        if (run_directory / "contract.sha256").read_text(encoding="ascii") != (
+            state.contract_sha256 + "\n"
+        ):
+            raise WorkflowStateError("frozen contract hash artifact contradicts state")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WorkflowStateError("frozen hash artifact is unreadable") from exc
+    normalized = _read_json(run_directory / "spec.normalized.json")
+    prompts = _read_json(run_directory / "prompts.sha256.json")
+    try:
+        baseline = GitBaseline.model_validate(
+            _read_json(run_directory / "baseline.json")
+        )
+    except ValidationError as exc:
+        raise WorkflowStateError("frozen Git baseline artifact is invalid") from exc
+    if (
+        normalized.get("specification_path") != state.specification_path
+        or normalized.get("substage_id") != state.substage_id
+        or normalized.get("workspace") != state.workspace
+        or normalized.get("repository_root") != state.repository_root
+        or baseline.workspace != state.workspace
+        or baseline.repository_root != state.repository_root
+        or baseline.head != state.baseline_commit
+        or baseline.branch != state.baseline_branch
+    ):
+        raise WorkflowStateError("normalized specification or baseline contradicts state")
+    expected_prompt_paths = {
+        "worker_initial": normalized.get("worker_initial_prompt_path"),
+        "worker_repair": normalized.get("worker_repair_prompt_path"),
+        "auditor": normalized.get("auditor_prompt_path"),
+    }
+    if set(prompts) != set(expected_prompt_paths):
+        raise WorkflowStateError("frozen prompt hash artifact has unsupported fields")
+    for name, path in expected_prompt_paths.items():
+        value = prompts.get(name)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"path", "sha256"}
+            or value.get("path") != path
+            or value.get("sha256") != state.prompts_sha256.get(name)
+        ):
+            raise WorkflowStateError("frozen prompt hash artifact contradicts state")
+    if (
+        _read_json(run_directory / "handoffs/worker-output-schema.json")
+        != WORKER_OUTPUT_SCHEMA
+        or _read_json(run_directory / "handoffs/auditor-output-schema.json")
+        != AUDITOR_OUTPUT_SCHEMA
+    ):
+        raise WorkflowStateError("engine-owned output schema artifact changed")
+
+
+def _verify_durable_action_record(
+    run_directory: Path,
+    pending: PendingAction,
+    state: WorkflowState | None,
+) -> None:
+    value = _read_json(run_directory / "actions" / f"{pending.action_id}.json")
+    record = parse_action_record(value)
+    if isinstance(record, CodexActionRecord):
+        proof = verify_codex_artifacts(
+            pending,
+            known_worker_thread_id=(
+                state.worker_thread_id if state is not None else None
+            ),
+        )
+        verify_codex_action_record(record, pending, proof)
+    else:
+        result = verify_test_artifacts(pending)
+        verify_test_action_record(record, pending, result)
+        if result.status == "skipped":
+            predecessor = pending.skipped_after_action_id
+            if predecessor is None:
+                raise WorkflowStateError("skipped fixed test has no recorded failure")
+            predecessor_value = _read_json(
+                run_directory / "actions" / f"{predecessor}.json"
+            )
+            predecessor_record = parse_action_record(predecessor_value)
+            if (
+                not isinstance(predecessor_record, TestActionRecord)
+                or predecessor_record.result.passed
+                or predecessor_record.result.status == "skipped"
+                or not _skip_predecessor_matches(pending, predecessor_record)
+            ):
+                raise WorkflowStateError("skipped fixed test predecessor is contradictory")
+
+
+def _deterministic_action_id(pending: PendingAction) -> bool:
+    if pending.kind == "worker":
+        return pending.action_id == f"worker-r{pending.repair_round:03d}"
+    if pending.kind == "auditor":
+        return pending.action_id == f"auditor-r{pending.repair_round:03d}"
+    match = re.fullmatch(r"test-r(\d{3})-(\d{3})-(.+)-([0-9a-f]{8})", pending.action_id)
+    if match is None or pending.test_id is None:
+        return False
+    component = pending.test_id[:45]
+    digest = hashlib.sha256(pending.test_id.encode("utf-8")).hexdigest()[:8]
+    return (
+        int(match.group(1)) == pending.repair_round
+        and match.group(3) == component
+        and match.group(4) == digest
+    )
+
+
+def _skip_predecessor_matches(
+    pending: PendingAction,
+    predecessor: TestActionRecord,
+) -> bool:
+    current = re.fullmatch(r"test-r\d{3}-(\d{3})-.+-[0-9a-f]{8}", pending.action_id)
+    prior = re.fullmatch(
+        r"test-r\d{3}-(\d{3})-.+-[0-9a-f]{8}",
+        predecessor.action_id,
+    )
+    return (
+        current is not None
+        and prior is not None
+        and predecessor.repair_round == pending.repair_round
+        and int(prior.group(1)) < int(current.group(1))
+    )
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise WorkflowStateError("workflow journal timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise WorkflowStateError("workflow journal timestamp is not UTC")
+    return parsed
 
 
 def _reconcile_state_with_journal(
@@ -1364,29 +2191,18 @@ def _reconcile_state_with_journal(
     if state.journal_sequence > len(entries):
         raise WorkflowStateError("workflow state is ahead of its journal")
     if state.journal_sequence:
-        recorded_hash = entries[state.journal_sequence - 1].get("entry_hash")
+        recorded_hash = entries[state.journal_sequence - 1].entry_hash
         if recorded_hash != state.journal_hash:
             raise WorkflowStateError("workflow state journal position is invalid")
     current = state
     for entry in entries[state.journal_sequence :]:
-        updates = entry.get("state_updates")
-        timestamp = entry.get("timestamp")
-        sequence = entry.get("sequence")
-        entry_hash = entry.get("entry_hash")
-        if (
-            not isinstance(updates, dict)
-            or not isinstance(timestamp, str)
-            or not isinstance(sequence, int)
-            or not isinstance(entry_hash, str)
-        ):
-            raise WorkflowStateError("workflow journal recovery data is invalid")
         candidate = current.model_dump(mode="json")
-        candidate.update(updates)
+        candidate.update(entry.state_updates)
         candidate.update(
             {
-                "updated_at": timestamp,
-                "journal_sequence": sequence,
-                "journal_hash": entry_hash,
+                "updated_at": entry.timestamp,
+                "journal_sequence": entry.sequence,
+                "journal_hash": entry.entry_hash,
             }
         )
         try:
@@ -1401,6 +2217,7 @@ def _reconcile_state_with_journal(
             snapshots_disagree = True
     if snapshots_disagree:
         _persist_state(run_directory, current)
+    _validate_journal(run_directory, current)
     return current
 
 
@@ -1425,11 +2242,33 @@ class _WorkflowLock:
         if existing_text.strip():
             try:
                 existing = json.loads(existing_text)
+                if (
+                    not isinstance(existing, dict)
+                    or set(existing)
+                    != {"schema_version", "pid", "host", "started_at"}
+                    or existing.get("schema_version") != 1
+                ):
+                    raise ValueError
                 host = existing["host"]
                 pid = existing["pid"]
-                if not isinstance(host, str) or not isinstance(pid, int):
+                started_at = existing["started_at"]
+                if (
+                    not isinstance(host, str)
+                    or not host.strip()
+                    or not isinstance(pid, int)
+                    or isinstance(pid, bool)
+                    or pid <= 0
+                    or not isinstance(started_at, str)
+                ):
                     raise ValueError
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                _parse_utc_timestamp(started_at)
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                WorkflowStateError,
+            ) as exc:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
                 raise WorkflowLockError("existing workflow lock metadata is invalid") from exc
@@ -1438,7 +2277,7 @@ class _WorkflowLock:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
                 raise WorkflowLockError("foreign-host workflow lock requires human action")
-            if pid != os.getpid() and _pid_exists(pid):
+            if _pid_exists(pid):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
                 raise WorkflowLockError("workflow lock records a live local process")
@@ -1458,6 +2297,10 @@ class _WorkflowLock:
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if self.handle is not None:
+            self.handle.seek(0)
+            self.handle.truncate()
+            self.handle.flush()
+            os.fsync(self.handle.fileno())
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
             self.handle.close()
             self.handle = None
@@ -1485,7 +2328,7 @@ def _load_context(
         or _read_json(auditor_schema) != AUDITOR_OUTPUT_SCHEMA
     ):
         raise WorkflowStateError("engine-owned output schemas changed")
-    return _WorkflowContext(
+    context = _WorkflowContext(
         prepared=prepared,
         baseline=baseline,
         run_directory=run_directory,
@@ -1495,6 +2338,205 @@ def _load_context(
         codex_executable=_resolve_codex_executable(services.codex_executable),
         services=services,
     )
+    _validate_context_action_intents(context)
+    return context
+
+
+def _validate_context_action_intents(context: _WorkflowContext) -> None:
+    """Cross-check journal intents against the still-frozen specification and policies."""
+    continuation_hashes = {
+        value
+        for entry in _read_valid_journal(context.run_directory)
+        for name, value in entry.state_updates.items()
+        if name == "continuation_sha256" and isinstance(value, str)
+    }
+    for entry in _read_valid_journal(context.run_directory):
+        if entry.event_type != "action_intent":
+            continue
+        try:
+            pending = PendingAction.model_validate(
+                entry.state_updates.get("pending_action")
+            )
+        except ValidationError as exc:
+            raise WorkflowStateError("journal action intent is invalid") from exc
+        if pending.workspace != str(context.prepared.workspace):
+            raise WorkflowStateError("action intent workspace contradicts the frozen specification")
+        if pending.kind in {"worker", "auditor"}:
+            handoff_path = (
+                context.run_directory / "handoffs" / f"{pending.action_id}.json"
+            )
+            expected_schema = (
+                context.worker_schema
+                if pending.kind == "worker"
+                else context.auditor_schema
+            )
+            specification = context.prepared.specification
+            expected_model = (
+                specification.worker_model
+                if pending.kind == "worker"
+                else specification.auditor_model
+            )
+            expected_effort = (
+                specification.worker_reasoning_effort
+                if pending.kind == "worker"
+                else specification.auditor_reasoning_effort
+            )
+            expected_timeout = (
+                specification.worker_timeout_seconds
+                if pending.kind == "worker"
+                else specification.auditor_timeout_seconds
+            )
+            expected_artifact = context.run_directory / (
+                "worker/codex" if pending.kind == "worker" else "audits/codex"
+            ) / pending.action_id
+            if (
+                pending.handoff_path != str(handoff_path)
+                or pending.output_schema_path != str(expected_schema)
+                or pending.output_schema_sha256 != _sha256_path(expected_schema)
+                or pending.model != expected_model
+                or pending.codex_executable != context.codex_executable
+                or pending.reasoning_effort != expected_effort
+                or pending.timeout_seconds != expected_timeout
+                or pending.artifact_path != str(expected_artifact)
+            ):
+                raise WorkflowStateError(
+                    "Codex action intent contradicts the frozen specification"
+                )
+            try:
+                handoff = PromptHandoff.model_validate(_read_json(handoff_path))
+            except ValidationError as exc:
+                raise WorkflowStateError("prompt handoff is invalid") from exc
+            if handoff.contract_sha256 != context.state.contract_sha256:
+                raise WorkflowStateError("prompt handoff contract hash changed")
+            if pending.kind == "auditor":
+                valid_source = (
+                    handoff.kind == "auditor"
+                    and handoff.source_sha256
+                    == context.state.prompts_sha256["auditor"]
+                )
+            elif handoff.kind == "initial_worker":
+                valid_source = (
+                    pending.repair_round == 0
+                    and handoff.source_sha256
+                    == context.state.prompts_sha256["worker_initial"]
+                )
+            elif handoff.kind == "human_continuation":
+                valid_source = handoff.source_sha256 in continuation_hashes
+            else:
+                valid_source = (
+                    handoff.source_sha256
+                    == context.state.prompts_sha256["worker_repair"]
+                )
+            if not valid_source:
+                raise WorkflowStateError("prompt handoff source is not a frozen human input")
+            if pending.kind == "worker" and pending.repair_round > 0:
+                if pending.resume_thread_id != context.state.worker_thread_id:
+                    raise WorkflowStateError("worker intent does not use the exact stored thread")
+            elif pending.resume_thread_id is not None:
+                raise WorkflowStateError("initial worker or auditor intent attempted resume")
+            continue
+        match = re.fullmatch(
+            r"test-r\d{3}-(\d{3})-.+-[0-9a-f]{8}",
+            pending.action_id,
+        )
+        if match is None:
+            raise WorkflowStateError("fixed-test action ID is invalid")
+        index = int(match.group(1))
+        if index >= len(context.prepared.acceptance_tests):
+            raise WorkflowStateError("fixed-test action index is outside the specification")
+        prepared_test = context.prepared.acceptance_tests[index]
+        test = prepared_test.specification
+        expected_artifact = (
+            context.run_directory
+            / "tests"
+            / f"round-{pending.repair_round:03d}"
+            / pending.action_id
+        )
+        if (
+            pending.test_id != test.id
+            or pending.argv != test.argv
+            or pending.cwd != str(prepared_test.cwd)
+            or pending.timeout_seconds != test.timeout_seconds
+            or pending.max_stdout_bytes != test.max_stdout_bytes
+            or pending.max_stderr_bytes != test.max_stderr_bytes
+            or pending.artifact_path != str(expected_artifact)
+        ):
+            raise WorkflowStateError(
+                "fixed-test action intent contradicts the frozen specification"
+            )
+
+
+def _validate_normalized_action_intents(
+    run_directory: Path,
+    state: WorkflowState,
+) -> None:
+    """Cross-check status-time action identity without Git or process launches."""
+    normalized = _read_json(run_directory / "spec.normalized.json")
+    tests = normalized.get("acceptance_tests")
+    if not isinstance(tests, list):
+        raise WorkflowStateError("normalized specification tests are invalid")
+    expected_workspace = normalized.get("workspace")
+    for entry in _read_valid_journal(run_directory):
+        if entry.event_type != "action_intent":
+            continue
+        try:
+            pending = PendingAction.model_validate(
+                entry.state_updates.get("pending_action")
+            )
+        except ValidationError as exc:
+            raise WorkflowStateError("journal action intent is invalid") from exc
+        if pending.workspace != expected_workspace or pending.workspace != state.workspace:
+            raise WorkflowStateError("action intent workspace is not frozen")
+        if pending.kind == "worker":
+            expected = (
+                normalized.get("worker_model"),
+                normalized.get("worker_reasoning_effort"),
+                normalized.get("worker_timeout_seconds"),
+            )
+            if (
+                pending.resume_thread_id
+                != (state.worker_thread_id if pending.repair_round > 0 else None)
+            ):
+                raise WorkflowStateError("worker action did not use the frozen exact thread ID")
+        elif pending.kind == "auditor":
+            expected = (
+                normalized.get("auditor_model"),
+                normalized.get("auditor_reasoning_effort"),
+                normalized.get("auditor_timeout_seconds"),
+            )
+            if pending.resume_thread_id is not None:
+                raise WorkflowStateError("fresh auditor action attempted session resume")
+        else:
+            match = re.fullmatch(
+                r"test-r\d{3}-(\d{3})-.+-[0-9a-f]{8}",
+                pending.action_id,
+            )
+            if match is None or int(match.group(1)) >= len(tests):
+                raise WorkflowStateError("fixed-test action index is not frozen")
+            test = tests[int(match.group(1))]
+            if not isinstance(test, dict) or (
+                pending.test_id,
+                list(pending.argv),
+                pending.cwd,
+                pending.timeout_seconds,
+                pending.max_stdout_bytes,
+                pending.max_stderr_bytes,
+            ) != (
+                test.get("id"),
+                test.get("argv"),
+                test.get("cwd"),
+                test.get("timeout_seconds"),
+                test.get("max_stdout_bytes"),
+                test.get("max_stderr_bytes"),
+            ):
+                raise WorkflowStateError("fixed-test action is not the frozen argv action")
+            continue
+        if (
+            pending.model,
+            pending.reasoning_effort,
+            pending.timeout_seconds,
+        ) != expected:
+            raise WorkflowStateError("Codex action model policy is not frozen")
 
 
 def _initialize_run_artifacts(
@@ -1559,9 +2601,9 @@ def _frozen_inputs_match(context: _WorkflowContext) -> bool:
     }
     for path, expected in values.values():
         try:
-            if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            if sha256_regular_file(path) != expected:
                 return False
-        except OSError:
+        except WorkflowStateError:
             return False
     return True
 
@@ -1604,9 +2646,9 @@ def _raw_frozen_inputs_match(run_directory: Path, state: WorkflowState) -> bool:
         for value, expected in paths.values():
             if not isinstance(value, str) or not isinstance(expected, str):
                 return False
-            if hashlib.sha256(Path(value).read_bytes()).hexdigest() != expected:
+            if sha256_regular_file(Path(value)) != expected:
                 return False
-    except (KeyError, OSError, TypeError, WorkflowStateError):
+    except (KeyError, TypeError, WorkflowStateError):
         return False
     return True
 
@@ -1641,6 +2683,7 @@ def _pause_state_only(
         previous_state=state.status,
         new_state="human_paused",
         action_id=None,
+        action_kind=None,
         reason=reason,
         artifact_hashes={},
         updates={
@@ -1660,9 +2703,16 @@ def _pause_state_only(
         "worker_thread_id": paused.worker_thread_id,
         "updated_at": paused.updated_at,
     }
-    _write_json(run_directory / "escalation" / "package.json", package)
+    escalation_directory = (
+        run_directory
+        / "escalation"
+        / f"{paused.journal_sequence:06d}-{reason}"
+    )
+    package_path = escalation_directory / "package.json"
+    readme_path = escalation_directory / "README.md"
+    _write_json(package_path, package)
     _write_text(
-        run_directory / "escalation" / "README.md",
+        readme_path,
         "\n".join(
             (
                 "# Workflow escalation",
@@ -1674,7 +2724,29 @@ def _pause_state_only(
             )
         ),
     )
-    return paused
+    root_package = run_directory / "escalation" / "package.json"
+    root_readme = run_directory / "escalation" / "README.md"
+    mirror_paths: tuple[Path, ...] = ()
+    if not root_package.exists() and not root_readme.exists():
+        _write_json(root_package, package)
+        _write_text(root_readme, readme_path.read_text(encoding="utf-8"))
+        mirror_paths = (root_package, root_readme)
+    return _journal_event(
+        run_directory,
+        paused,
+        event_type="evidence",
+        previous_state=paused.status,
+        new_state=paused.status,
+        action_id=None,
+        action_kind=None,
+        reason="escalation_package_written",
+        artifact_hashes={
+            str(path): _sha256_path(path)
+            for path in (package_path, readme_path, *mirror_paths)
+        },
+        updates={},
+        utc_now=services.utc_now,
+    )
 
 
 def _validate_runtime_durability(context: _WorkflowContext) -> None:
@@ -1804,8 +2876,13 @@ def _confidential_fragments(
     return tuple(fragments)
 
 
-def _write_escalation(context: _WorkflowContext, reason: str, summary: str) -> None:
-    directory = context.run_directory / "escalation"
+def _write_escalation(
+    context: _WorkflowContext,
+    reason: str,
+    summary: str,
+) -> tuple[Path, ...]:
+    root = context.run_directory / "escalation"
+    directory = root / f"{context.state.journal_sequence:06d}-{reason}"
     package = {
         "schema_version": 1,
         "substage_id": context.state.substage_id,
@@ -1820,7 +2897,9 @@ def _write_escalation(context: _WorkflowContext, reason: str, summary: str) -> N
         "latest_tests_path": context.state.latest_tests_path,
         "updated_at": context.state.updated_at,
     }
-    _write_json(directory / "package.json", package)
+    package_path = directory / "package.json"
+    readme_path = directory / "README.md"
+    _write_json(package_path, package)
     markdown = "\n".join(
         (
             "# Workflow escalation",
@@ -1832,31 +2911,55 @@ def _write_escalation(context: _WorkflowContext, reason: str, summary: str) -> N
             "",
         )
     )
-    _write_text(directory / "README.md", markdown)
+    _write_text(readme_path, markdown)
+    root_package = root / "package.json"
+    root_readme = root / "README.md"
+    mirror_paths: tuple[Path, ...] = ()
+    if not root_package.exists() and not root_readme.exists():
+        _write_json(root_package, package)
+        _write_text(root_readme, markdown)
+        mirror_paths = (root_package, root_readme)
+    return (package_path, readme_path, *mirror_paths)
 
 
 def _frozen_artifact_hashes(
-    prepared: PreparedSubstage,
-    baseline: GitBaseline,
+    run_directory: Path,
 ) -> dict[str, str]:
+    names = (
+        "spec.normalized.json",
+        "spec.sha256",
+        "contract.sha256",
+        "prompts.sha256.json",
+        "baseline.json",
+        "handoffs/worker-output-schema.json",
+        "handoffs/auditor-output-schema.json",
+    )
     return {
-        "specification": prepared.specification_sha256,
-        "contract": prepared.contract.sha256,
-        "worker_initial_prompt": prepared.worker_initial_prompt.sha256,
-        "worker_repair_prompt": prepared.worker_repair_prompt.sha256,
-        "auditor_prompt": prepared.auditor_prompt.sha256,
-        "baseline": hashlib.sha256(_canonical_json(baseline.to_dict())).hexdigest(),
+        str(run_directory / name): _sha256_path(run_directory / name)
+        for name in names
     }
 
 
 def _artifact_hashes_from_updates(updates: Mapping[str, object]) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for name, value in updates.items():
-        if not name.endswith("_path") or not isinstance(value, str):
+        values: Sequence[object]
+        if name == "prior_audit_result_paths" and isinstance(value, (tuple, list)):
+            values = value
+        elif name.endswith("_path"):
+            values = (value,)
+        else:
             continue
-        path = Path(value)
-        if path.is_file():
-            hashes[name] = _sha256_path(path)
+        for item in values:
+            if not isinstance(item, str):
+                continue
+            path = Path(item)
+            if path.is_file():
+                hashes[str(path)] = _sha256_path(path)
+                if path.name == "evidence.json" and path.parent.parent.name == "git":
+                    evidence = GitEvidence.model_validate(_read_json(path))
+                    patch = Path(evidence.patch_artifact)
+                    hashes[str(patch)] = _sha256_path(patch)
     return hashes
 
 
@@ -1872,12 +2975,17 @@ def _write_action_record(
 
 def _read_action_record(run_directory: Path, action_id: str) -> dict[str, Any] | None:
     path = run_directory / "actions" / f"{action_id}.json"
-    if not path.exists():
+    try:
+        path.lstat()
+    except FileNotFoundError:
         return None
-    value = _read_json(path)
-    if value.get("action_id") != action_id or value.get("complete") is not True:
+    except OSError as exc:
+        raise WorkflowStateError("action record locator could not be inspected") from exc
+    sha256_regular_file(path)
+    record = parse_action_record(_read_json(path))
+    if record.action_id != action_id or record.complete is not True:
         raise WorkflowStateError("action record is incomplete or mismatched")
-    return value
+    return record.model_dump(mode="json")
 
 
 def _load_state(run_directory: Path) -> WorkflowState:
@@ -1988,10 +3096,11 @@ def _json_compatible(value: object) -> object:
 
 
 def _sha256_path(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise WorkflowStateError("workflow artifact hash could not be computed") from exc
+    return sha256_regular_file(path)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def _fsync_directory(path: Path) -> None:

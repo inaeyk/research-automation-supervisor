@@ -15,8 +15,14 @@ substage identity and workspace, four human-authored file locators, fixed worker
 and auditor model policies, ordered acceptance tests, allowed/protected path
 patterns, a repair limit from zero through ten, and `checkpoint_after`.
 
-All referenced paths resolve from the specification directory. Test commands
-are nonempty YAML argv sequences, never shell strings, and each test cwd must be
+All referenced paths resolve from the specification directory. The supplied
+specification, contract, prompt, and continuation leaves are inspected with
+`lstat` before resolution and must be regular non-symlink files. For a supplied
+human-file locator inside the workspace, protected-pattern matching is applied
+to its normalized supplied workspace-relative path; resolution and final
+workspace containment are checked separately. This prevents an unprotected
+locator or a linked parent from escaping to an external file. Test commands are
+nonempty YAML argv sequences, never shell strings, and each test cwd must be
 inside the workspace. Contract and prompt files are nonempty UTF-8 regular files
 of at most 2 MiB. The workspace must begin at a clean Git `HEAD`, including no
 untracked files. Files inside the workspace that define the contract or prompts
@@ -112,26 +118,53 @@ enable network access.
 ## Durability, recovery, and artifacts
 
 Each run exclusively creates `<runs-dir>/<substage-id>-<random-token>`. A
-nonblocking advisory lock records PID, host, and start time. An unlocked stale
-same-host record is recovered only after its PID is proven absent; foreign-host
-metadata requires human action. State and result snapshots use atomic
-replacement and directory fsync where supported. The append-only journal has
-monotonic sequence numbers and a SHA-256 hash chain.
+nonblocking advisory lock records a strict PID, host, and start-time object
+while held and clears it on clean release. An unlocked stale same-host record is
+recovered only after its PID is proven absent; live local, foreign-host, and
+malformed metadata require human action. State and result snapshots use atomic
+replacement and directory fsync where supported. The append-only journal has an
+exact schema, monotonic sequence numbers and UTC timestamps, legal
+prior/new-state transitions, deterministic action identity and kind, reason
+codes, artifact mappings, state updates, and a SHA-256 hash chain.
 
-Worker, auditor, and launched test actions have deterministic IDs. The journal
-records an intent before launch and completion only after the complete artifact
-set exists. Recovery replays hash-validated journal updates omitted by an
-interrupted snapshot write. It accepts a completed action only from a complete,
-strictly validated Stage 1 or test artifact set; otherwise it enters
-`human_paused`. Completed action IDs are never launched again. Frozen source
-hashes, repository root, `HEAD`, and branch/detached identity are checked before
+Worker, auditor, and test actions have deterministic IDs. Before launch, the
+journal freezes the round, run/action identity, role, workspace, model and
+reasoning, sandbox/approval/ephemeral/network policy, rendered prompt and output
+schema hashes, handoff and artifact directories, exact worker resume ID, or the
+test ID/argv/cwd/timeout/output limits. Every intent has at most one matching
+completion.
+
+Normal completion and interrupted recovery use the same proof verifier. Worker
+and auditor proof requires the exact seven-file Stage 1 core artifact set plus
+the Stage-2-only completion manifest written last by the adapter, strict
+normalized-request/metadata/result/handoff/manifest models, canonical complete JSONL,
+event-derived session IDs, exact command policy, consistent process/timing
+fields, prompt/schema hashes, final-message agreement, and a strict structured
+model result when present. Auditor proof additionally requires a non-resumed,
+read-only, approval-never, network-disabled ephemeral run and rejects worker or
+prior-auditor session substitution. Fixed-test proof requires the exact intent,
+logical status/pass/exit/signal/timeout/output-limit agreement, complete empty
+or bounded stdout/stderr logs, actual hashes and byte counts, environment-name
+filtering, redaction metadata, and valid first-failure skip ordering.
+
+Every operation that reads an existing workflow recomputes every journal-cited
+hash. Completion action records are recursively checked against all Stage 1 or
+test files; test suites are checked against action records; Git evidence is
+checked against its exact patch locator, size, and hash; state is replayed from
+the journal and compared with both snapshots. Missing, replaced, truncated, or
+contradictory evidence cannot report a completed status. An unmatched intent is
+never relaunched: fully proved artifacts are finalized exactly once, while
+uncertain artifacts cause a durable human pause. A completion journaled before
+snapshot replacement is replayed without relaunch. Frozen source hashes,
+repository root, `HEAD`, and branch/detached identity are checked before
 continued work, and the engine never guesses or rolls back files.
 
 The run directory contains normalized specification and frozen hashes,
 baseline, state/result snapshots, the journal, action records, worker/test/audit
-artifacts, Git evidence, hash-only handoff manifests, escalation packages, and
-the two engine-owned output schemas. Captured output is bounded and redacted;
-prompt and contract content are not persisted by the workflow.
+artifacts, Git evidence, hash-only handoff manifests, immutable versioned
+escalation packages, and the two engine-owned output schemas. Captured output is
+bounded and redacted; prompt and contract content are not persisted by the
+workflow.
 
 ## Commands and non-goals
 

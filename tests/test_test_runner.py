@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from research_automation_supervisor.test_runner import run_test_attempt, run_test_suite
@@ -108,3 +109,38 @@ def test_launch_failure_is_normalized_without_a_retry(tmp_path: Path) -> None:
     assert result.status == "launch_failed"
     assert result.exit_code is None
     assert not result.passed
+
+
+def test_normal_exit_cleans_up_descendants_in_the_test_process_group(
+    tmp_path: Path,
+) -> None:
+    survived = tmp_path / "descendant-survived"
+    ready = tmp_path / "descendant-ready"
+    child_source = (
+        "import pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(ready)!r}).write_text('ready', encoding='ascii'); "
+        "time.sleep(0.3); "
+        f"pathlib.Path({str(survived)!r}).write_text('survived', encoding='ascii')"
+    )
+    parent_source = (
+        "import pathlib, subprocess, sys, time\n"
+        f"ready = pathlib.Path({str(ready)!r})\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_source!r}])\n"
+        "deadline = time.monotonic() + 2\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.005)\n"
+    )
+    test = prepared(tmp_path, "descendants", parent_source)
+
+    result = run_test_attempt(
+        test,
+        tmp_path / "descendant-artifacts",
+        "descendant-action",
+        termination_grace_seconds=0.02,
+    )
+    time.sleep(0.4)
+
+    assert result.passed
+    assert ready.is_file()
+    assert not survived.exists()

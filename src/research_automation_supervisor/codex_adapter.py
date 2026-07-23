@@ -397,8 +397,10 @@ def run_prepared_codex(
         observation=observation,
         events=event_processor,
         final_message_present=final_message_present,
+        permission_evidence=permission_evidence,
         output_schema=resolved_output_schema,
         resume_thread_id=resume_thread_id,
+        limits=limits,
     )
     _atomic_write_json(
         artifact_directory / "metadata.json",
@@ -408,6 +410,13 @@ def run_prepared_codex(
         artifact_directory / "result.json",
         result.to_dict(),
     )
+    if resolved_output_schema is not None:
+        _write_stage2_completion_manifest(
+            artifact_directory,
+            prepared,
+            result,
+            resolved_output_schema,
+        )
     return result
 
 
@@ -964,8 +973,10 @@ def _build_metadata(
     observation: _ProcessObservation,
     events: _EventProcessor,
     final_message_present: bool,
+    permission_evidence: bool,
     output_schema: Path | None,
     resume_thread_id: str | None,
+    limits: AdapterLimits,
 ) -> dict[str, object]:
     terminating_signal = (
         -observation.exit_code
@@ -986,6 +997,7 @@ def _build_metadata(
         "prompt_byte_count": len(prepared.prompt_bytes),
         "model": prepared.request.model,
         "reasoning_effort": prepared.request.reasoning_effort,
+        "timeout_seconds": prepared.request.timeout_seconds,
         "sandbox": prepared.policy.sandbox,
         "approval_policy": prepared.policy.approval,
         "ephemeral": prepared.policy.ephemeral,
@@ -997,18 +1009,25 @@ def _build_metadata(
         "artifact_directory": str(artifact_directory),
         "codex_executable": executable_path,
         "codex_version": codex_version,
+        "process_launched": observation.launched,
+        "launch_error_present": observation.launch_error is not None,
+        "stdin_error": observation.stdin_error,
         "process_exit_code": (
             observation.exit_code
             if observation.exit_code is not None and observation.exit_code >= 0
             else None
         ),
         "terminating_signal": terminating_signal,
+        "termination_reason": observation.termination_reason,
         "valid_event_count": events.event_count,
         "malformed_event_count": len(events.malformed_hashes),
         "malformed_event_sha256": events.malformed_hashes,
         "stdout_byte_count": observation.stdout_bytes,
         "stderr_byte_count": observation.stderr_bytes,
+        "stdout_limit_bytes": limits.stdout_bytes,
+        "stderr_limit_bytes": limits.stderr_bytes,
         "final_message_present": final_message_present,
+        "permission_evidence": permission_evidence,
         "output_limit_stream": observation.output_limit_stream,
         "thread_id": events.identifier_value if events.identifier_kind == "thread_id" else None,
         "session_id": events.identifier_value if events.identifier_kind == "session_id" else None,
@@ -1020,8 +1039,56 @@ def _build_metadata(
             if output_schema is not None
             else None
         ),
+        "events_sha256": hashlib.sha256(
+            (artifact_directory / "events.jsonl").read_bytes()
+        ).hexdigest(),
+        "stderr_sha256": hashlib.sha256(
+            (artifact_directory / "stderr.log").read_bytes()
+        ).hexdigest(),
+        "final_message_sha256": hashlib.sha256(
+            (artifact_directory / "final-message.md").read_bytes()
+        ).hexdigest(),
     }
     return metadata
+
+
+def _write_stage2_completion_manifest(
+    artifact_directory: Path,
+    prepared: PreparedCodexRequest,
+    result: CodexRunResult,
+    output_schema: Path,
+) -> None:
+    """Seal the complete Stage 2 Stage 1 artifact set after all final writes."""
+    artifact_names = (
+        "request.normalized.json",
+        "prompt.sha256",
+        "events.jsonl",
+        "stderr.log",
+        "final-message.md",
+        "metadata.json",
+        "result.json",
+    )
+    artifact_hashes = {
+        str(artifact_directory / name): hashlib.sha256(
+            (artifact_directory / name).read_bytes()
+        ).hexdigest()
+        for name in artifact_names
+    }
+    _atomic_write_json(
+        artifact_directory / "stage2-completion.json",
+        {
+            "schema_version": 1,
+            "run_id": prepared.request.run_id,
+            "role": prepared.request.role,
+            "artifact_directory": str(artifact_directory),
+            "prompt_sha256": prepared.prompt_sha256,
+            "output_schema_path": str(output_schema),
+            "output_schema_sha256": hashlib.sha256(output_schema.read_bytes()).hexdigest(),
+            "result_status": result.status,
+            "completed_at": result.ended_at,
+            "artifact_hashes": artifact_hashes,
+        },
+    )
 
 
 def _classify_status(

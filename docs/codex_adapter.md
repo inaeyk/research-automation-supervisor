@@ -99,9 +99,17 @@ The run directory contains:
 - `events.jsonl`: canonical redacted JSON objects;
 - `stderr.log`: bounded redacted diagnostics;
 - `final-message.md`: redacted last response;
-- `metadata.json`: command policy, timing, process, event, and environment-name
-  metadata;
+- `metadata.json`: command policy, timeout and output limits, timing, launch,
+  stdin, exit/signal/termination, event and environment-name metadata, plus
+  hashes of the canonical events, bounded stderr, final message, and optional
+  output schema;
 - `result.json`: the normalized outcome returned by the CLI.
+
+When Stage 2 supplies an engine-owned output schema, the adapter additionally
+writes `stage2-completion.json` last. That strict finalization marker binds the
+run/role, prompt and schema identities, normalized status and completion time,
+and hashes of all seven core Stage 1 artifacts. Interrupted workflow recovery
+requires this marker; ordinary Stage 1 runs do not create it.
 
 JSONL is decoded as strict UTF-8. Malformed JSON, non-object values, and invalid
 UTF-8 lines are not retained; metadata stores only their count and hashes of the
@@ -164,6 +172,9 @@ configuration, passes the exact ID immediately after `exec resume`, and still
 delivers the prompt only through stdin. `--last` and `--all` are rejected.
 
 Metadata now retains every distinct ID seen in an explicit structured
-`thread.started` event, the resume ID (when present), and the output-schema hash.
-The workflow requires one unambiguous initial worker ID and the same ID on every
-resume. Auditors continue to use fresh non-resumed ephemeral runs.
+`thread.started` event, the resume ID (when present), the output-schema hash,
+the fixed transport limits, explicit termination reason, and hashes of the
+three captured output artifacts. The workflow derives session evidence again
+from canonical events rather than trusting replacement metadata. It requires
+one unambiguous initial worker ID and the same ID on every resume. Auditors
+continue to use fresh non-resumed ephemeral runs.

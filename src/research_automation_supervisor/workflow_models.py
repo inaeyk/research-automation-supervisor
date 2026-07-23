@@ -7,6 +7,7 @@ import json
 import os
 import posixpath
 import re
+import stat
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -328,8 +329,117 @@ class PendingAction(BaseModel):
 
     action_id: Identifier
     kind: Literal["worker", "auditor", "test"]
+    repair_round: Annotated[int, Field(ge=0)]
+    run_id: Identifier
     artifact_path: RequiredString
+    workspace: RequiredString
+    role: Literal["worker", "auditor", "fixed_test"]
+    codex_executable: str | None
+    model: ModelName | None
+    reasoning_effort: ReasoningEffort | None
+    sandbox: Literal["workspace-write", "read-only", "none"]
+    approval_policy: Literal["never"]
+    ephemeral: bool
+    network_policy: Literal["disabled", "offline_test_no_credentials"]
+    prompt_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    output_schema_path: str | None
+    output_schema_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    handoff_path: str | None
+    handoff_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    resume_thread_id: Annotated[str, Field(max_length=256)] | None
+    test_id: Identifier | None
+    argv: Annotated[tuple[str, ...], BeforeValidator(_freeze_sequence)]
+    cwd: str | None
+    timeout_seconds: Annotated[int, Field(ge=1, le=MAX_TIMEOUT_SECONDS)]
+    transport_stdout_limit_bytes: Annotated[int, Field(ge=1)] | None
+    transport_stderr_limit_bytes: Annotated[int, Field(ge=1)] | None
+    max_stdout_bytes: Annotated[int, Field(ge=1, le=MAX_TEST_OUTPUT_BYTES)] | None
+    max_stderr_bytes: Annotated[int, Field(ge=1, le=MAX_TEST_OUTPUT_BYTES)] | None
+    removed_environment_variable_names: Annotated[
+        tuple[str, ...], BeforeValidator(_freeze_sequence)
+    ]
+    skipped_after_action_id: Identifier | None
     started_at: RequiredString
+
+    @model_validator(mode="after")
+    def validate_kind_specific_evidence(self) -> PendingAction:
+        if (
+            tuple(
+                sorted(
+                    self.removed_environment_variable_names,
+                    key=lambda item: (item.casefold(), item),
+                )
+            )
+            != self.removed_environment_variable_names
+            or len(set(self.removed_environment_variable_names))
+            != len(self.removed_environment_variable_names)
+            or any(
+                not is_sensitive_name(name)
+                for name in self.removed_environment_variable_names
+            )
+        ):
+            raise ValueError(
+                "pending removed environment-variable names are invalid"
+            )
+        if self.action_id != self.run_id:
+            raise ValueError("pending action run_id must equal its deterministic action_id")
+        if self.kind in {"worker", "auditor"}:
+            expected_role = self.kind
+            expected_sandbox = "workspace-write" if self.kind == "worker" else "read-only"
+            if (
+                self.role != expected_role
+                or self.sandbox != expected_sandbox
+                or self.network_policy != "disabled"
+                or self.model is None
+                or self.codex_executable is None
+                or self.reasoning_effort is None
+                or self.prompt_sha256 is None
+                or self.output_schema_path is None
+                or self.output_schema_sha256 is None
+                or self.handoff_path is None
+                or self.handoff_sha256 is None
+                or self.test_id is not None
+                or self.argv
+                or self.cwd is not None
+                or self.transport_stdout_limit_bytes is None
+                or self.transport_stderr_limit_bytes is None
+                or self.max_stdout_bytes is not None
+                or self.max_stderr_bytes is not None
+                or self.skipped_after_action_id is not None
+            ):
+                raise ValueError("pending Codex action evidence is incomplete or contradictory")
+            if self.kind == "worker" and self.ephemeral:
+                raise ValueError("worker actions must be persistent")
+            if self.kind == "auditor" and (
+                not self.ephemeral or self.resume_thread_id is not None
+            ):
+                raise ValueError("auditor actions must be fresh and ephemeral")
+        elif (
+            self.role != "fixed_test"
+            or self.model is not None
+            or self.codex_executable is not None
+            or self.reasoning_effort is not None
+            or self.sandbox != "none"
+            or self.network_policy != "offline_test_no_credentials"
+            or self.ephemeral
+            or self.prompt_sha256 is not None
+            or self.output_schema_path is not None
+            or self.output_schema_sha256 is not None
+            or self.handoff_path is not None
+            or self.handoff_sha256 is not None
+            or self.resume_thread_id is not None
+            or self.test_id is None
+            or not self.argv
+            or self.cwd is None
+            or self.transport_stdout_limit_bytes is not None
+            or self.transport_stderr_limit_bytes is not None
+            or self.max_stdout_bytes is None
+            or self.max_stderr_bytes is None
+        ):
+            raise ValueError("pending fixed-test evidence is incomplete or contradictory")
+        if self.approval_policy != "never":
+            raise ValueError("pending actions must preserve the frozen safety policy")
+        return self
 
 
 class WorkflowState(BaseModel):
@@ -402,6 +512,7 @@ class WorkflowState(BaseModel):
 
 @dataclass(frozen=True)
 class HumanFile:
+    locator_path: Path
     path: Path
     content: bytes
     sha256: str
@@ -415,6 +526,7 @@ class PreparedWorkflowTest:
 
 @dataclass(frozen=True)
 class PreparedSubstage:
+    specification_locator_path: Path
     specification_path: Path
     specification_bytes: bytes
     specification_sha256: str
@@ -505,12 +617,19 @@ def load_substage_specification(
         for test in specification.acceptance_tests
     )
 
-    for human_file in (contract, worker_initial, worker_repair, auditor):
-        relative = _relative_to(human_file.path, workspace)
-        if relative is not None and not path_matches_any(relative, specification.protected_paths):
-            raise WorkflowInputError(
-                "contract and prompt files inside the workspace must match protected_paths"
-            )
+    for human_file, label in (
+        (contract, "contract"),
+        (worker_initial, "worker initial prompt"),
+        (worker_repair, "worker repair prompt"),
+        (auditor, "auditor prompt"),
+    ):
+        _validate_human_locator(
+            human_file.locator_path,
+            human_file.path,
+            workspace,
+            specification.protected_paths,
+            label,
+        )
 
     structural = [
         str(path),
@@ -557,6 +676,7 @@ def load_substage_specification(
         raise WorkflowInputError("substage contains a structural redaction collision")
 
     return PreparedSubstage(
+        specification_locator_path=_absolute_locator(path),
         specification_path=specification_path,
         specification_bytes=specification_bytes,
         specification_sha256=hashlib.sha256(specification_bytes).hexdigest(),
@@ -577,9 +697,19 @@ def load_continuation_instruction(
     path: Path,
     *,
     sensitive_values: Sequence[str] = (),
+    workspace: Path | None = None,
+    protected_paths: Sequence[str] = (),
 ) -> HumanFile:
     """Read once and validate one exact human continuation instruction."""
+    locator = _absolute_locator(path)
     resolved = _resolve_regular_file(path, "continuation instruction")
+    _validate_human_locator(
+        locator,
+        resolved,
+        workspace,
+        protected_paths,
+        "continuation instruction",
+    )
     content = _read_utf8_file(
         resolved, "continuation instruction", limit=MAX_HUMAN_FILE_BYTES
     )
@@ -589,7 +719,12 @@ def load_continuation_instruction(
         for value in (str(path), str(resolved), digest)
     ):
         raise WorkflowInputError("continuation instruction has a structural redaction collision")
-    return HumanFile(path=resolved, content=content, sha256=digest)
+    return HumanFile(
+        locator_path=locator,
+        path=resolved,
+        content=content,
+        sha256=digest,
+    )
 
 
 def parse_worker_result(value: str | bytes) -> WorkerModelResult:
@@ -629,11 +764,24 @@ def _parse_model_json(
 
 
 def _resolve_regular_file(path: Path, label: str) -> Path:
+    locator = _absolute_locator(path)
     try:
-        resolved = path.resolve(strict=True)
+        file_status = locator.lstat()
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise WorkflowInputError(f"{label} path could not be resolved") from exc
+    if stat.S_ISLNK(file_status.st_mode):
+        raise WorkflowInputError(f"{label} must not be a symbolic link")
+    if not stat.S_ISREG(file_status.st_mode):
+        raise WorkflowInputError(f"{label} is not a regular file")
+    try:
+        resolved = locator.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
         raise WorkflowInputError(f"{label} path could not be resolved") from exc
-    if not resolved.is_file() or resolved.is_symlink():
+    try:
+        resolved_status = resolved.stat()
+    except OSError as exc:
+        raise WorkflowInputError(f"{label} path could not be resolved") from exc
+    if not stat.S_ISREG(resolved_status.st_mode):
         raise WorkflowInputError(f"{label} is not a regular file")
     return resolved
 
@@ -655,9 +803,47 @@ def _load_human_file(parent: Path, value: str, label: str) -> HumanFile:
     candidate = Path(value)
     if not candidate.is_absolute():
         candidate = parent / candidate
+    locator = _absolute_locator(candidate)
     path = _resolve_regular_file(candidate, label)
     content = _read_utf8_file(path, label, limit=MAX_HUMAN_FILE_BYTES)
-    return HumanFile(path=path, content=content, sha256=hashlib.sha256(content).hexdigest())
+    return HumanFile(
+        locator_path=locator,
+        path=path,
+        content=content,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _absolute_locator(path: Path) -> Path:
+    try:
+        return Path(os.path.abspath(os.fspath(path)))
+    except (OSError, TypeError, ValueError) as exc:
+        raise WorkflowInputError("input path could not be normalized") from exc
+
+
+def _validate_human_locator(
+    locator: Path,
+    resolved: Path,
+    workspace: Path | None,
+    protected_paths: Sequence[str],
+    label: str,
+) -> None:
+    if workspace is None:
+        return
+    supplied_relative = _relative_to(locator, workspace)
+    if supplied_relative is None:
+        return
+    if _relative_to(resolved, workspace) is None:
+        raise WorkflowInputError(f"{label} locator escapes the workspace")
+    try:
+        normalized = normalize_relative_path(supplied_relative)
+    except ValueError as exc:
+        raise WorkflowInputError(f"{label} locator is invalid") from exc
+    if not path_matches_any(normalized, protected_paths):
+        raise WorkflowInputError(
+            "contract, prompt, and continuation files inside the workspace "
+            "must match protected_paths"
+        )
 
 
 def _read_utf8_file(path: Path, label: str, limit: int | None) -> bytes:
