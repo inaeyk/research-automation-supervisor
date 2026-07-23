@@ -39,6 +39,8 @@ def test_direct_pass_uses_persistent_worker_fresh_auditor_and_equal_snapshots(
 
     assert result.status == "completed"
     assert result.worker_thread_id == "worker-thread-1"
+    assert result.latest_worker_action_id == "worker-r000"
+    assert result.latest_audit_action_id == "auditor-r000"
     assert result.tests_passed and result.scope_compliant and result.contract_satisfied
     assert result == substage_status(Path(result.artifact_directory))
     persisted = json.loads((Path(result.artifact_directory) / "result.json").read_text())
@@ -86,8 +88,15 @@ def test_checkpoint_pass_returns_frozen_checkpoint_exit_state(tmp_path: Path) ->
     result = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
 
     assert result.status == "checkpoint_paused"
+    assert result.pause_reason == "auditor_passed_checkpoint"
+    assert result.latest_worker_action_id == "worker-r000"
+    assert result.latest_audit_action_id == "auditor-r000"
+    run_directory = Path(result.artifact_directory)
+    persisted = json.loads((run_directory / "result.json").read_text())
+    assert persisted == result.to_dict()
+    assert substage_status(run_directory) == result
     with pytest.raises(WorkflowInputError):
-        resume_substage(Path(result.artifact_directory), services=services(fake))
+        resume_substage(run_directory, services=services(fake))
 
 
 def test_failed_fixed_test_repairs_on_exact_worker_thread_then_audits(tmp_path: Path) -> None:
@@ -112,6 +121,8 @@ def test_failed_fixed_test_repairs_on_exact_worker_thread_then_audits(tmp_path: 
 
     assert result.status == "completed"
     assert result.repair_round == 1
+    assert result.latest_worker_action_id == "worker-r001"
+    assert result.latest_audit_action_id == "auditor-r001"
     repair_metadata = json.loads(
         (
             Path(result.artifact_directory)
@@ -188,6 +199,8 @@ def test_worker_human_status_always_pauses(tmp_path: Path, worker_status: str) -
 
     assert result.status == "human_paused"
     assert result.pause_reason == f"worker_{worker_status}"
+    assert result.latest_worker_action_id == "worker-r000"
+    assert result.latest_audit_action_id is None
     assert (Path(result.artifact_directory) / "escalation/package.json").is_file()
 
 
@@ -281,6 +294,7 @@ def test_repair_limit_zero_pauses_and_human_continuation_uses_exact_bytes(
     )
     paused = run_substage(spec, runs_dir=tmp_path / "runs", services=services(fake))
     assert paused.status == "repair_limit_paused"
+    assert paused.pause_reason == "fixed_test_failed_repair_limit"
 
     result = continue_substage(
         Path(paused.artifact_directory),
@@ -310,6 +324,7 @@ def test_abort_marks_human_pause_and_status_read_is_nonmutating(tmp_path: Path) 
     aborted = abort_substage(run_directory, "No longer needed", services=services(fake))
 
     assert aborted.status == "aborted"
+    assert aborted.pause_reason == "No longer needed"
     before = (run_directory / "state.json").stat().st_mtime_ns
     assert substage_status(run_directory) == aborted
     assert (run_directory / "state.json").stat().st_mtime_ns == before

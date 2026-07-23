@@ -134,8 +134,10 @@ must match one closed semantic form keyed by event type, prior state, new state,
 action kind, action-ID presence, and its one defined reason; syntactically valid
 but undefined or state-inappropriate reasons are rejected even after the chain
 is rehashed. Evidence reasons are also bound to their exact state-update field
-sets, and pause transitions must record the same deterministic pause reason.
-Action completion reasons are kind-specific.
+sets. Human, repair-limit, checkpoint, and local-failure pause transitions must
+record the same deterministic journal reason in `pause_reason`; a successful
+checkpoint therefore stores `auditor_passed_checkpoint`. Action completion
+reasons are kind-specific.
 
 Worker, auditor, and test actions have deterministic IDs. Before launch, the
 journal freezes the round, run/action identity, role, workspace, model and
@@ -163,16 +165,18 @@ test files; test suites are checked against action records; Git evidence is
 checked against its exact patch locator, size, and hash; state is replayed from
 the journal and compared with both snapshots. Replay independently derives the
 latest completed worker, auditor, and fixed-test action lifecycles from verified
-typed records. The durable latest-worker and latest-auditor fields may be null
-or name only the latest verified completion of their corresponding kind; IDs
-cannot cross roles, cite an earlier or nonexistent action, or rely on a prefix
-alone. Missing, replaced, truncated, or contradictory evidence cannot report a
-completed status. An unmatched intent is never relaunched: fully proved
-artifacts are finalized exactly once, while uncertain artifacts cause a durable
-human pause. A completion journaled before snapshot replacement is replayed
-without relaunch. Frozen source hashes, repository root, `HEAD`, and
-branch/detached identity are checked before continued work, and the engine
-never guesses or rolls back files.
+typed records. The durable latest-worker and latest-auditor fields must equal
+those independently derived values exactly: null if and only if no verified
+completion of that kind exists, otherwise the most recent verified completion.
+IDs cannot cross roles, cite an earlier or nonexistent action, be erased by
+later evidence or transitions, or rely on a prefix alone. Missing, replaced,
+truncated, or contradictory evidence cannot report a completed status. An
+unmatched intent is never relaunched: fully proved artifacts are finalized
+exactly once, while uncertain artifacts cause a durable human pause. A
+completion journaled before snapshot replacement is replayed without relaunch.
+Frozen source hashes, repository root, `HEAD`, and branch/detached identity are
+checked before continued work, and the engine never guesses or rolls back
+files.
 
 The run directory contains normalized specification and frozen hashes,
 baseline, state/result snapshots, the journal, action records, worker/test/audit

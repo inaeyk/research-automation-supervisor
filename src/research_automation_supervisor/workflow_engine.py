@@ -1189,7 +1189,7 @@ def _consume_auditor_record(
             final_state,
             reason,
             contract_satisfied=True,
-            pause_reason=("Human checkpoint required." if context.state.checkpoint_after else None),
+            pause_reason=(reason if context.state.checkpoint_after else None),
             summary=audit.summary or "Substage completed after deterministic audit pass.",
         )
 
@@ -1872,7 +1872,8 @@ def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
         )
     if (
         entry.event_type == "transition"
-        and entry.new_state in {"human_paused", "repair_limit_paused", "failed"}
+        and entry.new_state
+        in {"human_paused", "repair_limit_paused", "checkpoint_paused", "failed"}
         and entry.reason != "human_abort"
         and entry.state_updates.get("pause_reason") != entry.reason
     ):
@@ -2120,12 +2121,25 @@ def _validate_journal_semantics(
                 else None
             )
             candidate = entry.state_updates[field]
-            if candidate is not None and candidate != latest_for_kind:
+            if candidate != latest_for_kind:
                 raise WorkflowStateError(
                     "workflow latest action identity contradicts verified action kind"
                 )
         replayed.update(entry.state_updates)
         current_status = entry.new_state
+    for field, action_kind in (
+        ("latest_worker_action_id", "worker"),
+        ("latest_audit_action_id", "auditor"),
+    ):
+        latest_for_kind = (
+            completed_by_kind[action_kind][-1]
+            if completed_by_kind[action_kind]
+            else None
+        )
+        if replayed[field] != latest_for_kind:
+            raise WorkflowStateError(
+                "replayed latest action identity contradicts verified action kind"
+            )
     if state is not None:
         if current_status != state.status:
             raise WorkflowStateError("workflow state does not match journal state history")
@@ -2141,7 +2155,7 @@ def _validate_journal_semantics(
                 if completed_by_kind[action_kind]
                 else None
             )
-            if candidate is not None and candidate != latest_for_kind:
+            if candidate != latest_for_kind:
                 raise WorkflowStateError(
                     "workflow latest action identity contradicts verified action kind"
                 )

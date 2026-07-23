@@ -363,14 +363,249 @@ def _invoke_existing_workflow_operation(
     run_directory: Path,
     fake: Path,
     instruction: Path,
+    *,
+    workflow_services: WorkflowServices | None = None,
 ) -> object:
+    selected_services = workflow_services or services(fake)
     if operation == "status":
         return substage_status(run_directory)
     if operation == "resume":
-        return resume_substage(run_directory, services=services(fake))
+        return resume_substage(run_directory, services=selected_services)
     if operation == "continue":
-        return continue_substage(run_directory, instruction, services=services(fake))
-    return abort_substage(run_directory, "stop", services=services(fake))
+        return continue_substage(
+            run_directory,
+            instruction,
+            services=selected_services,
+        )
+    return abort_substage(run_directory, "stop", services=selected_services)
+
+
+def _replace_last_latest_action_update(
+    entries: list[dict[str, Any]],
+    field: str,
+    value: str | None,
+) -> None:
+    entry = next(
+        item
+        for item in reversed(entries)
+        if field in item["state_updates"]
+    )
+    entry["state_updates"][field] = value
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["human_sentence", "other_valid_reason"],
+)
+def test_rehashed_checkpoint_pause_reason_mismatch_is_rejected(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path, checkpoint_after=True)
+    checkpoint = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(checkpoint.artifact_directory)
+    replacement = (
+        "Human checkpoint required."
+        if mutation == "human_sentence"
+        else "auditor_passed"
+    )
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        entry = next(
+            item
+            for item in entries
+            if item["new_state"] == "checkpoint_paused"
+        )
+        entry["state_updates"]["pause_reason"] = replacement
+        if mutation == "other_valid_reason":
+            entry["reason"] = replacement
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(run_directory, "pause_reason", replacement)
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["latest_worker_action_id", "latest_audit_action_id"],
+)
+def test_rehashed_completed_workflow_rejects_erased_latest_action(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path)
+    completed = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(completed.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        _replace_last_latest_action_update(entries, field, None)
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(run_directory, field, None)
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+
+
+def test_rehashed_completed_workflow_rejects_both_latest_actions_erased(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path)
+    completed = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(completed.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        _replace_last_latest_action_update(entries, "latest_worker_action_id", None)
+        _replace_last_latest_action_update(entries, "latest_audit_action_id", None)
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(run_directory, "latest_worker_action_id", None)
+    _rewrite_state_and_result_field(run_directory, "latest_audit_action_id", None)
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+
+
+@pytest.mark.parametrize("operation", ["status", "resume", "continue", "abort"])
+def test_rehashed_human_pause_rejects_erased_worker_without_launch(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    responses = [codex_response("worker", "worker", worker_result("blocked"))]
+    spec, _, fake = create_workflow_tree(tmp_path, responses=responses)
+    paused = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(paused.artifact_directory)
+    instruction = tmp_path / "instruction.md"
+    instruction.write_text("Continue exactly.\n", encoding="utf-8")
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        _replace_last_latest_action_update(
+            entries,
+            "latest_worker_action_id",
+            None,
+        )
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(
+        run_directory,
+        "latest_worker_action_id",
+        None,
+    )
+    test_launches: list[str] = []
+
+    def unexpected_test(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        test_launches.append("test")
+        raise AssertionError("fixed test launched after failed integrity validation")
+
+    guarded_services = WorkflowServices(
+        codex_executable=str(fake),
+        test_invoker=unexpected_test,  # type: ignore[arg-type]
+    )
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        _invoke_existing_workflow_operation(
+            operation,
+            run_directory,
+            fake,
+            instruction,
+            workflow_services=guarded_services,
+        )
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+    assert test_launches == []
+
+
+def test_rehashed_checkpoint_pause_rejects_erased_auditor_without_launch(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path, checkpoint_after=True)
+    checkpoint = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(checkpoint.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        _replace_last_latest_action_update(
+            entries,
+            "latest_audit_action_id",
+            None,
+        )
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(
+        run_directory,
+        "latest_audit_action_id",
+        None,
+    )
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+
+
+def test_rehashed_nonnull_latest_auditor_before_any_audit_is_rejected(
+    tmp_path: Path,
+) -> None:
+    responses = [codex_response("worker", "worker", worker_result("blocked"))]
+    spec, _, fake = create_workflow_tree(tmp_path, responses=responses)
+    paused = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(paused.artifact_directory)
+
+    def mutate(entries: list[dict[str, Any]]) -> None:
+        transition = next(
+            item for item in entries if item["reason"] == "worker_blocked"
+        )
+        transition["state_updates"]["latest_audit_action_id"] = "auditor-r000"
+
+    _rehash_journal(run_directory, mutate)
+    _rewrite_state_and_result_field(
+        run_directory,
+        "latest_audit_action_id",
+        "auditor-r000",
+    )
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(run_directory)
+
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
 
 
 @pytest.mark.parametrize("operation", ["status", "resume", "continue", "abort"])
