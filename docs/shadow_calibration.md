@@ -51,6 +51,24 @@ and authoritative comparison material receive the same recursive preflight
 before any write. Generated supervisor strings still use deterministic
 redaction-collision disqualification.
 
+Every caller locator is checked as its exact lexical `os.fspath()` string
+before normalization, absolute-path conversion, resolution, containment
+testing, filesystem access, output, locking, or run creation. Thus a sensitive
+redundant component cannot disappear through `segment/../target`. This applies
+to specifications, `--runs-dir`, existing run directories, reviews, proposal
+IDs, abort reasons, and every other Stage 3 command locator.
+
+Run creation separately preflights the configured and discovered Codex
+executable locator, its resolved path, the supervisor workspace, prospective
+run and proposal directories, schemas, manifests, Stage 1 action roots, and
+every derived dependency path. The engine then recursively checks each complete
+typed object immediately before serializing a normalized specification, source
+summary, decision set, action intent, journal entry, state/result pair,
+supervisor request/record, escalation, assessment, comparison, review, report,
+or CLI payload. A caller or dependency collision is exit 2 before run
+creation; a collision found in already durable trusted Stage 3 structure is an
+exit-4 integrity failure and is never healed or rendered.
+
 ## Persistent supervisor
 
 The first proposal creates one persistent Stage 1 `supervisor` run. It uses
@@ -157,8 +175,9 @@ Every operation strictly loads `state.json`, derives its expected public
 result, strictly loads `result.json`, and requires exact equality before any
 permitted reconciliation or mutation. Read-only operations never heal a
 disagreement. Caller specification/path/review errors are exit 2, dependencies
-exit 3, trusted Stage 2/3 replacement or drift exit 4, and recoverable external
-action uncertainty is a durable exit-5 pause.
+exit 3, trusted Stage 2/3 replacement, drift, or durable confidentiality
+collision exit 4, recoverable external-action uncertainty or runtime evidence
+collision is a durable exit-5 pause, and aborted state is exit 8.
 
 ## Artifacts and future boundary
 

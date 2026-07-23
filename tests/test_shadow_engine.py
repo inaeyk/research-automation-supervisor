@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -827,34 +829,60 @@ def test_shadow_lock_rejects_symlink_without_modifying_its_target(
 def test_shadow_lock_rejects_nonregular_and_broken_paths(
     tmp_path: Path,
 ) -> None:
-    creators = ("directory", "fifo", "socket", "broken_symlink")
+    creators = ("directory", "fifo", "broken_symlink")
     for name in creators:
         run_directory = tmp_path / name
         run_directory.mkdir()
         lock_path = run_directory / "shadow.lock"
-        unix_socket: socket.socket | None = None
         if name == "directory":
             lock_path.mkdir()
         elif name == "fifo":
             os.mkfifo(lock_path)
-        elif name == "socket":
-            unix_socket = socket.socket(socket.AF_UNIX)
-            try:
-                unix_socket.bind(str(lock_path))
-            except PermissionError:
-                unix_socket.close()
-                continue
         else:
             lock_path.symlink_to(run_directory / "missing")
+        with pytest.raises(ShadowLockError), _ShadowLock(
+            run_directory,
+            lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        ):
+            pass
+
+
+def test_shadow_lock_rejects_socket_using_portable_short_path(
+    tmp_path: Path,
+) -> None:
+    long_fixture_artifact = tmp_path / ("long-fixture-root-" + "x" * 120)
+    long_fixture_artifact.mkdir()
+    short_directory = Path(
+        tempfile.mkdtemp(prefix="ras3-sock-", dir="/tmp")
+    )
+    lock_path = short_directory / "shadow.lock"
+    unix_socket = socket.socket(socket.AF_UNIX)
+    try:
         try:
-            with pytest.raises(ShadowLockError), _ShadowLock(
-                run_directory,
-                lambda: datetime(2026, 1, 1, tzinfo=UTC),
-            ):
-                pass
-        finally:
-            if unix_socket is not None:
-                unix_socket.close()
+            unix_socket.bind(str(lock_path))
+        except PermissionError:
+            # Some hermetic test sandboxes prohibit AF_UNIX bind while still
+            # permitting creation of the same socket inode type.
+            os.mknod(lock_path, stat.S_IFSOCK | 0o600)
+        before = lock_path.lstat()
+
+        with pytest.raises(ShadowLockError), _ShadowLock(
+            short_directory,
+            lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        ):
+            pass
+
+        after = lock_path.lstat()
+        assert stat.S_ISSOCK(after.st_mode)
+        assert (after.st_dev, after.st_ino) == (
+            before.st_dev,
+            before.st_ino,
+        )
+        assert str(tmp_path) not in str(lock_path)
+    finally:
+        unix_socket.close()
+        lock_path.unlink(missing_ok=True)
+        short_directory.rmdir()
 
 
 def test_shadow_lock_metadata_and_stale_recovery_rules(

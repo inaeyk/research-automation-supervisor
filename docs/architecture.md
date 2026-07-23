@@ -38,9 +38,10 @@ Stage 3 is a separate retrospective reader and calibration engine described in
 `shadow_calibration.md`. `shadow_sources.py` reuses trusted Stage 2 integrity
 readers and prompt builders to reconstruct point-in-time decisions.
 `shadow_prompts.py` assembles non-persisted blind inputs. `shadow_engine.py`
-owns canonical-UUID-only persistent read-only supervision, complete recursive
-confidentiality preflight, inode-bound locking, post-proposal comparison
-ordering, exact state/result agreement, durable state, and exact-once
-recovery. `shadow_review.py` is the only semantic
+owns canonical-UUID-only persistent read-only supervision, lexical caller and
+resolved dependency path preflight, complete recursive serialized-structure
+confidentiality invariants, inode-bound locking, post-proposal comparison
+ordering, exact state/result agreement, durable state, and exact-once recovery.
+`shadow_review.py` is the only semantic
 quality boundary: immutable human reviews feed an informational readiness
 calculation that cannot enable automation.

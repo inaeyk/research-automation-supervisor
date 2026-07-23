@@ -37,6 +37,9 @@ from research_automation_supervisor.errors import (
     WorkflowStateError,
 )
 from research_automation_supervisor.redaction import redact_text
+from research_automation_supervisor.shadow_confidentiality import (
+    preflight_shadow_confidentiality,
+)
 from research_automation_supervisor.shadow_engine import (
     abort_shadow_calibration as abort_shadow,
 )
@@ -417,14 +420,15 @@ def validate_shadow_spec_command(
         "decision_count": len(prepared.source.decisions),
     }
     if as_json:
-        typer.echo(_stable_json(result))
+        _emit_shadow_payload(result, _stable_json(result), as_json)
     else:
-        typer.echo(
+        rendered = (
             f"Valid shadow calibration "
             f"{prepared.specification.calibration_id}: {path}\n"
             f"Source Stage 2 run: {prepared.source.run_directory}\n"
             f"Decision points: {len(prepared.source.decisions)}"
         )
+        _emit_shadow_payload(result, rendered, as_json)
 
 
 @app.command("run-shadow-calibration")
@@ -502,9 +506,12 @@ def shadow_calibration_status_command(
     except Exception:
         _render_shadow_internal_error(as_json)
     if as_json:
-        typer.echo(_stable_json(result.to_dict()))
+        value = result.to_dict()
+        _emit_shadow_payload(value, _stable_json(value), as_json)
     else:
-        typer.echo(_format_shadow_result(result))
+        _emit_shadow_payload(
+            result.to_dict(), _format_shadow_result(result), as_json
+        )
 
 
 @app.command("record-shadow-review")
@@ -557,19 +564,18 @@ def shadow_calibration_report_command(
     except Exception:
         _render_shadow_internal_error(as_json)
     if as_json:
-        typer.echo(_stable_json(report))
+        _emit_shadow_payload(report, _stable_json(report), as_json)
     else:
         readiness = cast(dict[str, object], report["readiness"])
-        typer.echo(
-            "\n".join(
-                (
-                    f"Calibration: {report['calibration_id']}",
-                    f"Status: {report['status']}",
-                    f"Readiness: {readiness['status']}",
-                    "Readiness is informational only; automation remains disabled.",
-                )
+        rendered = "\n".join(
+            (
+                f"Calibration: {report['calibration_id']}",
+                f"Status: {report['status']}",
+                f"Readiness: {readiness['status']}",
+                "Readiness is informational only; automation remains disabled.",
             )
         )
+        _emit_shadow_payload(report, rendered, as_json)
 
 
 @app.command("abort-shadow-calibration")
@@ -615,13 +621,34 @@ def _render_workflow_result_and_exit(result: WorkflowResult, as_json: bool) -> N
 def _render_shadow_result_and_exit(
     result: ShadowResult, as_json: bool
 ) -> None:
-    if as_json:
-        typer.echo(_stable_json(result.to_dict()))
-    else:
-        typer.echo(_format_shadow_result(result))
+    value = result.to_dict()
+    rendered = (
+        _stable_json(value)
+        if as_json
+        else _format_shadow_result(result)
+    )
+    _emit_shadow_payload(value, rendered, as_json)
     exit_code = shadow_calibration_exit_code(result.status)
     if exit_code:
         raise typer.Exit(code=exit_code)
+
+
+def _emit_shadow_payload(
+    value: object,
+    rendered: str,
+    as_json: bool,
+) -> None:
+    _, _, sensitive_values = build_subprocess_environment()
+    try:
+        preflight_shadow_confidentiality(
+            value,
+            sensitive_values,
+            label="shadow CLI payload",
+            integrity=True,
+        )
+    except ShadowStateError as exc:
+        _render_shadow_error(str(exc), as_json, 4)
+    typer.echo(rendered)
 
 
 def _format_shadow_result(result: ShadowResult) -> str:

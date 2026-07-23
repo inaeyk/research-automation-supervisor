@@ -43,11 +43,11 @@ from research_automation_supervisor.errors import (
     WorkflowDependencyError,
 )
 from research_automation_supervisor.redaction import (
-    redact_text,
     would_redact_text,
 )
 from research_automation_supervisor.shadow_confidentiality import (
     preflight_shadow_confidentiality,
+    preflight_shadow_locator,
 )
 from research_automation_supervisor.shadow_models import (
     BlindInputManifest,
@@ -162,67 +162,21 @@ class _SupervisorProof:
     artifact_hashes: dict[str, str]
 
 
-def validate_shadow_spec(
-    path: Path,
+def _sensitive_values(
+    environ: Mapping[str, str] | None,
+) -> tuple[str, ...]:
+    _, _, sensitive_values = build_subprocess_environment(environ)
+    return sensitive_values
+
+
+def _initial_state(
+    run_directory: Path,
+    prepared: PreparedShadowSpecification,
     *,
-    environ: Mapping[str, str] | None = None,
-) -> PreparedShadowSpecification:
-    """Validate Stage 3 inputs without writes or model launches."""
-    return load_shadow_specification(path, environ=environ)
-
-
-def run_shadow_calibration(
-    path: Path,
-    *,
-    runs_dir: Path = Path("runs/shadow"),
-    services: ShadowServices = DEFAULT_SHADOW_SERVICES,
-) -> ShadowResult:
-    """Create and synchronously drive one retrospective calibration run."""
-    prepared = load_shadow_specification(path, environ=services.environ)
-    executable = _resolve_codex_executable(services.codex_executable)
-    token = services.token_factory()
-    if (
-        not token
-        or len(token) > 80
-        or not token.replace("-", "").replace("_", "").isalnum()
-    ):
-        raise ShadowInputError("shadow run token is invalid")
-    try:
-        resolved_runs = runs_dir.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ShadowInputError(
-            "shadow runs directory could not be resolved"
-        ) from exc
-    run_directory = (
-        resolved_runs
-        / f"{prepared.specification.calibration_id}-{token}"
-    )
-    _, _, sensitive_values = build_subprocess_environment(services.environ)
-    preflight_shadow_confidentiality(
-        (
-            str(runs_dir),
-            str(resolved_runs),
-            str(run_directory),
-            token,
-        ),
-        sensitive_values,
-        label="prospective shadow run path",
-    )
-    try:
-        resolved_runs.mkdir(parents=True, exist_ok=True)
-        run_directory.mkdir(exist_ok=False)
-    except FileExistsError as exc:
-        raise ShadowInputError(
-            "exclusive shadow run directory already exists"
-        ) from exc
-    except OSError as exc:
-        raise ShadowInputError(
-            "shadow run directory could not be created"
-        ) from exc
-
-    _initialize_artifacts(run_directory, prepared)
-    now = _utc_string(services.utc_now())
-    state = ShadowState(
+    token: str,
+    timestamp: str,
+) -> ShadowState:
+    return ShadowState(
         calibration_id=prepared.specification.calibration_id,
         run_token=token,
         status="initialized",
@@ -264,10 +218,218 @@ def run_shadow_calibration(
         summary="Shadow calibration initialized.",
         journal_sequence=0,
         journal_hash=ZERO_HASH,
-        started_at=now,
-        updated_at=now,
+        started_at=timestamp,
+        updated_at=timestamp,
     )
-    _persist_state(run_directory, state, prepared)
+
+
+def _preflight_prospective_run(
+    run_directory: Path,
+    prepared: PreparedShadowSpecification,
+    state: ShadowState,
+    *,
+    executable: str,
+    sensitive_values: Sequence[str],
+) -> None:
+    """Prove every known run/dependency path before creating the run root."""
+    payloads = _initial_artifact_payloads(prepared)
+    values: list[object] = [
+        executable,
+        prepared.normalized_dict(),
+        prepared.source.identity_record(),
+        decision_points_artifact(prepared.source.decisions),
+        state,
+        _result_for_state(state, prepared),
+        tuple(
+            (str(run_directory / name), content)
+            for name, content in payloads.items()
+        ),
+        tuple(
+            str(run_directory / name)
+            for name in (
+                "supervisor",
+                "proposals",
+                "comparisons",
+                "reviews",
+                "reports",
+                "escalation",
+                STATE_FILE,
+                RESULT_FILE,
+                JOURNAL_FILE,
+                LOCK_FILE,
+            )
+        ),
+    ]
+    for decision in prepared.source.decisions:
+        rendered = build_blind_supervisor_prompt(
+            prepared,
+            decision,
+            sensitive_values=sensitive_values,
+        )
+        proposal_id = decision.point.decision_id
+        action_id = f"supervisor-{proposal_id}"
+        proposal_directory = run_directory / "proposals" / proposal_id
+        comparison_directory = run_directory / "comparisons" / proposal_id
+        values.append(
+            (
+                decision.point,
+                rendered.manifest,
+                rendered.output_schema,
+                {
+                    "action_id": action_id,
+                    "proposal_id": proposal_id,
+                    "workspace": prepared.source.state.workspace,
+                    "codex_executable": executable,
+                    "proposal_directory": str(proposal_directory),
+                    "blind_manifest_path": str(
+                        proposal_directory / "blind-input-manifest.json"
+                    ),
+                    "output_schema_path": str(
+                        proposal_directory / "output-schema.json"
+                    ),
+                    "stage1_artifact_directory": str(
+                        proposal_directory / "stage1-run"
+                    ),
+                    "supervisor_record_path": str(
+                        run_directory / "supervisor" / f"{action_id}.json"
+                    ),
+                    "supervisor_result_path": str(
+                        proposal_directory / "supervisor-result.json"
+                    ),
+                    "candidate_prompt_path": str(
+                        proposal_directory / "candidate-prompt.md"
+                    ),
+                    "assessment_path": str(
+                        proposal_directory / "assessment.json"
+                    ),
+                    "comparison_directory": str(comparison_directory),
+                    "comparison_path": str(
+                        comparison_directory / "comparison.json"
+                    ),
+                    "authoritative_source_path": str(
+                        comparison_directory / "authoritative-source.md"
+                    ),
+                    "authoritative_rendered_path": str(
+                        comparison_directory / "authoritative-rendered.md"
+                    ),
+                    "review_path": str(
+                        run_directory / "reviews" / f"{proposal_id}.json"
+                    ),
+                },
+            )
+        )
+    preflight_shadow_confidentiality(
+        values,
+        sensitive_values,
+        label="prospective shadow run structure",
+    )
+
+
+def validate_shadow_spec(
+    path: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> PreparedShadowSpecification:
+    """Validate Stage 3 inputs without writes or model launches."""
+    return load_shadow_specification(path, environ=environ)
+
+
+def run_shadow_calibration(
+    path: Path,
+    *,
+    runs_dir: Path = Path("runs/shadow"),
+    services: ShadowServices = DEFAULT_SHADOW_SERVICES,
+) -> ShadowResult:
+    """Create and synchronously drive one retrospective calibration run."""
+    sensitive_values = _sensitive_values(services.environ)
+    raw_path = preflight_shadow_locator(
+        path,
+        sensitive_values,
+        label="shadow specification locator",
+    )
+    raw_runs_dir = preflight_shadow_locator(
+        runs_dir,
+        sensitive_values,
+        label="shadow runs directory locator",
+    )
+    if services.codex_executable is not None:
+        preflight_shadow_confidentiality(
+            services.codex_executable,
+            sensitive_values,
+            label="configured Codex executable locator",
+        )
+    prepared = load_shadow_specification(
+        Path(raw_path), environ=services.environ
+    )
+    executable = _resolve_codex_executable(
+        services.codex_executable,
+        sensitive_values=sensitive_values,
+    )
+    token = services.token_factory()
+    if (
+        not token
+        or len(token) > 80
+        or not token.replace("-", "").replace("_", "").isalnum()
+    ):
+        raise ShadowInputError("shadow run token is invalid")
+    try:
+        resolved_runs = Path(raw_runs_dir).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ShadowInputError(
+            "shadow runs directory could not be resolved"
+        ) from exc
+    run_directory = (
+        resolved_runs
+        / f"{prepared.specification.calibration_id}-{token}"
+    )
+    preflight_shadow_confidentiality(
+        (
+            raw_runs_dir,
+            str(resolved_runs),
+            str(run_directory),
+            token,
+            executable,
+        ),
+        sensitive_values,
+        label="prospective shadow run path",
+    )
+    now = _utc_string(services.utc_now())
+    state = _initial_state(
+        run_directory,
+        prepared,
+        token=token,
+        timestamp=now,
+    )
+    _preflight_prospective_run(
+        run_directory,
+        prepared,
+        state,
+        executable=executable,
+        sensitive_values=sensitive_values,
+    )
+    try:
+        resolved_runs.mkdir(parents=True, exist_ok=True)
+        run_directory.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        raise ShadowInputError(
+            "exclusive shadow run directory already exists"
+        ) from exc
+    except OSError as exc:
+        raise ShadowInputError(
+            "shadow run directory could not be created"
+        ) from exc
+
+    _initialize_artifacts(
+        run_directory,
+        prepared,
+        sensitive_values=sensitive_values,
+    )
+    _persist_state(
+        run_directory,
+        state,
+        prepared,
+        sensitive_values=sensitive_values,
+    )
     state = _journal_event(
         run_directory,
         state,
@@ -281,6 +443,7 @@ def run_shadow_calibration(
         artifact_hashes=_initial_artifact_hashes(run_directory),
         updates={},
         utc_now=services.utc_now,
+        sensitive_values=sensitive_values,
     )
     with _ShadowLock(run_directory, services.utc_now):
         context = _ShadowContext(
@@ -308,15 +471,40 @@ def resume_shadow_calibration(
     services: ShadowServices = DEFAULT_SHADOW_SERVICES,
 ) -> ShadowResult:
     """Recover an interrupted active Stage 3 run without duplicate launch."""
-    resolved = _resolve_run_directory(run_directory)
+    sensitive_values = _sensitive_values(services.environ)
+    raw_run = preflight_shadow_locator(
+        run_directory,
+        sensitive_values,
+        label="shadow run directory locator",
+    )
+    if services.codex_executable is not None:
+        preflight_shadow_confidentiality(
+            services.codex_executable,
+            sensitive_values,
+            label="configured Codex executable locator",
+        )
+    resolved = _resolve_run_directory(Path(raw_run))
     with _ShadowLock(resolved, services.utc_now):
         raw_state = _load_state(resolved)
+        _preflight_durable_run(
+            resolved, sensitive_values=sensitive_values
+        )
         prepared = _reload_prepared(raw_state, services)
         _validate_state_result_agreement(
             resolved, raw_state, prepared
         )
-        state = _reconcile_state(resolved, raw_state, prepared)
-        _validate_run(resolved, state, prepared)
+        state = _reconcile_state(
+            resolved,
+            raw_state,
+            prepared,
+            sensitive_values=sensitive_values,
+        )
+        _validate_run(
+            resolved,
+            state,
+            prepared,
+            sensitive_values=sensitive_values,
+        )
         if state.status in {
             "awaiting_reviews",
             "completed",
@@ -332,24 +520,53 @@ def resume_shadow_calibration(
             run_directory=resolved,
             state=state,
             codex_executable=_resolve_codex_executable(
-                services.codex_executable
+                services.codex_executable,
+                sensitive_values=sensitive_values,
             ),
             services=services,
         )
         if state.pending_action is not None:
             _finish_supervisor_action(context)
             if context.state.status == "human_paused":
-                return _result_for_state(context.state, prepared)
+                result = _result_for_state(context.state, prepared)
+                preflight_shadow_confidentiality(
+                    result,
+                    sensitive_values,
+                    label="shadow resume result",
+                    integrity=True,
+                )
+                return result
         return _drive(context)
 
 
 def shadow_calibration_status(run_directory: Path) -> ShadowResult:
     """Read and integrity-check Stage 3 state without writes or launches."""
-    resolved = _resolve_run_directory(run_directory)
+    sensitive_values = _sensitive_values(None)
+    raw_run = preflight_shadow_locator(
+        run_directory,
+        sensitive_values,
+        label="shadow run directory locator",
+    )
+    resolved = _resolve_run_directory(Path(raw_run))
     state = _load_state(resolved)
+    _preflight_durable_run(
+        resolved, sensitive_values=sensitive_values
+    )
     prepared = _reload_prepared(state, DEFAULT_SHADOW_SERVICES)
-    _validate_run(resolved, state, prepared)
-    return _load_result(resolved)
+    _validate_run(
+        resolved,
+        state,
+        prepared,
+        sensitive_values=sensitive_values,
+    )
+    result = _load_result(resolved)
+    preflight_shadow_confidentiality(
+        result,
+        sensitive_values,
+        label="shadow status result",
+        integrity=True,
+    )
+    return result
 
 
 def record_shadow_review(
@@ -360,19 +577,44 @@ def record_shadow_review(
     services: ShadowServices = DEFAULT_SHADOW_SERVICES,
 ) -> ShadowResult:
     """Record exactly one immutable semantic human review."""
-    resolved = _resolve_run_directory(run_directory)
+    sensitive_values = _sensitive_values(services.environ)
+    raw_run = preflight_shadow_locator(
+        run_directory,
+        sensitive_values,
+        label="shadow run directory locator",
+    )
+    raw_review = preflight_shadow_locator(
+        review_path,
+        sensitive_values,
+        label="shadow review locator",
+    )
+    preflight_shadow_confidentiality(
+        proposal_id,
+        sensitive_values,
+        label="shadow proposal identifier",
+    )
+    resolved = _resolve_run_directory(Path(raw_run))
     with _ShadowLock(resolved, services.utc_now):
         raw_state = _load_state(resolved)
+        _preflight_durable_run(
+            resolved, sensitive_values=sensitive_values
+        )
         prepared = _reload_prepared(raw_state, services)
         _validate_state_result_agreement(
             resolved, raw_state, prepared
         )
-        state = _reconcile_state(resolved, raw_state, prepared)
+        state = _reconcile_state(
+            resolved,
+            raw_state,
+            prepared,
+            sensitive_values=sensitive_values,
+        )
         _validate_run(
             resolved,
             state,
             prepared,
             allowed_unjournaled_review=proposal_id,
+            sensitive_values=sensitive_values,
         )
         if state.status != "awaiting_reviews":
             raise ShadowInputError(
@@ -380,14 +622,6 @@ def record_shadow_review(
             )
         if proposal_id not in state.proposal_ids:
             raise ShadowInputError("proposal does not exist")
-        _, _, sensitive_values = build_subprocess_environment(
-            services.environ
-        )
-        preflight_shadow_confidentiality(
-            (proposal_id, str(review_path)),
-            sensitive_values,
-            label="shadow review command",
-        )
         comparison = _load_comparison(resolved, proposal_id)
         if not comparison.comparison_available:
             raise ShadowInputError(
@@ -399,7 +633,7 @@ def record_shadow_review(
                 "proposal already has an immutable human review"
             )
         review = load_shadow_review(
-            review_path,
+            Path(raw_review),
             sensitive_values=sensitive_values,
         )
         if review.proposal_id != proposal_id:
@@ -468,18 +702,40 @@ def record_shadow_review(
                 "summary": summary,
             },
             utc_now=services.utc_now,
+            sensitive_values=sensitive_values,
         )
-        return _result_for_state(state, prepared)
+        result = _result_for_state(state, prepared)
+        preflight_shadow_confidentiality(
+            result,
+            sensitive_values,
+            label="shadow review result",
+            integrity=True,
+        )
+        return result
 
 
 def shadow_calibration_report(
     run_directory: Path,
 ) -> dict[str, object]:
     """Return a read-only deterministic assessment/review/readiness report."""
-    resolved = _resolve_run_directory(run_directory)
+    sensitive_values = _sensitive_values(None)
+    raw_run = preflight_shadow_locator(
+        run_directory,
+        sensitive_values,
+        label="shadow run directory locator",
+    )
+    resolved = _resolve_run_directory(Path(raw_run))
     state = _load_state(resolved)
+    _preflight_durable_run(
+        resolved, sensitive_values=sensitive_values
+    )
     prepared = _reload_prepared(state, DEFAULT_SHADOW_SERVICES)
-    _validate_run(resolved, state, prepared)
+    _validate_run(
+        resolved,
+        state,
+        prepared,
+        sensitive_values=sensitive_values,
+    )
     assessments, comparisons, reviews = _report_inputs(
         resolved, state
     )
@@ -497,7 +753,7 @@ def shadow_calibration_report(
         assessments,
         reviews,
     )
-    return {
+    report = {
         "schema_version": 1,
         "calibration_id": state.calibration_id,
         "source_stage2_run": state.source_stage2_run,
@@ -514,6 +770,13 @@ def shadow_calibration_report(
             if proposal_id in reviews
         ],
     }
+    preflight_shadow_confidentiality(
+        report,
+        sensitive_values,
+        label="shadow calibration report",
+        integrity=True,
+    )
+    return report
 
 
 def abort_shadow_calibration(
@@ -523,15 +786,39 @@ def abort_shadow_calibration(
     services: ShadowServices = DEFAULT_SHADOW_SERVICES,
 ) -> ShadowResult:
     """Atomically abort a non-running, nonterminal calibration."""
-    resolved = _resolve_run_directory(run_directory)
+    sensitive_values = _sensitive_values(services.environ)
+    raw_run = preflight_shadow_locator(
+        run_directory,
+        sensitive_values,
+        label="shadow run directory locator",
+    )
+    preflight_shadow_confidentiality(
+        reason,
+        sensitive_values,
+        label="shadow abort reason",
+    )
+    resolved = _resolve_run_directory(Path(raw_run))
     with _ShadowLock(resolved, services.utc_now):
         raw_state = _load_state(resolved)
+        _preflight_durable_run(
+            resolved, sensitive_values=sensitive_values
+        )
         prepared = _reload_prepared(raw_state, services)
         _validate_state_result_agreement(
             resolved, raw_state, prepared
         )
-        state = _reconcile_state(resolved, raw_state, prepared)
-        _validate_run(resolved, state, prepared)
+        state = _reconcile_state(
+            resolved,
+            raw_state,
+            prepared,
+            sensitive_values=sensitive_values,
+        )
+        _validate_run(
+            resolved,
+            state,
+            prepared,
+            sensitive_values=sensitive_values,
+        )
         if state.status in {"completed", "failed", "aborted"}:
             raise ShadowInputError(
                 "terminal shadow calibrations cannot be aborted"
@@ -540,12 +827,7 @@ def abort_shadow_calibration(
             raise ShadowInputError(
                 "active supervisor termination is not available"
             )
-        _, _, sensitive_values = build_subprocess_environment(
-            services.environ
-        )
-        sanitized = redact_text(
-            " ".join(reason.split()), sensitive_values
-        ).strip()
+        sanitized = " ".join(reason.split()).strip()
         if not sanitized:
             raise ShadowInputError("abort reason must not be empty")
         state = _journal_event(
@@ -565,8 +847,16 @@ def abort_shadow_calibration(
                 "summary": "Shadow calibration aborted by human request.",
             },
             utc_now=services.utc_now,
+            sensitive_values=sensitive_values,
         )
-        return _result_for_state(state, prepared)
+        result = _result_for_state(state, prepared)
+        preflight_shadow_confidentiality(
+            result,
+            sensitive_values,
+            label="shadow abort result",
+            integrity=True,
+        )
+        return result
 
 
 def shadow_calibration_exit_code(status: str) -> int:
@@ -595,9 +885,16 @@ def _drive(context: _ShadowContext) -> ShadowResult:
             "failed",
             "aborted",
         }:
-            return _result_for_state(
+            result = _result_for_state(
                 context.state, context.prepared
             )
+            preflight_shadow_confidentiality(
+                result,
+                _sensitive_values(context.services.environ),
+                label="shadow calibration result",
+                integrity=True,
+            )
+            return result
         if context.state.pending_action is not None:
             raise ShadowStateError(
                 "active drive encountered an unresolved supervisor action"
@@ -681,14 +978,11 @@ def _launch_next_supervisor(context: _ShadowContext) -> None:
         / "proposals"
         / decision.point.decision_id
     )
-    proposal_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = proposal_directory / "blind-input-manifest.json"
     schema_path = proposal_directory / "output-schema.json"
-    _write_json(
-        manifest_path,
-        rendered.manifest.model_dump(mode="json"),
-    )
-    _write_bytes(schema_path, _canonical_json(rendered.output_schema))
+    manifest_value = rendered.manifest.model_dump(mode="json")
+    manifest_bytes = _render_json_bytes(manifest_value)
+    schema_bytes = _canonical_json(rendered.output_schema)
     stage1_directory = proposal_directory / "stage1-run"
     action_id = f"supervisor-{decision.point.decision_id}"
     _, removed_names, _ = build_subprocess_environment(
@@ -719,13 +1013,46 @@ def _launch_next_supervisor(context: _ShadowContext) -> None:
             rendered.manifest.rendered_blind_input_byte_count
         ),
         output_schema_path=str(schema_path),
-        output_schema_sha256=sha256_regular_file(schema_path),
+        output_schema_sha256=hashlib.sha256(schema_bytes).hexdigest(),
         blind_manifest_path=str(manifest_path),
-        blind_manifest_sha256=sha256_regular_file(manifest_path),
+        blind_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         resume_session_id=context.state.supervisor_session_id,
         removed_environment_variable_names=removed_names,
         started_at=_utc_string(context.services.utc_now()),
     )
+    request = _prepared_supervisor_request(
+        context, rendered, decision
+    )
+    try:
+        preflight_shadow_confidentiality(
+            (
+                str(proposal_directory),
+                str(manifest_path),
+                manifest_value,
+                str(schema_path),
+                rendered.output_schema,
+                str(stage1_directory),
+                pending,
+                request.normalized_dict(),
+                str(request.request_path),
+                str(request.workspace),
+                str(request.prompt_path),
+                request.prompt_bytes,
+            ),
+            sensitive_values,
+            label="supervisor action structure",
+        )
+    except ShadowConfidentialityError:
+        context.state = _pause(
+            context,
+            "blind_input_confidentiality_collision",
+            "Blind supervisor action paths or evidence failed "
+            "confidentiality preflight; nothing was launched.",
+        )
+        return
+    proposal_directory.mkdir(parents=True, exist_ok=True)
+    _write_bytes(manifest_path, manifest_bytes)
+    _write_bytes(schema_path, schema_bytes)
     if context.state.status != "supervisor_running":
         context.state = _transition(
             context,
@@ -752,9 +1079,7 @@ def _launch_next_supervisor(context: _ShadowContext) -> None:
         },
         updates={"pending_action": pending},
         utc_now=context.services.utc_now,
-    )
-    request = _prepared_supervisor_request(
-        context, rendered, decision
+        sensitive_values=sensitive_values,
     )
     try:
         returned = context.services.supervisor_invoker(
@@ -893,6 +1218,12 @@ def _finish_supervisor_action(
         / "supervisor"
         / f"{pending.action_id}.json"
     )
+    sensitive_values = _sensitive_values(context.services.environ)
+    preflight_shadow_confidentiality(
+        (str(record_path), record),
+        sensitive_values,
+        label="supervisor action record",
+    )
     _write_json(record_path, record.model_dump(mode="json"))
     completed = (
         *context.state.completed_action_ids,
@@ -929,6 +1260,7 @@ def _finish_supervisor_action(
         },
         updates=updates,
         utc_now=context.services.utc_now,
+        sensitive_values=sensitive_values,
     )
     if proof.adapter_result.status != "succeeded":
         context.state = _pause(
@@ -1442,19 +1774,16 @@ def _finalize_proposal_artifacts(
     comparison_directory = (
         context.run_directory / "comparisons" / pending.proposal_id
     )
-    comparison_directory.mkdir(parents=True, exist_ok=True)
     comparison_path = comparison_directory / "comparison.json"
+    sensitive_values = _sensitive_values(context.services.environ)
     if proof.proposal is None:
-        _write_json(
-            result_path,
-            {
-                "schema_version": 1,
-                "valid": False,
-                "transport_status": proof.adapter_result.status,
-                "proposal": None,
-            },
-        )
-        _write_bytes(candidate_path, b"")
+        result_value: object = {
+            "schema_version": 1,
+            "valid": False,
+            "transport_status": proof.adapter_result.status,
+            "proposal": None,
+        }
+        candidate_bytes = b""
         comparison = ProposalComparison(
             proposal_id=pending.proposal_id,
             proposal_kind=pending.proposal_kind,
@@ -1468,9 +1797,6 @@ def _finalize_proposal_artifacts(
             comparison_available=False,
             comparison_unavailable_reason="supervisor_result_unavailable",
         )
-        _write_json(
-            comparison_path, comparison.model_dump(mode="json")
-        )
         assessment = _malformed_assessment(
             context,
             pending,
@@ -1480,24 +1806,16 @@ def _finalize_proposal_artifacts(
         )
     else:
         proposal = proof.proposal
-        _write_json(result_path, proposal.model_dump(mode="json"))
+        result_value = proposal.model_dump(mode="json")
         candidate_bytes = (
             b""
             if proposal.prompt is None
             else proposal.prompt.encode("utf-8")
         )
-        _write_bytes(candidate_path, candidate_bytes)
-        # Proposal/result/candidate are durably finalized before any
-        # authoritative comparison material is created.
-        _fsync_directory(proposal_directory)
-        comparison = _write_comparison(
-            comparison_directory,
+        comparison = _build_comparison(
             decision,
             proposal,
             candidate_bytes,
-        )
-        _write_json(
-            comparison_path, comparison.model_dump(mode="json")
         )
         assessment = _assess_proposal(
             context,
@@ -1509,6 +1827,55 @@ def _finalize_proposal_artifacts(
             session_integrity=session_integrity,
         )
     assessment_path = proposal_directory / "assessment.json"
+    source_path = comparison_directory / "authoritative-source.md"
+    rendered_path = comparison_directory / "authoritative-rendered.md"
+    preflight_shadow_confidentiality(
+        (
+            str(result_path),
+            result_value,
+            str(candidate_path),
+            candidate_bytes,
+            str(assessment_path),
+            assessment,
+            str(comparison_directory),
+            str(comparison_path),
+            comparison,
+            (
+                str(source_path),
+                decision.authoritative_source.content,
+            )
+            if comparison.comparison_available
+            and decision.authoritative_source is not None
+            else (),
+            (
+                str(rendered_path),
+                decision.authoritative_rendered.content,
+            )
+            if comparison.comparison_available
+            and decision.authoritative_rendered is not None
+            else (),
+        ),
+        sensitive_values,
+        label="finalized proposal and comparison structure",
+    )
+    _write_json(result_path, result_value)
+    _write_bytes(candidate_path, candidate_bytes)
+    # Proposal/result/candidate are durably finalized before any
+    # authoritative comparison material is created.
+    _fsync_directory(proposal_directory)
+    comparison_directory.mkdir(parents=True, exist_ok=True)
+    if (
+        comparison.comparison_available
+        and decision.authoritative_source is not None
+        and decision.authoritative_rendered is not None
+    ):
+        _write_bytes(source_path, decision.authoritative_source.content)
+        _write_bytes(
+            rendered_path, decision.authoritative_rendered.content
+        )
+    _write_json(
+        comparison_path, comparison.model_dump(mode="json")
+    )
     _write_json(
         assessment_path, assessment.model_dump(mode="json")
     )
@@ -1528,8 +1895,7 @@ def _finalize_proposal_artifacts(
     }
 
 
-def _write_comparison(
-    directory: Path,
+def _build_comparison(
     decision: DecisionReconstruction,
     proposal: SupervisorProposal,
     candidate_bytes: bytes,
@@ -1562,10 +1928,6 @@ def _write_comparison(
                 or "authoritative_reconstruction_unproven"
             ),
         )
-    source_path = directory / "authoritative-source.md"
-    rendered_path = directory / "authoritative-rendered.md"
-    _write_bytes(source_path, source.content)
-    _write_bytes(rendered_path, rendered.content)
     return ProposalComparison(
         proposal_id=decision.point.decision_id,
         proposal_kind=decision.point.proposal_kind,
@@ -1845,6 +2207,7 @@ def _pause(
             "summary": summary,
         },
         utc_now=context.services.utc_now,
+        sensitive_values=sensitive_values,
     )
 
 
@@ -1869,6 +2232,7 @@ def _transition(
         artifact_hashes={},
         updates=values,
         utc_now=context.services.utc_now,
+        sensitive_values=_sensitive_values(context.services.environ),
     )
 
 
@@ -1886,6 +2250,7 @@ def _journal_event(
     artifact_hashes: Mapping[str, str],
     updates: Mapping[str, object],
     utc_now: Callable[[], datetime],
+    sensitive_values: Sequence[str] = (),
 ) -> ShadowState:
     if not set(updates).issubset(MUTABLE_STATE_FIELDS):
         raise ShadowStateError(
@@ -1911,17 +2276,6 @@ def _journal_event(
     entry = ShadowJournalEntry.model_validate(
         {**body, "entry_hash": entry_hash}
     )
-    journal = run_directory / JOURNAL_FILE
-    try:
-        with journal.open("ab") as handle:
-            handle.write(_canonical_json(entry.model_dump(mode="json")))
-            handle.flush()
-            os.fsync(handle.fileno())
-        _fsync_directory(run_directory)
-    except OSError as exc:
-        raise ShadowStateError(
-            "shadow journal could not be appended"
-        ) from exc
     state_values = state.model_dump(mode="json")
     compatible_updates = _json_compatible(updates)
     if not isinstance(compatible_updates, dict):
@@ -1940,14 +2294,55 @@ def _journal_event(
         raise ShadowStateError(
             "journal update produced invalid shadow state"
         ) from exc
-    _persist_state(run_directory, updated, prepared)
+    expected_result = _result_for_state(updated, prepared)
+    journal = run_directory / JOURNAL_FILE
+    preflight_shadow_confidentiality(
+        (
+            str(journal),
+            body,
+            entry,
+            updated,
+            expected_result,
+            str(run_directory / STATE_FILE),
+            str(run_directory / RESULT_FILE),
+        ),
+        sensitive_values,
+        label="shadow journal and snapshot structure",
+    )
+    try:
+        with journal.open("ab") as handle:
+            handle.write(_canonical_json(entry.model_dump(mode="json")))
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(run_directory)
+    except OSError as exc:
+        raise ShadowStateError(
+            "shadow journal could not be appended"
+        ) from exc
+    _persist_state(
+        run_directory,
+        updated,
+        prepared,
+        sensitive_values=sensitive_values,
+    )
     return updated
 
 
 def _initialize_artifacts(
     run_directory: Path,
     prepared: PreparedShadowSpecification,
+    *,
+    sensitive_values: Sequence[str] = (),
 ) -> None:
+    payloads = _initial_artifact_payloads(prepared)
+    preflight_shadow_confidentiality(
+        tuple(
+            (str(run_directory / name), content)
+            for name, content in payloads.items()
+        ),
+        sensitive_values,
+        label="initial shadow artifact structure",
+    )
     for name in (
         "supervisor",
         "proposals",
@@ -1957,37 +2352,38 @@ def _initialize_artifacts(
         "escalation",
     ):
         (run_directory / name).mkdir()
-    _write_json(
-        run_directory / "shadow-spec.normalized.json",
-        prepared.normalized_dict(),
-    )
-    _write_text(
-        run_directory / "shadow-spec.sha256",
-        prepared.specification_sha256 + "\n",
-    )
-    _write_text(
-        run_directory / "policy.sha256",
-        prepared.policy.sha256 + "\n",
-    )
-    _write_json(
-        run_directory / "context.sha256.json",
-        {
-            "schema_version": 1,
-            "contexts": [
-                context.manifest().model_dump(mode="json")
-                for context in prepared.contexts
-            ],
-        },
-    )
-    _write_json(
-        run_directory / "source-stage2.json",
-        prepared.source.identity_record(),
-    )
-    _write_json(
-        run_directory / "decision-points.json",
-        decision_points_artifact(prepared.source.decisions),
-    )
-    _write_text(run_directory / JOURNAL_FILE, "")
+    for name, content in payloads.items():
+        _write_bytes(run_directory / name, content)
+
+
+def _initial_artifact_payloads(
+    prepared: PreparedShadowSpecification,
+) -> dict[str, bytes]:
+    return {
+        "shadow-spec.normalized.json": _render_json_bytes(
+            prepared.normalized_dict()
+        ),
+        "shadow-spec.sha256": (
+            prepared.specification_sha256 + "\n"
+        ).encode("ascii"),
+        "policy.sha256": (prepared.policy.sha256 + "\n").encode("ascii"),
+        "context.sha256.json": _render_json_bytes(
+            {
+                "schema_version": 1,
+                "contexts": [
+                    context.manifest().model_dump(mode="json")
+                    for context in prepared.contexts
+                ],
+            }
+        ),
+        "source-stage2.json": _render_json_bytes(
+            prepared.source.identity_record()
+        ),
+        "decision-points.json": _render_json_bytes(
+            decision_points_artifact(prepared.source.decisions)
+        ),
+        JOURNAL_FILE: b"",
+    }
 
 
 def _initial_artifact_hashes(
@@ -2066,6 +2462,11 @@ def _validate_source_frozen(context: _ShadowContext) -> None:
 
 def _validate_runtime_durability(context: _ShadowContext) -> None:
     _validate_source_frozen(context)
+    sensitive_values = _sensitive_values(context.services.environ)
+    _preflight_durable_run(
+        context.run_directory,
+        sensitive_values=sensitive_values,
+    )
     _validate_journal(
         context.run_directory, context.state, context.prepared
     )
@@ -2087,7 +2488,12 @@ def _validate_run(
     prepared: PreparedShadowSpecification,
     *,
     allowed_unjournaled_review: str | None = None,
+    sensitive_values: Sequence[str] = (),
 ) -> None:
+    _preflight_durable_run(
+        run_directory,
+        sensitive_values=sensitive_values,
+    )
     persisted_state = _load_state(run_directory)
     if persisted_state != state:
         raise ShadowIntegrityError(
@@ -2176,6 +2582,75 @@ def _validate_run(
         raise ShadowStateError(
             "review directory contains missing or unjournaled artifacts"
         )
+
+
+def _preflight_durable_run(
+    run_directory: Path,
+    *,
+    sensitive_values: Sequence[str],
+) -> None:
+    """Reject sensitive strings already present in trusted Stage 3 storage."""
+    values: list[object] = [str(run_directory)]
+    try:
+        paths = sorted(
+            run_directory.rglob("*"),
+            key=lambda path: str(path.relative_to(run_directory)),
+        )
+    except OSError as exc:
+        raise ShadowIntegrityError(
+            "durable Stage 3 artifacts could not be inspected"
+        ) from exc
+    for path in paths:
+        relative = str(path.relative_to(run_directory))
+        values.append(relative)
+        if relative == LOCK_FILE:
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise ShadowIntegrityError(
+                "durable Stage 3 artifact identity could not be inspected"
+            ) from exc
+        if stat.S_ISREG(metadata.st_mode):
+            try:
+                content = path.read_bytes()
+            except OSError as exc:
+                raise ShadowIntegrityError(
+                    "durable Stage 3 artifact could not be read"
+                ) from exc
+            try:
+                if path.suffix == ".json":
+                    values.append(
+                        json.loads(
+                            content.decode("utf-8"),
+                            parse_constant=_reject_json_constant,
+                        )
+                    )
+                elif path.suffix == ".jsonl":
+                    values.extend(
+                        json.loads(
+                            line.decode("utf-8"),
+                            parse_constant=_reject_json_constant,
+                        )
+                        for line in content.splitlines()
+                        if line
+                    )
+                else:
+                    values.append(content.decode("utf-8"))
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
+                raise ShadowIntegrityError(
+                    "durable Stage 3 serialized structure is invalid"
+                ) from exc
+    preflight_shadow_confidentiality(
+        values,
+        sensitive_values,
+        label="durable Stage 3 artifact structure",
+        integrity=True,
+    )
 
 
 def _validate_state_result_agreement(
@@ -2834,6 +3309,8 @@ def _reconcile_state(
     run_directory: Path,
     state: ShadowState,
     prepared: PreparedShadowSpecification,
+    *,
+    sensitive_values: Sequence[str] = (),
 ) -> ShadowState:
     entries = _read_journal(run_directory)
     if state.journal_sequence > len(entries):
@@ -2867,7 +3344,13 @@ def _reconcile_state(
         raise ShadowStateError(
             "journal recovery produced invalid shadow state"
         ) from exc
-    _persist_state(run_directory, reconciled, prepared)
+    _persist_state(
+        run_directory,
+        reconciled,
+        prepared,
+        sensitive_values=sensitive_values,
+        integrity=True,
+    )
     return reconciled
 
 
@@ -2875,14 +3358,29 @@ def _persist_state(
     run_directory: Path,
     state: ShadowState,
     prepared: PreparedShadowSpecification,
+    *,
+    sensitive_values: Sequence[str] = (),
+    integrity: bool = False,
 ) -> None:
+    result = _result_for_state(state, prepared)
+    preflight_shadow_confidentiality(
+        (
+            str(run_directory / STATE_FILE),
+            state,
+            str(run_directory / RESULT_FILE),
+            result,
+        ),
+        sensitive_values,
+        label="shadow state and result structure",
+        integrity=integrity,
+    )
     _write_json(
         run_directory / STATE_FILE,
         state.model_dump(mode="json"),
     )
     _write_json(
         run_directory / RESULT_FILE,
-        _result_for_state(state, prepared).to_dict(),
+        result.to_dict(),
     )
 
 
@@ -3014,10 +3512,25 @@ def _resolve_run_directory(path: Path) -> Path:
     return resolved
 
 
-def _resolve_codex_executable(value: str | None) -> str:
+def _resolve_codex_executable(
+    value: str | None,
+    *,
+    sensitive_values: Sequence[str] = (),
+) -> str:
+    if value is not None:
+        preflight_shadow_confidentiality(
+            value,
+            sensitive_values,
+            label="configured Codex executable locator",
+        )
     executable = value or shutil.which("codex")
     if executable is None:
         raise ShadowDependencyError("Codex executable is required")
+    preflight_shadow_confidentiality(
+        executable,
+        sensitive_values,
+        label="discovered Codex executable locator",
+    )
     try:
         resolved = Path(executable).resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -3028,6 +3541,11 @@ def _resolve_codex_executable(value: str | None) -> str:
         raise ShadowDependencyError(
             "Codex executable is not a regular file"
         )
+    preflight_shadow_confidentiality(
+        str(resolved),
+        sensitive_values,
+        label="resolved Codex executable path",
+    )
     return str(resolved)
 
 
@@ -3357,6 +3875,10 @@ def _read_exact_bytes(path: Path) -> bytes:
 
 
 def _write_json(path: Path, value: object) -> None:
+    _atomic_write(path, _render_json_bytes(value))
+
+
+def _render_json_bytes(value: object) -> bytes:
     rendered = (
         json.dumps(
             value,
@@ -3367,7 +3889,7 @@ def _write_json(path: Path, value: object) -> None:
         )
         + "\n"
     )
-    _atomic_write(path, rendered.encode("utf-8"))
+    return rendered.encode("utf-8")
 
 
 def _write_text(path: Path, value: str) -> None:

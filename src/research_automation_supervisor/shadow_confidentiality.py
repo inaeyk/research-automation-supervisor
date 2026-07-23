@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from typing import NoReturn
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 
 from research_automation_supervisor.errors import (
     ShadowConfidentialityError,
+    ShadowInputError,
     ShadowIntegrityError,
 )
 from research_automation_supervisor.redaction import would_redact_text
@@ -57,6 +59,27 @@ def preflight_shadow_confidentiality(
     for text in iter_shadow_strings(value):
         if would_redact_text(text, sensitive_values):
             _raise_confidentiality(label, integrity)
+
+
+def preflight_shadow_locator(
+    value: str | os.PathLike[str],
+    sensitive_values: Sequence[str],
+    *,
+    label: str,
+) -> str:
+    """Check the exact caller-supplied lexical locator before path handling."""
+    try:
+        raw = os.fspath(value)
+    except TypeError as exc:
+        raise ShadowInputError(f"{label} is not a valid path locator") from exc
+    if not isinstance(raw, str):
+        raise ShadowInputError(f"{label} is not a text path locator")
+    preflight_shadow_confidentiality(
+        raw,
+        sensitive_values,
+        label=label,
+    )
+    return raw
 
 
 def _raise_confidentiality(label: str, integrity: bool) -> NoReturn:

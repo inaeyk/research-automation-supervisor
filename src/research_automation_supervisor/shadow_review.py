@@ -19,6 +19,7 @@ from research_automation_supervisor.contract import (
 from research_automation_supervisor.errors import ShadowInputError
 from research_automation_supervisor.shadow_confidentiality import (
     preflight_shadow_confidentiality,
+    preflight_shadow_locator,
 )
 from research_automation_supervisor.shadow_models import (
     DeterministicAssessment,
@@ -41,7 +42,13 @@ def load_shadow_review(
     sensitive_values: Sequence[str] = (),
 ) -> HumanReview:
     """Load one strict immutable human review from safe YAML."""
-    resolved = _resolve_exact_file(path, "shadow review")
+    raw_path = preflight_shadow_locator(
+        path,
+        sensitive_values,
+        label="shadow review locator",
+    )
+    lexical_path = Path(raw_path)
+    resolved = _resolve_exact_file(lexical_path, "shadow review")
     content = _read_utf8(resolved, "shadow review", limit=2 * 1024 * 1024)
     try:
         parsed: Any = yaml.load(
@@ -72,7 +79,7 @@ def load_shadow_review(
         ) from exc
     preflight_shadow_confidentiality(
         (
-            str(path),
+            raw_path,
             str(resolved),
             parsed,
             review,

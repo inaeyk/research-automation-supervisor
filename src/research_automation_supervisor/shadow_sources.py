@@ -40,6 +40,7 @@ from research_automation_supervisor.git_evidence import (
 )
 from research_automation_supervisor.shadow_confidentiality import (
     preflight_shadow_confidentiality,
+    preflight_shadow_locator,
 )
 from research_automation_supervisor.shadow_models import (
     DecisionPoint,
@@ -234,8 +235,16 @@ def load_shadow_specification(
 ) -> PreparedShadowSpecification:
     """Read, strictly validate, and fully verify one Stage 3 specification."""
     _, _, sensitive_values = build_subprocess_environment(environ)
-    specification_locator = _absolute_locator(path)
-    specification_path = _resolve_exact_file(path, "shadow specification")
+    raw_path = preflight_shadow_locator(
+        path,
+        sensitive_values,
+        label="shadow specification locator",
+    )
+    lexical_path = Path(raw_path)
+    specification_locator = _absolute_locator(lexical_path)
+    specification_path = _resolve_exact_file(
+        lexical_path, "shadow specification"
+    )
     specification_bytes = _read_utf8(
         specification_path,
         "shadow specification",

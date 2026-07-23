@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 import yaml
 
 from research_automation_supervisor.codex_adapter import run_prepared_codex
-from research_automation_supervisor.errors import ShadowConfidentialityError
+from research_automation_supervisor.errors import (
+    ShadowConfidentialityError,
+    ShadowIntegrityError,
+)
+from research_automation_supervisor.shadow_confidentiality import (
+    preflight_shadow_confidentiality,
+)
 from research_automation_supervisor.shadow_engine import (
     ShadowServices,
     record_shadow_review,
     run_shadow_calibration,
+    shadow_calibration_report,
+    shadow_calibration_status,
 )
 from research_automation_supervisor.shadow_sources import (
     load_shadow_specification,
@@ -23,6 +32,7 @@ from tests.shadow_helpers import (
     shadow_services,
     supervisor_proposal,
     supervisor_response,
+    write_review,
 )
 
 
@@ -70,6 +80,198 @@ def test_source_collision_prevents_run_directory_creation(
 
     assert not runs.exists()
     assert not (tmp_path / "shadow-counter").exists()
+
+
+def test_raw_specification_locator_is_checked_before_normalization(
+    tmp_path: Path,
+) -> None:
+    sensitive = "RAW_SPEC_SENTINEL_9d8c"
+    spec, _, _, _ = create_shadow_tree(tmp_path)
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    lexical = sensitive_directory / ".." / spec.relative_to(tmp_path)
+
+    with pytest.raises(ShadowConfidentialityError):
+        load_shadow_specification(
+            lexical,
+            environ={"AUDIT_TOKEN": sensitive},
+        )
+
+    assert sensitive not in str(spec)
+    assert not (tmp_path / "runs").exists()
+
+
+def test_raw_runs_directory_is_checked_before_normalization(
+    tmp_path: Path,
+) -> None:
+    sensitive = "RAW_RUNS_SENTINEL_8b3a"
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    lexical_runs = sensitive_directory / ".." / "runs"
+
+    with pytest.raises(ShadowConfidentialityError):
+        run_shadow_calibration(
+            spec,
+            runs_dir=lexical_runs,
+            services=ShadowServices(
+                codex_executable=str(fake),
+                environ={"AUDIT_TOKEN": sensitive},
+            ),
+        )
+
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "shadow-counter").exists()
+
+
+@pytest.mark.parametrize("resolved_target", [False, True])
+def test_configured_and_resolved_executable_paths_preflight_before_run(
+    tmp_path: Path,
+    resolved_target: bool,
+) -> None:
+    sensitive = "EXECUTABLE_PATH_SENTINEL_4c2f"
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    copied = tmp_path / "fake-codex"
+    shutil.copy2(fake, copied)
+    copied.chmod(0o755)
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    if resolved_target:
+        target = sensitive_directory / "codex-real"
+        shutil.copy2(fake, target)
+        target.chmod(0o755)
+        locator = tmp_path / "codex-link"
+        locator.symlink_to(target)
+    else:
+        locator = sensitive_directory / ".." / copied.name
+
+    with pytest.raises(ShadowConfidentialityError):
+        run_shadow_calibration(
+            spec,
+            runs_dir=tmp_path / "runs",
+            services=ShadowServices(
+                codex_executable=str(locator),
+                environ={"AUDIT_TOKEN": sensitive},
+            ),
+        )
+
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "shadow-counter").exists()
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    ["output-schema.json", "stage1-run"],
+)
+def test_derived_supervisor_dependency_paths_preflight_before_run(
+    tmp_path: Path,
+    sensitive: str,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+
+    with pytest.raises(ShadowConfidentialityError):
+        run_shadow_calibration(
+            spec,
+            runs_dir=tmp_path / "runs",
+            services=ShadowServices(
+                codex_executable=str(fake),
+                environ={"AUDIT_TOKEN": sensitive},
+            ),
+        )
+
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "shadow-counter").exists()
+
+
+def test_raw_review_and_run_locators_write_and_launch_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(result.artifact_directory)
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    sensitive = "COMMAND_PATH_SENTINEL_73ac"
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    lexical_review = sensitive_directory / ".." / review.name
+    lexical_run = (
+        sensitive_directory
+        / ".."
+        / run_directory.relative_to(tmp_path)
+    )
+    before = {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    }
+    counter = (tmp_path / "shadow-counter").read_text()
+
+    with pytest.raises(ShadowConfidentialityError):
+        record_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            lexical_review,
+            services=ShadowServices(
+                codex_executable=str(fake),
+                environ={"AUDIT_TOKEN": sensitive},
+            ),
+        )
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    with pytest.raises(ShadowConfidentialityError):
+        shadow_calibration_status(lexical_run)
+    with pytest.raises(ShadowConfidentialityError):
+        shadow_calibration_report(lexical_run)
+
+    assert (tmp_path / "shadow-counter").read_text() == counter
+    assert {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "pending_action",
+        "journal_entry",
+        "state",
+        "result",
+        "escalation",
+        "aggregate_report",
+    ],
+)
+def test_recursive_persisted_structure_preflight_covers_every_domain(
+    domain: str,
+) -> None:
+    sensitive = "PERSISTED_STRUCTURE_SENTINEL_2a91"
+    value = {
+        "schema_version": 1,
+        "domain": domain,
+        "outer": [{"inner": {"path": f"safe/{sensitive}/value"}}],
+    }
+
+    with pytest.raises(ShadowConfidentialityError):
+        preflight_shadow_confidentiality(
+            value,
+            (sensitive,),
+            label="persisted Stage 3 structure",
+        )
+    with pytest.raises(ShadowIntegrityError):
+        preflight_shadow_confidentiality(
+            value,
+            (sensitive,),
+            label="trusted persisted Stage 3 structure",
+            integrity=True,
+        )
 
 
 def test_runtime_blind_collision_pauses_before_next_intent_or_launch(

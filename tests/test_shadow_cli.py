@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,8 +16,16 @@ from research_automation_supervisor.errors import (
     ShadowInputError,
     ShadowIntegrityError,
 )
+from research_automation_supervisor.shadow_engine import (
+    run_shadow_calibration,
+)
 from research_automation_supervisor.shadow_models import ShadowResult
-from tests.shadow_helpers import SUPERVISOR_UUID, create_shadow_tree
+from tests.shadow_helpers import (
+    SUPERVISOR_UUID,
+    create_shadow_tree,
+    shadow_services,
+    write_review,
+)
 
 runner = CliRunner()
 
@@ -311,3 +321,282 @@ def test_source_integrity_replacement_is_actual_cli_exit_four(
     assert not (tmp_path / "runs").exists()
     if as_json:
         assert json.loads(result.stdout)["error_kind"] == "integrity"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_actual_cli_rejects_raw_specification_locator_before_normalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+) -> None:
+    sensitive = "CLI_RAW_SPEC_SENTINEL_d1a7"
+    spec, _, _, _ = create_shadow_tree(tmp_path)
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    lexical = sensitive_directory / ".." / spec.relative_to(tmp_path)
+    before = _file_snapshot(tmp_path)
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    arguments = ["validate-shadow-spec", str(lexical)]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert sensitive not in result.output
+    assert _file_snapshot(tmp_path) == before
+    if as_json:
+        assert json.loads(result.stdout)["error_kind"] == "input"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_actual_cli_rejects_raw_runs_dir_before_spec_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+) -> None:
+    sensitive = "CLI_RAW_RUNS_SENTINEL_47be"
+    spec, _, _, _ = create_shadow_tree(tmp_path)
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    lexical_runs = sensitive_directory / ".." / "shadow-runs"
+    before = _file_snapshot(tmp_path)
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    arguments = [
+        "run-shadow-calibration",
+        str(spec),
+        "--runs-dir",
+        str(lexical_runs),
+    ]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert sensitive not in result.output
+    assert not (tmp_path / "shadow-runs").exists()
+    assert not (tmp_path / "shadow-counter").exists()
+    assert _file_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_actual_cli_rejects_sensitive_discovered_executable_before_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+) -> None:
+    sensitive = "CLI_EXECUTABLE_SENTINEL_6a83"
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    executable_directory = tmp_path / sensitive
+    executable_directory.mkdir()
+    executable = executable_directory / "codex"
+    shutil.copy2(fake, executable)
+    executable.chmod(0o755)
+    before = _file_snapshot(tmp_path)
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    monkeypatch.setenv(
+        "PATH",
+        f"{executable_directory}{os.pathsep}{os.environ['PATH']}",
+    )
+    arguments = [
+        "run-shadow-calibration",
+        str(spec),
+        "--runs-dir",
+        str(tmp_path / "shadow-runs"),
+    ]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert sensitive not in result.output
+    assert not (tmp_path / "shadow-runs").exists()
+    assert not (tmp_path / "shadow-counter").exists()
+    assert _file_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "resume-shadow-calibration",
+        "shadow-calibration-status",
+        "record-shadow-review",
+        "shadow-calibration-report",
+        "abort-shadow-calibration",
+    ],
+)
+def test_actual_cli_rejects_raw_run_directory_for_every_existing_run_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    as_json: bool,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    completed = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "shadow-runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(completed.artifact_directory)
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    sensitive = "CLI_RAW_RUN_SENTINEL_b52c"
+    sensitive_directory = run_directory.parent / sensitive
+    sensitive_directory.mkdir()
+    lexical_run = sensitive_directory / ".." / run_directory.name
+    before = _file_snapshot(run_directory)
+    counter = (tmp_path / "shadow-counter").read_text()
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    arguments = [command, str(lexical_run)]
+    if command == "record-shadow-review":
+        arguments.extend(
+            ("worker_initial-r000-a001", str(review))
+        )
+    elif command == "abort-shadow-calibration":
+        arguments.extend(("--reason", "stop"))
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert sensitive not in result.output
+    assert _file_snapshot(run_directory) == before
+    assert (tmp_path / "shadow-counter").read_text() == counter
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_actual_cli_rejects_raw_review_locator_before_run_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    completed = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "shadow-runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(completed.artifact_directory)
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    sensitive = "CLI_RAW_REVIEW_SENTINEL_91ce"
+    sensitive_directory = tmp_path / sensitive
+    sensitive_directory.mkdir()
+    lexical_review = sensitive_directory / ".." / review.name
+    before = _file_snapshot(run_directory)
+    counter = (tmp_path / "shadow-counter").read_text()
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    arguments = [
+        "record-shadow-review",
+        str(run_directory),
+        "worker_initial-r000-a001",
+        str(lexical_review),
+    ]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert sensitive not in result.output
+    assert _file_snapshot(run_directory) == before
+    assert (tmp_path / "shadow-counter").read_text() == counter
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("field", ["proposal_id", "abort_reason"])
+def test_actual_cli_rejects_sensitive_structural_command_strings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    as_json: bool,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    completed = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "shadow-runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(completed.artifact_directory)
+    review = write_review(tmp_path / "review.yaml", "safe-proposal")
+    sensitive = "CLI_COMMAND_STRING_SENTINEL_e43f"
+    before = _file_snapshot(run_directory)
+    counter = (tmp_path / "shadow-counter").read_text()
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    if field == "proposal_id":
+        arguments = [
+            "record-shadow-review",
+            str(run_directory),
+            sensitive,
+            str(review),
+        ]
+    else:
+        arguments = [
+            "abort-shadow-calibration",
+            str(run_directory),
+            "--reason",
+            sensitive,
+        ]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert sensitive not in result.output
+    assert _file_snapshot(run_directory) == before
+    assert (tmp_path / "shadow-counter").read_text() == counter
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_actual_cli_maps_sensitive_durable_state_to_integrity_exit_four(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    completed = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "shadow-runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(completed.artifact_directory)
+    sensitive = "DURABLE_STATE_SENTINEL_c39d"
+    state_path = run_directory / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["summary"] = sensitive
+    state_path.write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    before = _file_snapshot(run_directory)
+    counter = (tmp_path / "shadow-counter").read_text()
+    monkeypatch.setenv("AUDIT_TOKEN", sensitive)
+    arguments = ["shadow-calibration-status", str(run_directory)]
+    if as_json:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 4
+    assert sensitive not in result.output
+    assert _file_snapshot(run_directory) == before
+    assert (tmp_path / "shadow-counter").read_text() == counter
+    if as_json:
+        assert json.loads(result.stdout)["error_kind"] == "integrity"
+
+
+def _file_snapshot(root: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
