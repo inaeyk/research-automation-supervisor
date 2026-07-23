@@ -14,10 +14,79 @@ from pathlib import Path
 
 def _validate_exec_arguments(arguments: list[str]) -> str | None:
     """Reject the real parser defect this fake is intended to detect."""
-    if arguments[:3] != ["--ask-for-approval", "never", "exec"]:
+    try:
+        exec_index = arguments.index("exec")
+    except ValueError:
+        return "exec subcommand is required"
+    if arguments[:2] != ["--ask-for-approval", "never"]:
         return "approval policy must be a global option before exec"
-    if "--ask-for-approval" in arguments[3:]:
+    if "--ask-for-approval" in arguments[exec_index + 1 :]:
         return "approval policy is not accepted after exec"
+    if exec_index + 1 < len(arguments) and arguments[exec_index + 1] == "resume":
+        if exec_index + 2 >= len(arguments):
+            return "resume requires one explicit thread ID"
+        thread_id = arguments[exec_index + 2]
+        if not thread_id or thread_id in {"--last", "--all", "-"}:
+            return "resume requires one explicit thread ID"
+    if "--last" in arguments or "--all" in arguments:
+        return "recency-based resume is forbidden"
+    return None
+
+
+def _select_configuration(configuration: dict[str, object]) -> tuple[dict[str, object], int]:
+    selected = dict(configuration)
+    responses = configuration.get("responses")
+    if not isinstance(responses, list):
+        return selected, 0
+    counter_path_value = configuration.get("counter_path", ".fake-codex-counter")
+    counter_path = Path(str(counter_path_value))
+    try:
+        call_index = int(counter_path.read_text(encoding="ascii"))
+    except (FileNotFoundError, ValueError):
+        call_index = 0
+    counter_path.parent.mkdir(parents=True, exist_ok=True)
+    counter_path.write_text(str(call_index + 1), encoding="ascii")
+    if call_index >= len(responses) or not isinstance(responses[call_index], dict):
+        selected.update(
+            {
+                "stderr": "fake Codex response queue exhausted",
+                "exit_code": 71,
+                "write_final": False,
+                "stdout_lines": [],
+            }
+        )
+    else:
+        selected.update(responses[call_index])
+    return selected, call_index
+
+
+def _validate_stage2_policy(arguments: list[str], configuration: dict[str, object]) -> str | None:
+    if not configuration.get("require_stage2_policy"):
+        return None
+    required_pairs = (
+        ("--ask-for-approval", "never"),
+        ("--sandbox", str(configuration.get("expected_sandbox", "workspace-write"))),
+        ("-c", 'web_search="disabled"'),
+        ("-c", "sandbox_workspace_write.network_access=false"),
+        ("-c", "features.skill_mcp_dependency_install=false"),
+    )
+    for option, value in required_pairs:
+        if not any(
+            arguments[index : index + 2] == [option, value]
+            for index in range(max(0, len(arguments) - 1))
+        ):
+            return f"missing required Stage 2 policy {option} {value}"
+    for flag in ("--json", "--ignore-user-config", "--ignore-rules", "--strict-config"):
+        if flag not in arguments:
+            return f"missing required Stage 2 flag {flag}"
+    if "--output-schema" not in arguments:
+        return "Stage 2 output schema is required"
+    schema_index = arguments.index("--output-schema")
+    if schema_index + 1 >= len(arguments) or not Path(arguments[schema_index + 1]).is_file():
+        return "Stage 2 output schema path is invalid"
+    expected_ephemeral = bool(configuration.get("expected_ephemeral", False))
+    if ("--ephemeral" in arguments) != expected_ephemeral:
+        return "Stage 2 ephemeral policy mismatch"
     return None
 
 
@@ -36,11 +105,24 @@ def main() -> int:
 
     workspace = Path.cwd()
     configuration_path = workspace / ".fake-codex.json"
-    configuration = (
+    base_configuration = (
         json.loads(configuration_path.read_text(encoding="utf-8"))
         if configuration_path.exists()
         else {}
     )
+    configuration, call_index = _select_configuration(base_configuration)
+    policy_error = _validate_stage2_policy(sys.argv[1:], configuration)
+    if policy_error is not None:
+        print(f"fake codex policy error: {policy_error}", file=sys.stderr)
+        return 2
+    arguments = sys.argv[1:]
+    if "resume" in arguments:
+        resume_index = arguments.index("resume")
+        resumed_thread = arguments[resume_index + 1]
+        expected_thread = configuration.get("expected_resume_thread_id")
+        if isinstance(expected_thread, str) and resumed_thread != expected_thread:
+            print("fake codex thread unavailable", file=sys.stderr)
+            return 72
     if configuration.get("close_stdin_early"):
         sys.stdin.close()
         prompt = b""
@@ -54,11 +136,29 @@ def main() -> int:
         "cwd": str(workspace),
         "prompt_base64": base64.b64encode(prompt).decode("ascii"),
         "environment": dict(os.environ),
+        "call_index": call_index,
     }
-    (workspace / ".fake-codex-observation.json").write_text(
+    observation_path = Path(
+        str(configuration.get("observation_path", workspace / ".fake-codex-observation.json"))
+    )
+    observation_path.parent.mkdir(parents=True, exist_ok=True)
+    observation_path.write_text(
         json.dumps(observation, sort_keys=True),
         encoding="utf-8",
     )
+
+    write_files = configuration.get("write_files", {})
+    if isinstance(write_files, dict):
+        for relative, content in write_files.items():
+            destination = workspace / str(relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(str(content), encoding="utf-8")
+    delete_files = configuration.get("delete_files", [])
+    if isinstance(delete_files, list):
+        for relative in delete_files:
+            destination = workspace / str(relative)
+            if destination.is_file() or destination.is_symlink():
+                destination.unlink()
 
     child_sleep = configuration.get("spawn_child_sleep")
     if isinstance(child_sleep, (int, float)):

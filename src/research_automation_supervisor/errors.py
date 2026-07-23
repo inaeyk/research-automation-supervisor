@@ -31,3 +31,23 @@ class CodexConfidentialityError(CodexRequestError):
 
 class CodexDependencyError(CodexAdapterError):
     """A required local executable is missing or unusable."""
+
+
+class WorkflowError(SupervisorError):
+    """Base class for expected Stage 2 workflow errors."""
+
+
+class WorkflowInputError(WorkflowError):
+    """A substage specification, path, or workflow command is invalid."""
+
+
+class WorkflowDependencyError(WorkflowError):
+    """A required local workflow dependency is missing or unusable."""
+
+
+class WorkflowStateError(WorkflowError):
+    """Durable workflow state is unreadable or violates an invariant."""
+
+
+class WorkflowLockError(WorkflowError):
+    """A workflow run cannot be locked safely for mutation."""

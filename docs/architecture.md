@@ -25,3 +25,10 @@ human-readable and JSON output.
 Path patterns are trimmed, backslashes are converted to forward slashes, and
 POSIX lexical normalization is applied before allowed/protected overlap checks.
 Acceptance-test timeouts are bounded to 1 through 86,400 seconds.
+
+Stage 1 adds the exact-prompt Codex transport described in `codex_adapter.md`.
+Stage 2 composes that adapter with strict immutable workflow models,
+append-only prompt assembly, deterministic Git evidence, a bounded fixed-test
+runner, and the durable state engine described in `workflow_engine.md`. The
+composition remains deterministic: models return schema-validated advice and
+results, while engine-owned state rules alone select transitions.

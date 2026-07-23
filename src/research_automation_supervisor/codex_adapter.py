@@ -128,6 +128,7 @@ class _EventProcessor:
     permission_evidence: bool = False
     identifier_kind: str | None = None
     identifier_value: str | None = None
+    started_thread_ids: list[str] = field(default_factory=list)
 
     def feed(self, chunk: bytes) -> None:
         """Accept a bounded stdout chunk and emit all complete redacted events."""
@@ -164,6 +165,7 @@ class _EventProcessor:
             )
             permission_evidence = _event_has_permission_evidence(value)
             kind, identifier = _extract_identifier(value)
+            started_thread_id = _extract_started_thread_id(value)
         except Exception:
             self.malformed_hashes.append(hashlib.sha256(line).hexdigest())
             return
@@ -174,6 +176,11 @@ class _EventProcessor:
         if self.identifier_value is None and identifier is not None:
             self.identifier_kind = kind
             self.identifier_value = identifier
+        if (
+            started_thread_id is not None
+            and started_thread_id not in self.started_thread_ids
+        ):
+            self.started_thread_ids.append(started_thread_id)
         self.destination.write(rendered.encode("ascii") + b"\n")
         self.destination.flush()
 
@@ -249,6 +256,9 @@ def run_prepared_codex(
     monotonic: Monotonic = time.monotonic,
     utc_now: UtcNow = lambda: datetime.now(UTC),
     version_probe: VersionProbe | None = None,
+    output_schema: Path | None = None,
+    resume_thread_id: str | None = None,
+    confidential_fragments: Sequence[str] = (),
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
@@ -258,12 +268,24 @@ def run_prepared_codex(
         runs_dir=runs_dir,
     )
     assert resolved_runs_dir is not None
+    resolved_output_schema = _validate_output_schema(output_schema, sensitive_values)
+    if resume_thread_id is not None:
+        if prepared.request.role != "worker":
+            raise CodexRequestError("only the persistent worker role may resume a thread")
+        if not resume_thread_id.strip() or resume_thread_id in {"--last", "--all"}:
+            raise CodexRequestError("an explicit worker thread ID is required for resume")
+        validate_locator_confidentiality((resume_thread_id,), sensitive_values)
     artifact_directory = _create_artifact_directory(
         resolved_runs_dir,
         prepared.request.run_id,
     )
-    redaction_values = tuple(sensitive_values)
-    _initialize_artifacts(artifact_directory, prepared, redaction_values)
+    redaction_values = tuple(
+        sorted(
+            {value for value in (*sensitive_values, *confidential_fragments) if value},
+            key=lambda item: (-len(item), item),
+        )
+    )
+    _initialize_artifacts(artifact_directory, prepared, sensitive_values)
 
     executable_path = str(Path(codex_executable).resolve())
     probe = version_probe or probe_codex_version
@@ -277,7 +299,13 @@ def run_prepared_codex(
 
     with tempfile.TemporaryDirectory(prefix="research-supervisor-codex-") as temporary:
         temporary_final = Path(temporary) / "last-message.md"
-        command = build_codex_command(prepared, executable_path, temporary_final)
+        command = build_codex_command(
+            prepared,
+            executable_path,
+            temporary_final,
+            output_schema=resolved_output_schema,
+            resume_thread_id=resume_thread_id,
+        )
         with event_path.open("wb") as event_file:
             event_processor = _EventProcessor(event_file, redaction_values)
             _run_process(
@@ -353,7 +381,7 @@ def run_prepared_codex(
             summary=summary,
             error=error,
         ),
-        redaction_values,
+        sensitive_values,
     )
 
     metadata = _build_metadata(
@@ -369,10 +397,12 @@ def run_prepared_codex(
         observation=observation,
         events=event_processor,
         final_message_present=final_message_present,
+        output_schema=resolved_output_schema,
+        resume_thread_id=resume_thread_id,
     )
     _atomic_write_json(
         artifact_directory / "metadata.json",
-        redact_json(metadata, redaction_values),
+        redact_json(metadata, sensitive_values),
     )
     _atomic_write_json(
         artifact_directory / "result.json",
@@ -450,41 +480,111 @@ def validate_locator_confidentiality(
         )
 
 
+def _validate_output_schema(
+    output_schema: Path | None,
+    sensitive_values: Sequence[str],
+) -> Path | None:
+    if output_schema is None:
+        return None
+    try:
+        resolved = output_schema.resolve(strict=True)
+        if not resolved.is_file():
+            raise CodexRequestError("output schema is not a regular file")
+        content = resolved.read_bytes()
+    except CodexRequestError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise CodexRequestError("output schema path could not be resolved") from exc
+    if len(content) > 2 * 1024 * 1024:
+        raise CodexRequestError("output schema exceeds the adapter-owned size limit")
+    try:
+        parsed = json.loads(content.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CodexRequestError("output schema is not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise CodexRequestError("output schema root must be a JSON object")
+    validate_locator_confidentiality(
+        (resolved, hashlib.sha256(content).hexdigest()), sensitive_values
+    )
+    return resolved
+
+
 def build_codex_command(
     prepared: PreparedCodexRequest,
     executable: str,
     final_message_path: Path,
+    *,
+    output_schema: Path | None = None,
+    resume_thread_id: str | None = None,
 ) -> list[str]:
     """Construct the fixed shell-free Codex argument vector."""
     request = prepared.request
-    command = [
-        executable,
-        "--ask-for-approval",
-        prepared.policy.approval,
-        "exec",
-        "--json",
-        "--output-last-message",
-        str(final_message_path),
-        "--model",
-        request.model,
-        "-c",
-        f"model_reasoning_effort={request.reasoning_effort}",
-        "-c",
-        'web_search="disabled"',
-        "-c",
-        "sandbox_workspace_write.network_access=false",
-        "-c",
-        "features.skill_mcp_dependency_install=false",
-        "--sandbox",
-        prepared.policy.sandbox,
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--strict-config",
-        "--cd",
-        str(prepared.workspace),
-    ]
-    if prepared.policy.ephemeral:
-        command.append("--ephemeral")
+    if resume_thread_id is not None and (
+        request.role != "worker"
+        or not resume_thread_id.strip()
+        or resume_thread_id in {"--last", "--all"}
+    ):
+        raise CodexRequestError("resume requires one exact persistent worker thread ID")
+    if resume_thread_id is None:
+        command = [
+            executable,
+            "--ask-for-approval",
+            prepared.policy.approval,
+            "exec",
+            "--json",
+            "--output-last-message",
+            str(final_message_path),
+            "--model",
+            request.model,
+            "-c",
+            f"model_reasoning_effort={request.reasoning_effort}",
+            "-c",
+            'web_search="disabled"',
+            "-c",
+            "sandbox_workspace_write.network_access=false",
+            "-c",
+            "features.skill_mcp_dependency_install=false",
+            "--sandbox",
+            prepared.policy.sandbox,
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
+            "--cd",
+            str(prepared.workspace),
+        ]
+        if prepared.policy.ephemeral:
+            command.append("--ephemeral")
+    else:
+        command = [
+            executable,
+            "--ask-for-approval",
+            prepared.policy.approval,
+            "--sandbox",
+            prepared.policy.sandbox,
+            "--cd",
+            str(prepared.workspace),
+            "exec",
+            "resume",
+            resume_thread_id,
+            "--json",
+            "--output-last-message",
+            str(final_message_path),
+            "--model",
+            request.model,
+            "-c",
+            f"model_reasoning_effort={request.reasoning_effort}",
+            "-c",
+            'web_search="disabled"',
+            "-c",
+            "sandbox_workspace_write.network_access=false",
+            "-c",
+            "features.skill_mcp_dependency_install=false",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
+        ]
+    if output_schema is not None:
+        command.extend(("--output-schema", str(output_schema)))
     command.append("-")
     return command
 
@@ -864,6 +964,8 @@ def _build_metadata(
     observation: _ProcessObservation,
     events: _EventProcessor,
     final_message_present: bool,
+    output_schema: Path | None,
+    resume_thread_id: str | None,
 ) -> dict[str, object]:
     terminating_signal = (
         -observation.exit_code
@@ -910,6 +1012,14 @@ def _build_metadata(
         "output_limit_stream": observation.output_limit_stream,
         "thread_id": events.identifier_value if events.identifier_kind == "thread_id" else None,
         "session_id": events.identifier_value if events.identifier_kind == "session_id" else None,
+        "thread_started_ids": list(events.started_thread_ids),
+        "resume_thread_id": resume_thread_id,
+        "output_schema_path": str(output_schema) if output_schema is not None else None,
+        "output_schema_sha256": (
+            hashlib.sha256(output_schema.read_bytes()).hexdigest()
+            if output_schema is not None
+            else None
+        ),
     }
     return metadata
 
@@ -986,6 +1096,22 @@ def _extract_identifier(event: Mapping[str, Any]) -> tuple[str | None, str | Non
         if isinstance(value, str) and value.strip():
             return key, value.strip()
     return None, None
+
+
+def _extract_started_thread_id(event: Mapping[str, Any]) -> str | None:
+    """Return only an explicit ID from a structured thread.started event."""
+    event_type = event.get("type")
+    if not isinstance(event_type, str) or event_type.casefold() != "thread.started":
+        return None
+    thread_id = event.get("thread_id")
+    if isinstance(thread_id, str) and thread_id.strip():
+        return thread_id.strip()
+    thread = event.get("thread")
+    if isinstance(thread, Mapping):
+        nested_id = thread.get("id")
+        if isinstance(nested_id, str) and nested_id.strip():
+            return nested_id.strip()
+    return None
 
 
 def _event_has_permission_evidence(event: Mapping[str, Any]) -> bool:

@@ -1,0 +1,33 @@
+schema_version: 1
+substage_id: minimal-supervisor-substage
+title: Minimal deterministic supervisor substage
+workspace: ../..
+contract_path: minimal-stage-contract.md
+worker_initial_prompt_path: ../prompts/worker-initial.md
+worker_repair_prompt_path: ../prompts/worker-repair.md
+auditor_prompt_path: ../prompts/auditor.md
+worker_model: gpt-5.6-sol
+worker_reasoning_effort: high
+worker_timeout_seconds: 1800
+auditor_model: gpt-5.6-sol
+auditor_reasoning_effort: high
+auditor_timeout_seconds: 1800
+acceptance_tests:
+  - id: quality-tests
+    argv: [python, -m, pytest, -q]
+    cwd: ../..
+    timeout_seconds: 1800
+    max_stdout_bytes: 10485760
+    max_stderr_bytes: 10485760
+allowed_paths:
+  - src/**
+  - tests/**
+  - docs/**
+protected_paths:
+  - examples/workflows/minimal-substage.yaml
+  - examples/workflows/minimal-stage-contract.md
+  - examples/prompts/worker-initial.md
+  - examples/prompts/worker-repair.md
+  - examples/prompts/auditor.md
+max_repair_rounds: 2
+checkpoint_after: true

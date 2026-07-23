@@ -153,3 +153,17 @@ environment, clock, and version boundaries). The fake rejects approval options
 placed after `exec`, exercises broken stdin and descendant containment, and does
 not invoke a real model, inspect user Codex configuration, log in, install
 software, or access the network.
+
+## Stage 2 adapter extension
+
+The workflow engine may supply one of two fixed engine-owned output schemas and
+may request `exec resume` with one explicit worker thread ID. Neither control is
+available in a human substage specification. Resume moves workspace and sandbox
+policy to global CLI options where necessary, retains every Stage 1 safety
+configuration, passes the exact ID immediately after `exec resume`, and still
+delivers the prompt only through stdin. `--last` and `--all` are rejected.
+
+Metadata now retains every distinct ID seen in an explicit structured
+`thread.started` event, the resume ID (when present), and the output-schema hash.
+The workflow requires one unambiguous initial worker ID and the same ID on every
+resume. Auditors continue to use fresh non-resumed ephemeral runs.
