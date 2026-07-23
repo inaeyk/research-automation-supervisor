@@ -1,24 +1,56 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import socket
+import subprocess
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import yaml
 
 from research_automation_supervisor.codex_adapter import run_prepared_codex
-from research_automation_supervisor.errors import ShadowStateError
+from research_automation_supervisor.errors import (
+    ShadowInputError,
+    ShadowIntegrityError,
+    ShadowLockError,
+    ShadowStateError,
+)
 from research_automation_supervisor.shadow_engine import (
     ShadowServices,
+    _ShadowLock,
+    abort_shadow_calibration,
+    record_shadow_review,
     resume_shadow_calibration,
     run_shadow_calibration,
+    shadow_calibration_report,
     shadow_calibration_status,
 )
+from research_automation_supervisor.workflow_engine import (
+    WorkflowServices,
+    run_substage,
+)
 from tests.shadow_helpers import (
+    SECOND_SUPERVISOR_UUID,
+    SOURCE_AUDITOR_UUID,
+    SOURCE_WORKER_UUID,
+    SUPERVISOR_UUID,
+    create_human_continuation_shadow_tree,
+    create_shadow_specification,
     create_shadow_tree,
     shadow_services,
     supervisor_proposal,
     supervisor_response,
+    write_review,
+)
+from tests.workflow_helpers import (
+    auditor_result,
+    codex_response,
+    create_workflow_tree,
+    worker_result,
 )
 
 
@@ -41,7 +73,7 @@ def test_run_uses_one_exact_id_read_only_session_and_never_persists_blind_input(
     assert result.status == "awaiting_reviews"
     assert result.proposal_count == 2
     assert result.comparison_count == 2
-    assert result.supervisor_session_id == "shadow-supervisor-thread"
+    assert result.supervisor_session_id == SUPERVISOR_UUID
     run_directory = Path(result.artifact_directory)
     initial_metadata = json.loads(
         (
@@ -57,9 +89,9 @@ def test_run_uses_one_exact_id_read_only_session_and_never_persists_blind_input(
     )
     assert initial_metadata["sandbox"] == "read-only"
     assert initial_metadata["ephemeral"] is False
-    assert resumed_metadata["resume_thread_id"] == "shadow-supervisor-thread"
+    assert resumed_metadata["resume_thread_id"] == SUPERVISOR_UUID
     command = resumed_metadata["command"]
-    assert command[command.index("resume") + 1] == "shadow-supervisor-thread"
+    assert command[command.index("resume") + 1] == SUPERVISOR_UUID
     assert "--last" not in command and "--all" not in command
     assert not list(run_directory.rglob("*blind*prompt*"))
     assert {
@@ -163,7 +195,10 @@ def test_uncertain_action_pauses_and_malformed_result_pauses(
         run_directory, services=shadow_services(fake)
     )
     assert paused.status == "human_paused"
-    assert paused.pause_reason == "uncertain_supervisor_action"
+    assert (
+        paused.pause_reason
+        == "supervisor_action_completion_unprovable"
+    )
     assert not (tmp_path / "uncertain/shadow-counter").exists()
 
     responses = [
@@ -202,6 +237,37 @@ def test_mutated_completed_assessment_fails_status_integrity(
         shadow_calibration_status(run_directory)
 
 
+def test_stage3_journal_and_every_finalized_artifact_are_hash_bound(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(result.artifact_directory)
+    paths = [
+        run_directory / "journal.jsonl",
+        run_directory / "decision-points.json",
+        run_directory
+        / "supervisor/supervisor-worker_initial-r000-a001.json",
+        run_directory
+        / "proposals/worker_initial-r000-a001"
+        / "blind-input-manifest.json",
+        run_directory
+        / "proposals/worker_initial-r000-a001/assessment.json",
+        run_directory
+        / "comparisons/worker_initial-r000-a001/comparison.json",
+    ]
+    for path in paths:
+        original = path.read_bytes()
+        path.write_bytes(original + b" ")
+        with pytest.raises(ShadowStateError):
+            shadow_calibration_status(run_directory)
+        path.write_bytes(original)
+
+
 def test_requested_change_and_oversize_are_deterministically_disqualified(
     tmp_path: Path,
 ) -> None:
@@ -211,7 +277,7 @@ def test_requested_change_and_oversize_are_deterministically_disqualified(
     )
     auditor = supervisor_response(
         "auditor",
-        expected_resume_thread_id="shadow-supervisor-thread",
+        expected_resume_thread_id=SUPERVISOR_UUID,
     )
     spec, _, _, fake = create_shadow_tree(
         tmp_path / "requested",
@@ -245,7 +311,7 @@ def test_requested_change_and_oversize_are_deterministically_disqualified(
             oversized,
             supervisor_response(
                 "auditor",
-                expected_resume_thread_id="shadow-supervisor-thread",
+                expected_resume_thread_id=SUPERVISOR_UUID,
             ),
         ],
     )
@@ -272,12 +338,25 @@ def test_requested_change_and_oversize_are_deterministically_disqualified(
     )
 
 
-def test_supervisor_cannot_reuse_a_source_worker_session(
+@pytest.mark.parametrize(
+    "observed",
+    [
+        "friendly-session-name",
+        "alias:supervisor",
+        "not-a-uuid",
+        "00000000-0000-0000-0000-000000000000",
+        SUPERVISOR_UUID.upper(),
+        f" {SUPERVISOR_UUID}",
+        f"{SUPERVISOR_UUID} ",
+    ],
+)
+def test_initial_supervisor_identity_rejects_every_noncanonical_selector(
     tmp_path: Path,
+    observed: str,
 ) -> None:
     responses = [
         supervisor_response(
-            "worker_initial", thread_id="worker-thread-1"
+            "worker_initial", thread_id=observed
         )
     ]
     spec, _, _, fake = create_shadow_tree(
@@ -292,3 +371,801 @@ def test_supervisor_cannot_reuse_a_source_worker_session(
 
     assert result.status == "human_paused"
     assert result.pause_reason == "supervisor_session_integrity_failed"
+    assert result.supervisor_session_id is None
+    assert (tmp_path / "shadow-counter").read_text() == "1"
+
+
+def test_initial_supervisor_identity_rejects_missing_ambiguous_and_metadata_only(
+    tmp_path: Path,
+) -> None:
+    variants = [
+        [{"type": "item.completed", "thread_id": SUPERVISOR_UUID}],
+        [
+            {"type": "thread.started", "thread_id": SUPERVISOR_UUID},
+            {
+                "type": "thread.started",
+                "thread_id": SECOND_SUPERVISOR_UUID,
+            },
+        ],
+        [{"type": "thread.started"}],
+    ]
+    for index, events in enumerate(variants):
+        response = supervisor_response("worker_initial")
+        response["stdout_lines"] = [
+            json.dumps(event) for event in events
+        ]
+        root = tmp_path / str(index)
+        spec, _, _, fake = create_shadow_tree(
+            root, supervisor_responses=[response]
+        )
+        result = run_shadow_calibration(
+            spec,
+            runs_dir=root / "runs",
+            services=shadow_services(fake),
+        )
+        assert result.status == "human_paused"
+        assert result.supervisor_session_id is None
+        assert (root / "shadow-counter").read_text() == "1"
+
+
+def test_resumed_supervisor_must_emit_the_same_canonical_uuid(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            supervisor_response("worker_initial"),
+            supervisor_response(
+                "auditor",
+                thread_id=SECOND_SUPERVISOR_UUID,
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+
+    assert result.status == "human_paused"
+    assert result.supervisor_session_id == SUPERVISOR_UUID
+    assert result.pause_reason == "supervisor_session_integrity_failed"
+    assert (tmp_path / "shadow-counter").read_text() == "2"
+
+
+@pytest.mark.parametrize(
+    "source_uuid",
+    [SOURCE_WORKER_UUID, SOURCE_AUDITOR_UUID],
+)
+def test_supervisor_cannot_reuse_a_source_worker_or_auditor_uuid(
+    tmp_path: Path,
+    source_uuid: str,
+) -> None:
+    stage2_spec, project, fake = create_workflow_tree(
+        tmp_path / "stage2",
+        responses=[
+            codex_response(
+                "worker",
+                SOURCE_WORKER_UUID,
+                worker_result(),
+            ),
+            codex_response(
+                "auditor",
+                SOURCE_AUDITOR_UUID,
+                auditor_result(),
+            ),
+        ],
+    )
+    source = run_substage(
+        stage2_spec,
+        runs_dir=tmp_path / "source-runs",
+        services=WorkflowServices(codex_executable=str(fake)),
+    )
+    spec = create_shadow_specification(
+        tmp_path,
+        Path(source.artifact_directory),
+        project,
+        supervisor_responses=[
+            supervisor_response("worker_initial", thread_id=source_uuid)
+        ],
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+
+    assert result.status == "human_paused"
+    assert result.supervisor_session_id is None
+    assert result.pause_reason == "supervisor_session_integrity_failed"
+
+
+def test_paused_non_uuid_identity_has_no_replacement_launch(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            supervisor_response(
+                "worker_initial", thread_id="friendly-name"
+            )
+        ],
+    )
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(result.artifact_directory)
+    journal_before = (run_directory / "journal.jsonl").read_bytes()
+
+    with pytest.raises(ShadowInputError):
+        resume_shadow_calibration(
+            run_directory, services=shadow_services(fake)
+        )
+
+    assert (tmp_path / "shadow-counter").read_text() == "1"
+    assert (run_directory / "journal.jsonl").read_bytes() == journal_before
+
+
+def test_fake_stage3_mode_rejects_non_uuid_resume_selector(
+    tmp_path: Path,
+) -> None:
+    _, _, project, fake = create_shadow_tree(tmp_path)
+    (project / ".fake-codex.json").write_text(
+        json.dumps(
+            {
+                "responses": [
+                    {
+                        "require_stage3_policy": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(fake),
+            "--ask-for-approval",
+            "never",
+            "--sandbox",
+            "read-only",
+            "--cd",
+            str(project),
+            "exec",
+            "resume",
+            "friendly-name",
+        ],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "canonical UUID" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "incomplete",
+        "metadata_run_id",
+        "metadata_prompt",
+        "metadata_schema",
+        "metadata_session",
+        "result",
+        "events",
+        "final_message",
+        "completion_manifest",
+    ],
+)
+def test_interrupted_contradictory_action_pauses_once_without_relaunch(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    call_count = 0
+
+    def interrupt_second(prepared, **kwargs: object):
+        nonlocal call_count
+        call_count += 1
+        result = run_prepared_codex(
+            prepared, **kwargs  # type: ignore[arg-type]
+        )
+        if call_count == 2:
+            raise KeyboardInterrupt
+        return result
+
+    with pytest.raises(KeyboardInterrupt):
+        run_shadow_calibration(
+            spec,
+            runs_dir=tmp_path / "runs",
+            services=ShadowServices(
+                codex_executable=str(fake),
+                supervisor_invoker=interrupt_second,
+            ),
+        )
+    run_directory = next((tmp_path / "runs").iterdir())
+    stage1 = (
+        run_directory
+        / "proposals/auditor-r000-a002/stage1-run"
+    )
+    if mutation == "incomplete":
+        (stage1 / "metadata.json").unlink()
+    elif mutation == "completion_manifest":
+        completion = json.loads(
+            (stage1 / "stage2-completion.json").read_text()
+        )
+        completion["run_id"] = "replaced-run"
+        (stage1 / "stage2-completion.json").write_text(
+            json.dumps(completion, sort_keys=True) + "\n"
+        )
+    elif mutation in {
+        "metadata_run_id",
+        "metadata_prompt",
+        "metadata_schema",
+        "metadata_session",
+    }:
+        metadata_path = stage1 / "metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        field = {
+            "metadata_run_id": "run_id",
+            "metadata_prompt": "prompt_sha256",
+            "metadata_schema": "output_schema_sha256",
+            "metadata_session": "resume_thread_id",
+        }[mutation]
+        metadata[field] = (
+            SECOND_SUPERVISOR_UUID
+            if mutation == "metadata_session"
+            else "0" * 64
+            if field.endswith("sha256")
+            else "wrong-run"
+        )
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+        )
+        _reseal_stage1_completion(stage1, "metadata.json")
+    elif mutation == "result":
+        result_path = stage1 / "result.json"
+        value = json.loads(result_path.read_text())
+        value["status"] = "process_failed"
+        result_path.write_text(
+            json.dumps(value, indent=2, sort_keys=True) + "\n"
+        )
+        _reseal_stage1_completion(stage1, "result.json")
+    elif mutation == "events":
+        (stage1 / "events.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "thread.started",
+                    "thread_id": SECOND_SUPERVISOR_UUID,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        _reseal_stage1_completion(stage1, "events.jsonl")
+    else:
+        (stage1 / "final-message.md").write_text(
+            supervisor_proposal("auditor") + "\nchanged"
+        )
+        _reseal_stage1_completion(stage1, "final-message.md")
+
+    paused = resume_shadow_calibration(
+        run_directory, services=shadow_services(fake)
+    )
+
+    assert paused.status == "human_paused"
+    assert (
+        paused.pause_reason
+        == "supervisor_action_completion_unprovable"
+    )
+    assert paused.supervisor_session_id == SUPERVISOR_UUID
+    assert (tmp_path / "shadow-counter").read_text() == "2"
+    packages = list(
+        (run_directory / "escalation").glob("*/package.json")
+    )
+    assert len(packages) == 1
+    package = json.loads(packages[0].read_text())
+    assert package["schema_version"] == 1
+    assert package["pending_action_id"] == "supervisor-auditor-r000-a002"
+    assert package["pending_resume_session_id"] == SUPERVISOR_UUID
+    journal = (run_directory / "journal.jsonl").read_bytes()
+    assert shadow_calibration_status(run_directory) == paused
+    with pytest.raises(ShadowInputError):
+        resume_shadow_calibration(
+            run_directory, services=shadow_services(fake)
+        )
+    assert (run_directory / "journal.jsonl").read_bytes() == journal
+
+
+def _reseal_stage1_completion(stage1: Path, name: str) -> None:
+    completion_path = stage1 / "stage2-completion.json"
+    completion = json.loads(completion_path.read_text())
+    path = stage1 / name
+    completion["artifact_hashes"][str(path)] = hashlib.sha256(
+        path.read_bytes()
+    ).hexdigest()
+    completion_path.write_text(
+        json.dumps(completion, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def test_every_public_result_field_must_exactly_agree_with_state(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    result_path = Path(result.artifact_directory) / "result.json"
+    original = result_path.read_bytes()
+    mutations: dict[str, object] = {
+        "schema_version": 2,
+        "calibration_id": "changed-calibration",
+        "source_stage2_run": "/changed/source",
+        "source_substage_id": "changed-source",
+        "status": "completed",
+        "supervisor_session_id": SECOND_SUPERVISOR_UUID,
+        "supervisor_model": "gpt-5.6-terra",
+        "proposal_count": 99,
+        "comparison_count": 99,
+        "review_count": 99,
+        "disqualification_count": 99,
+        "readiness": "not_ready",
+        "artifact_directory": "/changed/artifacts",
+        "pause_reason": "changed_pause_reason",
+        "summary": "changed summary",
+        "started_at": "2026-01-02T00:00:00.000000Z",
+        "updated_at": "2026-01-02T00:00:01.000000Z",
+    }
+    for field, changed in mutations.items():
+        value = json.loads(original)
+        value[field] = changed
+        result_path.write_text(
+            json.dumps(value, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ShadowStateError):
+            shadow_calibration_status(Path(result.artifact_directory))
+        result_path.write_bytes(original)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["resume", "status", "review", "report", "abort"],
+)
+def test_state_result_disagreement_blocks_every_run_operation_without_writes(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    spec, _, _, fake = create_shadow_tree(tmp_path)
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    run_directory = Path(result.artifact_directory)
+    result_path = run_directory / "result.json"
+    value = json.loads(result_path.read_text())
+    value["summary"] = "replacement summary"
+    result_path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    before = {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(ShadowIntegrityError):
+        if operation == "resume":
+            resume_shadow_calibration(
+                run_directory, services=shadow_services(fake)
+            )
+        elif operation == "status":
+            shadow_calibration_status(run_directory)
+        elif operation == "review":
+            record_shadow_review(
+                run_directory,
+                "worker_initial-r000-a001",
+                review,
+                services=shadow_services(fake),
+            )
+        elif operation == "report":
+            shadow_calibration_report(run_directory)
+        else:
+            abort_shadow_calibration(
+                run_directory,
+                "stop",
+                services=shadow_services(fake),
+            )
+
+    assert (tmp_path / "shadow-counter").read_text() == "2"
+    assert {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_shadow_lock_rejects_symlink_without_modifying_its_target(
+    tmp_path: Path,
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    target = tmp_path / "target.txt"
+    target.write_text("untouched\n", encoding="utf-8")
+    lock_path = run_directory / "shadow.lock"
+    lock_path.symlink_to(target)
+
+    with pytest.raises(ShadowLockError), _ShadowLock(
+        run_directory,
+        lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    ):
+        pass
+
+    assert target.read_text(encoding="utf-8") == "untouched\n"
+    assert lock_path.is_symlink()
+
+
+def test_shadow_lock_rejects_nonregular_and_broken_paths(
+    tmp_path: Path,
+) -> None:
+    creators = ("directory", "fifo", "socket", "broken_symlink")
+    for name in creators:
+        run_directory = tmp_path / name
+        run_directory.mkdir()
+        lock_path = run_directory / "shadow.lock"
+        unix_socket: socket.socket | None = None
+        if name == "directory":
+            lock_path.mkdir()
+        elif name == "fifo":
+            os.mkfifo(lock_path)
+        elif name == "socket":
+            unix_socket = socket.socket(socket.AF_UNIX)
+            try:
+                unix_socket.bind(str(lock_path))
+            except PermissionError:
+                unix_socket.close()
+                continue
+        else:
+            lock_path.symlink_to(run_directory / "missing")
+        try:
+            with pytest.raises(ShadowLockError), _ShadowLock(
+                run_directory,
+                lambda: datetime(2026, 1, 1, tzinfo=UTC),
+            ):
+                pass
+        finally:
+            if unix_socket is not None:
+                unix_socket.close()
+
+
+def test_shadow_lock_metadata_and_stale_recovery_rules(
+    tmp_path: Path,
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    lock_path = run_directory / "shadow.lock"
+    timestamp = "2026-01-01T00:00:00.000000Z"
+    invalid_values = [
+        "not-json\n",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "started_at": timestamp,
+            }
+        )
+        + "\n",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 999_999_999,
+                "host": "foreign.invalid",
+                "started_at": timestamp,
+            }
+        )
+        + "\n",
+    ]
+    for value in invalid_values:
+        lock_path.write_text(value, encoding="utf-8")
+        before = lock_path.read_bytes()
+        with pytest.raises(ShadowLockError), _ShadowLock(
+            run_directory,
+            lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        ):
+            pass
+        assert lock_path.read_bytes() == before
+
+    lock_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 999_999_999,
+                "host": socket.gethostname(),
+                "started_at": timestamp,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with _ShadowLock(
+        run_directory,
+        lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    ):
+        metadata = json.loads(lock_path.read_text())
+        assert metadata["pid"] == os.getpid()
+    assert not lock_path.exists()
+
+
+def test_shadow_lock_does_not_unlink_a_release_time_replacement(
+    tmp_path: Path,
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    lock = _ShadowLock(
+        run_directory,
+        lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    lock.__enter__()
+    lock_path = run_directory / "shadow.lock"
+    lock_path.unlink()
+    lock_path.write_text("replacement\n", encoding="utf-8")
+
+    with pytest.raises(ShadowLockError):
+        lock.__exit__(None, None, None)
+
+    assert lock_path.read_text(encoding="utf-8") == "replacement\n"
+
+
+def test_missing_continuation_still_generates_blind_advisory_proposal(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, fake, instruction = (
+        create_human_continuation_shadow_tree(tmp_path)
+    )
+    instruction.unlink()
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+
+    assert result.status == "awaiting_reviews"
+    assert result.proposal_count == 3
+    comparison_path = (
+        Path(result.artifact_directory)
+        / "comparisons/worker_human_continuation-r001-a002"
+        / "comparison.json"
+    )
+    comparison = json.loads(comparison_path.read_text())
+    assert comparison["comparison_available"] is False
+    assert (
+        comparison["comparison_unavailable_reason"]
+        == "continuation_source_unavailable"
+    )
+    assert not (
+        comparison_path.parent / "authoritative-source.md"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "contract_change_requested",
+        "scope_expansion_requested",
+        "permission_change_requested",
+        "acceptance_change_requested",
+        "convention_change_requested",
+    ],
+)
+def test_every_requested_change_flag_disqualifies(
+    tmp_path: Path,
+    flag: str,
+) -> None:
+    value = json.loads(supervisor_proposal("worker_initial"))
+    value[flag] = True
+    first = supervisor_response("worker_initial")
+    first["final"] = json.dumps(value, sort_keys=True)
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            first,
+            supervisor_response(
+                "auditor",
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    assessment = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+
+    assert assessment["disqualified"] is True
+    assert flag in assessment["disqualification_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_reason"),
+    [
+        ("src/output.txt", None),
+        ("control/contract.md", "protected_path"),
+        ("outside.txt", "outside_allowed_paths"),
+    ],
+)
+def test_referenced_path_scope_is_assessed_exactly(
+    tmp_path: Path,
+    path: str,
+    expected_reason: str | None,
+) -> None:
+    value = json.loads(supervisor_proposal("worker_initial"))
+    value["referenced_paths"] = [path]
+    first = supervisor_response("worker_initial")
+    first["final"] = json.dumps(value, sort_keys=True)
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            first,
+            supervisor_response(
+                "auditor",
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    assessment = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+
+    findings = assessment["path_scope_findings"]
+    if expected_reason is None:
+        assert findings == []
+    else:
+        assert findings == [{"path": path, "reason": expected_reason}]
+        assert assessment["disqualified"] is True
+
+
+def test_required_check_coverage_records_exact_ids_without_semantic_scoring(
+    tmp_path: Path,
+) -> None:
+    value = json.loads(supervisor_proposal("worker_initial"))
+    value["required_checks"] = ["not-the-frozen-test"]
+    first = supervisor_response("worker_initial")
+    first["final"] = json.dumps(value, sort_keys=True)
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            first,
+            supervisor_response(
+                "auditor",
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    assessment = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+
+    assert assessment["required_check_coverage"] == {
+        "required_test_ids": ["fixed-test"],
+        "covered_test_ids": [],
+        "missing_test_ids": ["fixed-test"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("rendered_size", "compliant"),
+    [(1024, True), (1025, False)],
+)
+def test_configured_proposal_byte_limit_boundary(
+    tmp_path: Path,
+    rendered_size: int,
+    compliant: bool,
+) -> None:
+    value = json.loads(supervisor_proposal("worker_initial"))
+    value["prompt"] = "x"
+    rendered = json.dumps(value, sort_keys=True)
+    value["prompt"] = "x" * (1 + rendered_size - len(rendered))
+    rendered = json.dumps(value, sort_keys=True)
+    assert len(rendered.encode("utf-8")) == rendered_size
+    first = supervisor_response("worker_initial")
+    first["final"] = rendered
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            first,
+            supervisor_response(
+                "auditor",
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+    specification = yaml.safe_load(spec.read_text(encoding="utf-8"))
+    specification["max_proposal_bytes"] = 1024
+    spec.write_text(
+        yaml.safe_dump(specification, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    assessment = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+
+    assert assessment["size_compliant"] is compliant
+    assert (
+        "proposal_size_exceeded"
+        in assessment["disqualification_reasons"]
+    ) is (not compliant)
+
+
+def test_transport_failure_pauses_without_worker_auditor_or_test_launch(
+    tmp_path: Path,
+) -> None:
+    failed = supervisor_response("worker_initial")
+    failed["exit_code"] = 71
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[failed],
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+
+    assert result.status == "human_paused"
+    assert result.pause_reason == "supervisor_process_failed"
+    assert result.proposal_count == 1
+    assert (tmp_path / "shadow-counter").read_text() == "1"

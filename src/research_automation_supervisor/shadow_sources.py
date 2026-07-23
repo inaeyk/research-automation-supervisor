@@ -12,6 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
@@ -25,6 +26,7 @@ from research_automation_supervisor.contract import (
 )
 from research_automation_supervisor.errors import (
     ShadowInputError,
+    ShadowIntegrityError,
     ShadowStateError,
     WorkflowDependencyError,
     WorkflowInputError,
@@ -36,7 +38,9 @@ from research_automation_supervisor.git_evidence import (
     GitEvidence,
     record_git_baseline,
 )
-from research_automation_supervisor.redaction import would_redact_text
+from research_automation_supervisor.shadow_confidentiality import (
+    preflight_shadow_confidentiality,
+)
 from research_automation_supervisor.shadow_models import (
     DecisionPoint,
     FrozenFileHash,
@@ -48,9 +52,7 @@ from research_automation_supervisor.test_runner import (
     TestSuiteResult,
 )
 from research_automation_supervisor.workflow_engine import (
-    _load_state,
-    _read_valid_journal,
-    substage_status,
+    read_stage2_source_for_shadow,
 )
 from research_automation_supervisor.workflow_integrity import (
     JournalEntry,
@@ -132,6 +134,13 @@ class VerifiedStage2Source:
 
     def blind_source_summary(self) -> dict[str, object]:
         """Return only source identity and the frozen normalized specification."""
+        normalized = dict(self.normalized_specification)
+        for field in (
+            "worker_initial_prompt_path",
+            "worker_repair_prompt_path",
+            "auditor_prompt_path",
+        ):
+            normalized.pop(field, None)
         return {
             "schema_version": 1,
             "source_stage2_run": str(self.run_directory),
@@ -140,7 +149,7 @@ class VerifiedStage2Source:
             "repository_root": self.state.repository_root,
             "baseline_commit": self.state.baseline_commit,
             "baseline_branch": self.state.baseline_branch,
-            "normalized_stage2_specification": self.normalized_specification,
+            "normalized_stage2_specification": normalized,
         }
 
     def identity_record(self) -> dict[str, object]:
@@ -167,8 +176,8 @@ class VerifiedStage2Source:
             "decision_count": len(self.decisions),
         }
 
-    def model_session_ids(self) -> frozenset[str]:
-        """Return every verified worker/auditor session ID in the source run."""
+    def model_session_uuids(self) -> frozenset[str]:
+        """Return canonical forms of verified source worker/auditor UUIDs."""
         identifiers: set[str] = set()
         for action_id in self.state.completed_action_ids:
             path = self.run_directory / "actions" / f"{action_id}.json"
@@ -177,9 +186,15 @@ class VerifiedStage2Source:
                 continue
             thread_ids = value.get("thread_started_ids")
             if isinstance(thread_ids, list):
-                identifiers.update(
-                    item for item in thread_ids if isinstance(item, str)
-                )
+                for item in thread_ids:
+                    if not isinstance(item, str):
+                        continue
+                    try:
+                        parsed = UUID(item)
+                    except ValueError:
+                        continue
+                    if parsed.int != 0:
+                        identifiers.add(str(parsed))
         return frozenset(identifiers)
 
 
@@ -280,34 +295,7 @@ def load_shadow_specification(
             "project_context_paths resolve to duplicate files"
         )
     source = verify_stage2_source(source_run, environ=environ)
-    structural = [
-        str(path),
-        str(specification_path),
-        hashlib.sha256(specification_bytes).hexdigest(),
-        specification.calibration_id,
-        specification.title,
-        str(source_run),
-        str(policy.path),
-        policy.sha256,
-        specification.supervisor_model,
-        specification.supervisor_reasoning_effort,
-        str(specification.supervisor_timeout_seconds),
-        str(specification.max_proposal_bytes),
-        str(specification.minimum_reviewed_proposals),
-        str(specification.required_consecutive_acceptable),
-        "supervisor",
-        "read-only",
-        "never",
-        "disabled",
-        "persistent",
-    ]
-    for context in contexts:
-        structural.extend((str(context.path), context.sha256))
-    if any(would_redact_text(value, sensitive_values) for value in structural):
-        raise ShadowInputError(
-            "shadow specification contains a structural redaction collision"
-        )
-    return PreparedShadowSpecification(
+    prepared = PreparedShadowSpecification(
         specification_locator_path=specification_locator,
         specification_path=specification_path,
         specification_bytes=specification_bytes,
@@ -319,6 +307,41 @@ def load_shadow_specification(
         contexts=contexts,
         source=source,
     )
+    preflight_shadow_confidentiality(
+        (
+            prepared.specification_bytes,
+            prepared.normalized_dict(),
+            prepared.policy.manifest(),
+            tuple(context.manifest() for context in prepared.contexts),
+            prepared.source.identity_record(),
+            prepared.policy.content,
+            tuple(context.content for context in prepared.contexts),
+            prepared.source.prepared.contract.content,
+            prepared.source.blind_source_summary(),
+            tuple(
+                (
+                    decision.point.model_dump(mode="json"),
+                    decision.blind_evidence,
+                )
+                for decision in prepared.source.decisions
+            ),
+        ),
+        sensitive_values,
+        label="shadow source or input",
+    )
+    # Import locally to keep source reconstruction independent of prompt
+    # assembly while still proving the complete prompt before run creation.
+    from research_automation_supervisor.shadow_prompts import (
+        build_blind_supervisor_prompt,
+    )
+
+    for decision in prepared.source.decisions:
+        build_blind_supervisor_prompt(
+            prepared,
+            decision,
+            sensitive_values=sensitive_values,
+        )
+    return prepared
 
 
 def verify_stage2_source(
@@ -332,13 +355,11 @@ def verify_stage2_source(
     )
     _assert_source_unlocked(resolved)
     try:
-        result = substage_status(resolved)
-        state = _load_state(resolved)
-        journal = tuple(_read_valid_journal(resolved))
+        result, state, journal = read_stage2_source_for_shadow(resolved)
     except WorkflowLockError as exc:
         raise ShadowInputError("source Stage 2 run is actively locked") from exc
-    except (WorkflowInputError, WorkflowStateError) as exc:
-        raise ShadowInputError(
+    except WorkflowStateError as exc:
+        raise ShadowIntegrityError(
             "source Stage 2 run failed trusted integrity validation"
         ) from exc
     if result.status not in ALLOWED_SOURCE_STATUSES:
@@ -360,7 +381,7 @@ def verify_stage2_source(
     except WorkflowDependencyError:
         raise
     except (WorkflowInputError, WorkflowStateError, ValidationError) as exc:
-        raise ShadowInputError(
+        raise ShadowIntegrityError(
             "source Stage 2 frozen inputs could not be verified"
         ) from exc
     if (
@@ -371,15 +392,20 @@ def verify_stage2_source(
         or baseline.head != state.baseline_commit
         or baseline.branch != state.baseline_branch
     ):
-        raise ShadowInputError(
+        raise ShadowIntegrityError(
             "source Stage 2 repository identity no longer matches"
         )
-    decisions = reconstruct_decision_points(
-        resolved,
-        prepared,
-        baseline,
-        journal,
-    )
+    try:
+        decisions = reconstruct_decision_points(
+            resolved,
+            prepared,
+            baseline,
+            journal,
+        )
+    except (ShadowStateError, WorkflowInputError, WorkflowStateError) as exc:
+        raise ShadowIntegrityError(
+            "source Stage 2 decision reconstruction failed integrity checks"
+        ) from exc
     return VerifiedStage2Source(
         run_directory=resolved,
         result=result,
@@ -441,7 +467,19 @@ def reconstruct_decision_points(
             authoritative_source: HumanFile | None = None
             authoritative_rendered: RenderedWorkflowPrompt | None = None
             unavailable_reason: str | None = None
-            try:
+            if (
+                proposal_kind == "worker_human_continuation"
+                and _continuation_source_is_missing(replay)
+            ):
+                evidence = _continuation_evidence_from_replay(
+                    prepared,
+                    pending,
+                    handoff,
+                    replay,
+                    continuation_origins,
+                )
+                unavailable_reason = "continuation_source_unavailable"
+            else:
                 (
                     evidence,
                     authoritative_source,
@@ -455,13 +493,6 @@ def reconstruct_decision_points(
                     replay,
                     continuation_origins,
                 )
-            except (ShadowStateError, WorkflowInputError, WorkflowStateError):
-                evidence = _fallback_evidence(
-                    proposal_kind,
-                    pending,
-                    replay,
-                )
-                unavailable_reason = "authoritative_reconstruction_unproven"
             evidence_sha256 = hashlib.sha256(
                 _canonical_json(evidence)
             ).hexdigest()
@@ -828,20 +859,59 @@ def _auditor_evidence(
     }
 
 
-def _fallback_evidence(
-    proposal_kind: ProposalKind,
-    pending: PendingAction,
+def _continuation_source_is_missing(
     replay: Mapping[str, object],
+) -> bool:
+    path = replay.get("continuation_path")
+    digest = replay.get("continuation_sha256")
+    if not isinstance(path, str) or not isinstance(digest, str):
+        raise ShadowStateError(
+            "continuation decision lacks its trusted source anchor"
+        )
+    try:
+        Path(path).lstat()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ShadowStateError(
+            "continuation source locator could not be inspected"
+        ) from exc
+    return False
+
+
+def _continuation_evidence_from_replay(
+    prepared: PreparedSubstage,
+    pending: PendingAction,
+    handoff: PromptHandoff,
+    replay: Mapping[str, object],
+    continuation_origins: Mapping[int, str],
 ) -> dict[str, object]:
-    """Retain only facts independently proven before an unavailable comparison."""
-    return {
-        "proposal_kind": proposal_kind,
-        "source_action_id": pending.action_id,
-        "repair_round": pending.repair_round,
-        "state_immediately_before_action": replay.get("status"),
-        "repair_trigger": replay.get("repair_trigger"),
-        "comparison": "unavailable; do not infer missing evidence",
-    }
+    path = replay.get("continuation_path")
+    digest = replay.get("continuation_sha256")
+    if (
+        not isinstance(path, str)
+        or not isinstance(digest, str)
+        or handoff.kind != "human_continuation"
+        or handoff.source_path != path
+        or handoff.source_sha256 != digest
+        or handoff.contract_sha256 != prepared.contract.sha256
+        or pending.prompt_sha256 != handoff.rendered_prompt_sha256
+    ):
+        raise ShadowStateError(
+            "missing continuation source anchor contradicts its handoff"
+        )
+    origin = continuation_origins.get(pending.repair_round)
+    if origin is None:
+        raise ShadowStateError(
+            "continuation origin state cannot be proven"
+        )
+    return _human_continuation_evidence(
+        origin,
+        pending.repair_round,
+        _optional_tests_from_replay(replay),
+        _optional_git_from_replay(replay),
+        _optional_audit_from_replay(replay),
+    )
 
 
 def _initial_replay() -> dict[str, object]:
@@ -1141,7 +1211,7 @@ def _assert_source_unlocked(run_directory: Path) -> None:
     except ShadowInputError:
         raise
     except OSError as exc:
-        raise ShadowInputError(
+        raise ShadowIntegrityError(
             "source Stage 2 lock could not be inspected"
         ) from exc
 

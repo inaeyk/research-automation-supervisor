@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import posixpath
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import (
     AfterValidator,
@@ -74,6 +75,21 @@ def _sanitize_optional_string(value: str) -> str:
     return _sanitize_string(value)
 
 
+def _sanitize_prompt(value: str) -> str:
+    normalized = "".join(
+        character
+        for character in value
+        if character in {"\n", "\t"} or ord(character) >= 32
+    ).strip()
+    if not normalized:
+        raise ValueError(
+            "proposal prompt must not be empty after sanitization"
+        )
+    if len(normalized.encode("utf-8")) > MAX_PROPOSAL_BYTES:
+        raise ValueError("proposal prompt exceeds its UTF-8 byte limit")
+    return normalized
+
+
 def _sanitize_text(value: str) -> str:
     normalized = "".join(
         character
@@ -83,6 +99,21 @@ def _sanitize_text(value: str) -> str:
     if len(normalized.encode("utf-8")) > MAX_SHADOW_STRING_BYTES:
         raise ValueError("structured text exceeds its UTF-8 byte limit")
     return normalized
+
+
+def canonical_supervisor_uuid(value: str) -> str:
+    """Require exact lowercase hyphenated non-nil UUID text."""
+    try:
+        parsed = UUID(value)
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            "supervisor session identity must be a canonical UUID"
+        ) from exc
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError(
+            "supervisor session identity must be a canonical non-nil UUID"
+        )
+    return value
 
 
 BoundedString = Annotated[
@@ -106,6 +137,7 @@ StringTuple = Annotated[
     Field(max_length=MAX_LIST_ITEMS),
 ]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+SupervisorUUID = Annotated[str, AfterValidator(canonical_supervisor_uuid)]
 
 
 class ShadowSpecification(BaseModel):
@@ -207,7 +239,7 @@ class SupervisorProposal(BaseModel):
     disposition: Literal["propose", "recommend_human_pause"]
     prompt: Annotated[
         str,
-        AfterValidator(_sanitize_optional_string),
+        AfterValidator(_sanitize_prompt),
         Field(min_length=1, max_length=MAX_PROPOSAL_BYTES),
     ] | None
     summary: BoundedString
@@ -477,7 +509,7 @@ class PendingSupervisorAction(BaseModel):
     output_schema_sha256: Sha256
     blind_manifest_path: str
     blind_manifest_sha256: Sha256
-    resume_session_id: str | None
+    resume_session_id: SupervisorUUID | None
     removed_environment_variable_names: Annotated[
         tuple[str, ...], BeforeValidator(_freeze_sequence)
     ]
@@ -556,7 +588,7 @@ class ShadowState(BaseModel):
     source_substage_id: Identifier
     supervisor_model: ModelName
     supervisor_reasoning_effort: ReasoningEffort
-    supervisor_session_id: str | None
+    supervisor_session_id: SupervisorUUID | None
     decision_count: Annotated[int, Field(ge=0)]
     current_decision_index: Annotated[int, Field(ge=0)]
     completed_action_ids: Annotated[
@@ -620,7 +652,7 @@ class ShadowResult(BaseModel):
     source_stage2_run: str
     source_substage_id: Identifier
     status: ShadowStatus
-    supervisor_session_id: str | None
+    supervisor_session_id: SupervisorUUID | None
     supervisor_model: ModelName
     proposal_count: Annotated[int, Field(ge=0)]
     comparison_count: Annotated[int, Field(ge=0)]

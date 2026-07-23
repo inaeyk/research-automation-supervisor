@@ -8,8 +8,9 @@ the deterministic one-prompt Codex process adapter. Stage 2 adds a durable,
 single-substage workflow with one exact-ID persistent worker, fresh ephemeral
 auditors, fixed argv tests, Git/scope evidence, bounded repairs, and explicit
 human pauses. Stage 3 adds retrospective blind calibration with one persistent
-read-only supervisor, post-finalization authoritative comparisons, structured
-human reviews, and informational-only readiness.
+canonical-UUID, read-only supervisor, complete confidentiality preflight,
+post-finalization authoritative comparisons, structured human reviews, and
+informational-only readiness.
 
 See:
 

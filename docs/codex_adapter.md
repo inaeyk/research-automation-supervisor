@@ -181,7 +181,10 @@ one unambiguous initial worker ID and the same ID on every resume. Auditors
 continue to use fresh non-resumed ephemeral runs.
 
 Stage 3 applies the same proof to one initial read-only, non-ephemeral
-`supervisor` session and exact-ID supervisor resumes. It fixes read-only
+`supervisor` session and exact-ID supervisor resumes. The shadow engine accepts
+only one explicit canonical lowercase non-nil UUID from `thread.started` and
+uses that exact UUID after `codex exec resume`; names and metadata-only
+selectors never become Stage 3 identity. It fixes read-only
 sandboxing, approval `never`, disabled network/web, ignored user configuration
 and rules, model/reasoning/workspace/schema, and stdin-only blind input on every
 turn.

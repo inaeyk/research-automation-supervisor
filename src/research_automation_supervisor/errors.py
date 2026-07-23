@@ -69,5 +69,13 @@ class ShadowStateError(ShadowError):
     """Durable shadow-calibration evidence violates an invariant."""
 
 
+class ShadowIntegrityError(ShadowStateError):
+    """Trusted Stage 2/3 durable evidence was replaced, corrupted, or drifted."""
+
+
+class ShadowConfidentialityError(ShadowInputError):
+    """A Stage 3 value would be changed by the mandatory redaction policy."""
+
+
 class ShadowLockError(ShadowError):
     """A shadow-calibration run cannot be locked safely."""

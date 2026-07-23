@@ -19,9 +19,12 @@ the action. Model prose is never used to infer a decision or transition.
 The Stage 2 prompt builders reconstruct the authoritative rendered prompt in
 memory. Its hash, byte count, source hash, contract hash, and evidence hashes
 must equal the original Stage 2 handoff. A human continuation additionally
-requires the original instruction file and matching journaled hash. If exact
-reconstruction cannot be proved, the decision is retained with
-`comparison_unavailable`; missing material is never guessed.
+requires the original instruction file and matching journaled hash. The
+Stage-3-only trusted reader permits exactly that external continuation file to
+be absent while keeping Stage 2's public status reader strict. Its journaled
+absolute path and expected hash must remain anchored by the handoff. An absent
+file yields `continuation_source_unavailable`; an altered file or any other
+missing evidence is an integrity failure. Missing material is never guessed.
 
 A blind supervisor input concatenates, in fixed order:
 
@@ -33,10 +36,20 @@ A blind supervisor input concatenates, in fixed order:
 6. structured evidence available at the decision point;
 7. the fixed strict proposal schema and shadow-only instruction.
 
-It contains neither authoritative source/rendered prompt bytes nor prior
-reviews or later evidence. The rendered blind input is never stored. A
-hash-only manifest records every component hash, the rendered hash and byte
-count, and the authoritative-sentinel absence proof.
+It contains neither authoritative source/rendered prompt bytes, locators, or
+hashes nor prior reviews or later evidence. The rendered blind input is never
+stored. A hash-only manifest records every permitted component hash, the
+rendered hash and byte count, and the authoritative-sentinel absence proof.
+
+Before run creation, one recursive confidentiality preflight applies the
+complete Stage 1 redaction policy to every string in policy, context, contract,
+normalized summary, every reconstructed decision/evidence object, fixed
+labels, schema, and fully assembled blind input. The same preflight runs again
+immediately before each action intent. Input-time collisions are exit 2;
+runtime evidence collisions durably pause before transmission. Human reviews
+and authoritative comparison material receive the same recursive preflight
+before any write. Generated supervisor strings still use deterministic
+redaction-collision disqualification.
 
 ## Persistent supervisor
 
@@ -44,9 +57,13 @@ The first proposal creates one persistent Stage 1 `supervisor` run. It uses
 read-only sandboxing, approval `never`, disabled web and workspace network,
 disabled skill dependency installation, ignored user configuration and rules,
 one fixed workspace/model/reasoning policy, JSONL, and a strict output schema.
-Every later proposal resumes the one explicit `thread.started` ID. `--last`,
-`--all`, names, recency, and replacement sessions are forbidden. Source worker
-and auditor session IDs are also forbidden for the supervisor.
+Every later proposal resumes the one explicit `thread.started` identity. Stage
+3 parses it with the standard UUID parser and accepts only exact lowercase
+hyphenated, non-nil canonical UUID text. Metadata-only values, whitespace
+variants, aliases, friendly names, malformed/uppercase UUIDs, duplicate
+events, `--last`, `--all`, recency, and replacement sessions are forbidden.
+The exact argv is `codex exec resume <CANONICAL_UUID>`. A UUID used by any
+verified source worker or auditor is also forbidden.
 
 Only the supervisor is launched. Stage 3 has no worker, auditor, fixed-test,
 Git mutation, notification, API, network, scheduler, or background-service
@@ -121,11 +138,27 @@ unrecoverable failure; 5 awaiting reviews or human pause; 8 aborted; and 1 an
 unexpected internal failure. Status and report return zero for readable runs.
 
 Each exclusive run has a nonblocking advisory lock, atomic fsynced snapshots,
-and a canonical semantic hash-chained journal. A deterministic intent is
-written before every supervisor launch. Complete Stage 1 artifacts are proved
-and finalized without relaunch after interruption; missing or partial
-in-flight evidence pauses instead of guessing. Every journal-referenced
-artifact hash and every frozen source identity is reverified on each operation.
+and a canonical semantic hash-chained journal. The lock is opened without
+following links, bound by `lstat`/`fstat` device and inode, locked before its
+metadata is interpreted, rechecked before truncation, fsynced, and unlinked on
+release only while the path still names that same regular inode. Symlinks,
+nonregular files, replacement races, malformed/foreign/live records are
+rejected; a stale same-host absent-PID record is recoverable.
+
+A deterministic intent is written before every supervisor launch. Complete
+Stage 1 artifacts are proved and finalized without relaunch after interruption.
+Incomplete or complete-but-contradictory action proof transitions exactly once
+to `human_paused` with
+`supervisor_action_completion_unprovable`; its versioned escalation package
+preserves the pending action ID and known supervisor UUID. Corrupt Stage 3
+journal/state evidence instead remains an exit-4 integrity failure.
+
+Every operation strictly loads `state.json`, derives its expected public
+result, strictly loads `result.json`, and requires exact equality before any
+permitted reconciliation or mutation. Read-only operations never heal a
+disagreement. Caller specification/path/review errors are exit 2, dependencies
+exit 3, trusted Stage 2/3 replacement or drift exit 4, and recoverable external
+action uncertainty is a durable exit-5 pause.
 
 ## Artifacts and future boundary
 

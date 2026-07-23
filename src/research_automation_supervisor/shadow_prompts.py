@@ -5,9 +5,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from research_automation_supervisor.errors import ShadowInputError
+from research_automation_supervisor.shadow_confidentiality import (
+    preflight_shadow_confidentiality,
+)
 from research_automation_supervisor.shadow_models import (
     BlindInputManifest,
     ProposalKind,
@@ -134,6 +138,8 @@ def build_supervisor_output_schema(
 def build_blind_supervisor_prompt(
     prepared: PreparedShadowSpecification,
     decision: DecisionReconstruction,
+    *,
+    sensitive_values: Sequence[str] = (),
 ) -> RenderedBlindPrompt:
     """Concatenate only the contract-authorized blind-domain bytes."""
     source_summary_bytes = _canonical_json(
@@ -177,6 +183,34 @@ def build_blind_supervisor_prompt(
             SHADOW_INSTRUCTION,
         )
     )
+    preflight_shadow_confidentiality(
+        (
+            prepared.policy.content,
+            tuple(context.content for context in prepared.contexts),
+            prepared.source.prepared.contract.content,
+            prepared.source.blind_source_summary(),
+            decision.point.model_dump(mode="json"),
+            decision.blind_evidence,
+            schema,
+            (
+                POLICY_LABEL,
+                CONTEXT_HEADER,
+                CONTEXT_FOOTER,
+                CONTRACT_HEADER,
+                CONTRACT_FOOTER,
+                SUMMARY_HEADER,
+                SUMMARY_FOOTER,
+                EVIDENCE_HEADER,
+                EVIDENCE_FOOTER,
+                SCHEMA_HEADER,
+                SCHEMA_FOOTER,
+                SHADOW_INSTRUCTION,
+            ),
+            content,
+        ),
+        sensitive_values,
+        label="blind supervisor input",
+    )
     forbidden = {
         value
         for reconstructed in prepared.source.decisions
@@ -188,6 +222,23 @@ def build_blind_supervisor_prompt(
             ),
             (
                 reconstructed.authoritative_rendered.content
+                if reconstructed.authoritative_rendered is not None
+                else None
+            ),
+            (
+                str(reconstructed.authoritative_source.path).encode("utf-8")
+                if reconstructed.authoritative_source is not None
+                else None
+            ),
+            (
+                reconstructed.authoritative_source.sha256.encode("ascii")
+                if reconstructed.authoritative_source is not None
+                else None
+            ),
+            (
+                reconstructed.authoritative_rendered.rendered_sha256.encode(
+                    "ascii"
+                )
                 if reconstructed.authoritative_rendered is not None
                 else None
             ),

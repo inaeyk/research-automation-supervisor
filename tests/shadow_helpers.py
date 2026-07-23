@@ -8,9 +8,20 @@ import yaml
 from research_automation_supervisor.shadow_engine import ShadowServices
 from research_automation_supervisor.workflow_engine import (
     WorkflowServices,
+    continue_substage,
     run_substage,
 )
-from tests.workflow_helpers import create_workflow_tree
+from tests.workflow_helpers import (
+    auditor_result,
+    codex_response,
+    create_workflow_tree,
+    worker_result,
+)
+
+SUPERVISOR_UUID = "11111111-1111-4111-8111-11111111111a"
+SECOND_SUPERVISOR_UUID = "22222222-2222-4222-8222-22222222222b"
+SOURCE_WORKER_UUID = "33333333-3333-4333-8333-33333333333c"
+SOURCE_AUDITOR_UUID = "44444444-4444-4444-8444-44444444444d"
 
 
 def supervisor_proposal(
@@ -41,11 +52,11 @@ def supervisor_proposal(
 
 def supervisor_response(
     proposal_kind: str,
-    thread_id: str = "shadow-supervisor-thread",
+    thread_id: str = SUPERVISOR_UUID,
     **extra: object,
 ) -> dict[str, object]:
     response: dict[str, object] = {
-        "require_stage2_policy": True,
+        "require_stage3_policy": True,
         "expected_sandbox": "read-only",
         "expected_ephemeral": False,
         "stdout_lines": [
@@ -103,7 +114,7 @@ def create_shadow_specification(
         supervisor_response("worker_initial"),
         supervisor_response(
             "auditor",
-            expected_resume_thread_id="shadow-supervisor-thread",
+            expected_resume_thread_id=SUPERVISOR_UUID,
         ),
     ]
     fake_configuration = {
@@ -135,6 +146,69 @@ def create_shadow_specification(
         encoding="utf-8",
     )
     return spec_path
+
+
+def create_human_continuation_shadow_tree(
+    tmp_path: Path,
+    *,
+    supervisor_responses: list[dict[str, object]] | None = None,
+) -> tuple[Path, Path, Path, Path, Path]:
+    worker_thread = "stage2-human-worker"
+    stage2_spec, project, fake = create_workflow_tree(
+        tmp_path / "stage2",
+        responses=[
+            codex_response(
+                "worker",
+                worker_thread,
+                worker_result("blocked"),
+            ),
+            codex_response(
+                "worker",
+                worker_thread,
+                worker_result(),
+                expected_resume_thread_id=worker_thread,
+            ),
+            codex_response(
+                "auditor",
+                "stage2-human-auditor",
+                auditor_result(),
+            ),
+        ],
+    )
+    source_result = run_substage(
+        stage2_spec,
+        runs_dir=tmp_path / "stage2-runs",
+        services=WorkflowServices(codex_executable=str(fake)),
+    )
+    instruction = tmp_path / "human-continuation.md"
+    instruction.write_text(
+        "Continue under the exact frozen contract.\n",
+        encoding="utf-8",
+    )
+    source_result = continue_substage(
+        Path(source_result.artifact_directory),
+        instruction,
+        services=WorkflowServices(codex_executable=str(fake)),
+    )
+    responses = supervisor_responses or [
+        supervisor_response("worker_initial"),
+        supervisor_response(
+            "worker_human_continuation",
+            expected_resume_thread_id=SUPERVISOR_UUID,
+        ),
+        supervisor_response(
+            "auditor",
+            expected_resume_thread_id=SUPERVISOR_UUID,
+        ),
+    ]
+    source_run = Path(source_result.artifact_directory)
+    spec = create_shadow_specification(
+        tmp_path,
+        source_run,
+        project,
+        supervisor_responses=responses,
+    )
+    return spec, source_run, project, fake, instruction
 
 
 def shadow_services(fake_codex: Path) -> ShadowServices:

@@ -6,10 +6,10 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import secrets
 import shutil
 import socket
+import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol, TypeVar, cast
+from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 
@@ -33,8 +34,10 @@ from research_automation_supervisor.codex_models import (
 )
 from research_automation_supervisor.errors import (
     CodexAdapterError,
+    ShadowConfidentialityError,
     ShadowDependencyError,
     ShadowInputError,
+    ShadowIntegrityError,
     ShadowLockError,
     ShadowStateError,
     WorkflowDependencyError,
@@ -42,6 +45,9 @@ from research_automation_supervisor.errors import (
 from research_automation_supervisor.redaction import (
     redact_text,
     would_redact_text,
+)
+from research_automation_supervisor.shadow_confidentiality import (
+    preflight_shadow_confidentiality,
 )
 from research_automation_supervisor.shadow_models import (
     BlindInputManifest,
@@ -192,16 +198,16 @@ def run_shadow_calibration(
         / f"{prepared.specification.calibration_id}-{token}"
     )
     _, _, sensitive_values = build_subprocess_environment(services.environ)
-    structural = (
-        str(runs_dir),
-        str(resolved_runs),
-        str(run_directory),
-        token,
+    preflight_shadow_confidentiality(
+        (
+            str(runs_dir),
+            str(resolved_runs),
+            str(run_directory),
+            token,
+        ),
+        sensitive_values,
+        label="prospective shadow run path",
     )
-    if any(would_redact_text(value, sensitive_values) for value in structural):
-        raise ShadowInputError(
-            "prospective shadow run path has a structural redaction collision"
-        )
     try:
         resolved_runs.mkdir(parents=True, exist_ok=True)
         run_directory.mkdir(exist_ok=False)
@@ -306,6 +312,9 @@ def resume_shadow_calibration(
     with _ShadowLock(resolved, services.utc_now):
         raw_state = _load_state(resolved)
         prepared = _reload_prepared(raw_state, services)
+        _validate_state_result_agreement(
+            resolved, raw_state, prepared
+        )
         state = _reconcile_state(resolved, raw_state, prepared)
         _validate_run(resolved, state, prepared)
         if state.status in {
@@ -328,17 +337,6 @@ def resume_shadow_calibration(
             services=services,
         )
         if state.pending_action is not None:
-            stage1 = Path(
-                state.pending_action.stage1_artifact_directory
-            )
-            if not _complete_stage1_artifacts_present(stage1):
-                context.state = _pause(
-                    context,
-                    "uncertain_supervisor_action",
-                    "An in-flight supervisor action cannot be proved and "
-                    "will not be relaunched.",
-                )
-                return _result_for_state(context.state, prepared)
             _finish_supervisor_action(context)
             if context.state.status == "human_paused":
                 return _result_for_state(context.state, prepared)
@@ -351,13 +349,7 @@ def shadow_calibration_status(run_directory: Path) -> ShadowResult:
     state = _load_state(resolved)
     prepared = _reload_prepared(state, DEFAULT_SHADOW_SERVICES)
     _validate_run(resolved, state, prepared)
-    result = _load_result(resolved)
-    expected = _result_for_state(state, prepared)
-    if result != expected:
-        raise ShadowStateError(
-            "shadow state and result snapshots disagree"
-        )
-    return result
+    return _load_result(resolved)
 
 
 def record_shadow_review(
@@ -372,6 +364,9 @@ def record_shadow_review(
     with _ShadowLock(resolved, services.utc_now):
         raw_state = _load_state(resolved)
         prepared = _reload_prepared(raw_state, services)
+        _validate_state_result_agreement(
+            resolved, raw_state, prepared
+        )
         state = _reconcile_state(resolved, raw_state, prepared)
         _validate_run(
             resolved,
@@ -385,6 +380,14 @@ def record_shadow_review(
             )
         if proposal_id not in state.proposal_ids:
             raise ShadowInputError("proposal does not exist")
+        _, _, sensitive_values = build_subprocess_environment(
+            services.environ
+        )
+        preflight_shadow_confidentiality(
+            (proposal_id, str(review_path)),
+            sensitive_values,
+            label="shadow review command",
+        )
         comparison = _load_comparison(resolved, proposal_id)
         if not comparison.comparison_available:
             raise ShadowInputError(
@@ -395,9 +398,6 @@ def record_shadow_review(
             raise ShadowInputError(
                 "proposal already has an immutable human review"
             )
-        _, _, sensitive_values = build_subprocess_environment(
-            services.environ
-        )
         review = load_shadow_review(
             review_path,
             sensitive_values=sensitive_values,
@@ -412,11 +412,22 @@ def record_shadow_review(
                 HumanReview,
                 "uncommitted shadow review",
             )
+            preflight_shadow_confidentiality(
+                (str(destination), existing_review),
+                sensitive_values,
+                label="unjournaled shadow review",
+                integrity=True,
+            )
             if existing_review != review:
                 raise ShadowStateError(
                     "an unjournaled review exists with different content"
                 )
         else:
+            preflight_shadow_confidentiality(
+                (str(destination), review),
+                sensitive_values,
+                label="durable shadow review",
+            )
             _write_json(destination, review.model_dump(mode="json"))
         reviewed = (*state.reviewed_proposal_ids, proposal_id)
         comparable_ids = tuple(
@@ -516,6 +527,9 @@ def abort_shadow_calibration(
     with _ShadowLock(resolved, services.utc_now):
         raw_state = _load_state(resolved)
         prepared = _reload_prepared(raw_state, services)
+        _validate_state_result_agreement(
+            resolved, raw_state, prepared
+        )
         state = _reconcile_state(resolved, raw_state, prepared)
         _validate_run(resolved, state, prepared)
         if state.status in {"completed", "failed", "aborted"}:
@@ -645,9 +659,23 @@ def _launch_next_supervisor(context: _ShadowContext) -> None:
     decision = context.prepared.source.decisions[
         context.state.current_decision_index
     ]
-    rendered = build_blind_supervisor_prompt(
-        context.prepared, decision
+    _, _, sensitive_values = build_subprocess_environment(
+        context.services.environ
     )
+    try:
+        rendered = build_blind_supervisor_prompt(
+            context.prepared,
+            decision,
+            sensitive_values=sensitive_values,
+        )
+    except ShadowConfidentialityError:
+        context.state = _pause(
+            context,
+            "blind_input_confidentiality_collision",
+            "Blind supervisor evidence failed confidentiality preflight; "
+            "nothing was launched.",
+        )
+        return
     proposal_directory = (
         context.run_directory
         / "proposals"
@@ -792,18 +820,39 @@ def _finish_supervisor_action(
     decision = context.prepared.source.decisions[
         pending.decision_index
     ]
-    proof = _verify_supervisor_artifacts(
-        pending,
-        decision,
-        context.prepared.source.decisions,
-    )
-    if (
-        returned_result is not None
-        and returned_result != proof.adapter_result
-    ):
-        raise ShadowStateError(
-            "returned supervisor result contradicts durable evidence"
+    try:
+        proof = _verify_supervisor_artifacts(
+            pending,
+            decision,
+            context.prepared.source.decisions,
         )
+        if (
+            returned_result is not None
+            and returned_result != proof.adapter_result
+        ):
+            raise ShadowStateError(
+                "returned supervisor result contradicts durable evidence"
+            )
+    except ShadowStateError:
+        context.state = _pause(
+            context,
+            "supervisor_action_completion_unprovable",
+            "The pending supervisor action has incomplete or contradictory "
+            "completion evidence and will not be relaunched.",
+        )
+        return
+    try:
+        _preflight_comparison_material(
+            context, pending, decision, proof
+        )
+    except ShadowConfidentialityError:
+        context.state = _pause(
+            context,
+            "comparison_confidentiality_collision",
+            "Authoritative comparison material failed confidentiality "
+            "preflight and was not stored.",
+        )
+        return
     context.state = _transition(
         context,
         "proposal_validating",
@@ -814,7 +863,7 @@ def _finish_supervisor_action(
         context.state.supervisor_session_id,
         pending.resume_session_id,
         proof.session_ids,
-        context.prepared.source.model_session_ids(),
+        context.prepared.source.model_session_uuids(),
     )
     finalized_hashes = _finalize_proposal_artifacts(
         context,
@@ -1046,6 +1095,15 @@ def _verify_supervisor_artifacts(
         raise ShadowStateError(
             "supervisor event evidence is invalid"
         ) from exc
+    explicit_session_ids = tuple(
+        (
+            value["thread_id"]
+            if isinstance(value.get("thread_id"), str)
+            else ""
+        )
+        for value in events
+        if value.get("type") == "thread.started"
+    )
     if (
         len(events) != metadata.valid_event_count
         or metadata.thread_started_ids != session_ids
@@ -1125,7 +1183,7 @@ def _verify_supervisor_artifacts(
     return _SupervisorProof(
         adapter_result=result,
         metadata=metadata,
-        session_ids=session_ids,
+        session_ids=explicit_session_ids,
         proposal=proposal,
         final_bytes=final_bytes,
         artifact_hashes=artifact_hashes,
@@ -1238,6 +1296,23 @@ def _assert_no_authoritative_material(
                     if decision.authoritative_rendered is not None
                     else None
                 ),
+                (
+                    str(decision.authoritative_source.path).encode("utf-8")
+                    if decision.authoritative_source is not None
+                    else None
+                ),
+                (
+                    decision.authoritative_source.sha256.encode("ascii")
+                    if decision.authoritative_source is not None
+                    else None
+                ),
+                (
+                    decision.authoritative_rendered.rendered_sha256.encode(
+                        "ascii"
+                    )
+                    if decision.authoritative_rendered is not None
+                    else None
+                ),
             )
             if value
         )
@@ -1260,17 +1335,18 @@ def _session_integrity(
     observed_ids: tuple[str, ...],
     forbidden_source_ids: frozenset[str],
 ) -> tuple[bool, str | None]:
-    if (
-        len(observed_ids) != 1
-        or re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}",
-            observed_ids[0],
-        )
-        is None
-    ):
+    if len(observed_ids) != 1:
         return False, None
     observed = observed_ids[0]
-    if observed in forbidden_source_ids:
+    try:
+        parsed = UUID(observed)
+    except ValueError:
+        return False, None
+    if (
+        parsed.int == 0
+        or str(parsed) != observed
+        or observed in forbidden_source_ids
+    ):
         return False, None
     if known_session_id is None:
         return resume_session_id is None, observed
@@ -1279,6 +1355,75 @@ def _session_integrity(
         and observed == known_session_id
     )
     return valid, known_session_id
+
+
+def _preflight_comparison_material(
+    context: _ShadowContext,
+    pending: PendingSupervisorAction,
+    decision: DecisionReconstruction,
+    proof: _SupervisorProof,
+) -> None:
+    """Reject sensitive authoritative material before any comparison write."""
+    _, _, sensitive_values = build_subprocess_environment(
+        context.services.environ
+    )
+    comparison_directory = (
+        context.run_directory
+        / "comparisons"
+        / decision.point.decision_id
+    )
+    proposal_directory = (
+        context.run_directory / "proposals" / pending.proposal_id
+    )
+    values: list[object] = [
+        str(proposal_directory / "supervisor-result.json"),
+        str(proposal_directory / "candidate-prompt.md"),
+        str(proposal_directory / "assessment.json"),
+        str(comparison_directory),
+        str(comparison_directory / "comparison.json"),
+        str(comparison_directory / "authoritative-source.md"),
+        str(comparison_directory / "authoritative-rendered.md"),
+        decision.point.model_dump(mode="json"),
+        (
+            proof.proposal
+            if proof.proposal is not None
+            else {
+                "schema_version": 1,
+                "valid": False,
+                "transport_status": proof.adapter_result.status,
+                "proposal": None,
+            }
+        ),
+        (
+            "supervisor_result_unavailable",
+            "authoritative_reconstruction_unproven",
+            "supervisor_result_missing_or_invalid",
+            "session_integrity_failed",
+            "proposal_size_exceeded",
+            "structural_redaction_collision",
+            "unreviewed",
+        ),
+    ]
+    if decision.authoritative_source is not None:
+        values.extend(
+            (
+                str(decision.authoritative_source.path),
+                decision.authoritative_source.content,
+                decision.authoritative_source.sha256,
+            )
+        )
+    if decision.authoritative_rendered is not None:
+        values.extend(
+            (
+                decision.authoritative_rendered.content,
+                decision.authoritative_rendered.rendered_sha256,
+            )
+        )
+    preflight_shadow_confidentiality(
+        values,
+        sensitive_values,
+        label="authoritative comparison material",
+    )
 
 
 def _finalize_proposal_artifacts(
@@ -1626,37 +1771,60 @@ def _pause(
     )
     package_path = directory / "package.json"
     readme_path = directory / "README.md"
+    pending = context.state.pending_action
+    package = {
+        "schema_version": 1,
+        "calibration_id": context.state.calibration_id,
+        "status": "human_paused",
+        "reason": reason,
+        "summary": summary,
+        "proposal_id": (
+            pending.proposal_id if pending is not None else None
+        ),
+        "pending_action_id": (
+            pending.action_id if pending is not None else None
+        ),
+        "pending_resume_session_id": (
+            pending.resume_session_id if pending is not None else None
+        ),
+        "supervisor_session_id": (
+            context.state.supervisor_session_id
+        ),
+    }
+    markdown = "\n".join(
+        (
+            "# Shadow calibration escalation",
+            "",
+            "- Schema version: `1`",
+            "- Status: `human_paused`",
+            f"- Reason: `{reason}`",
+            f"- Pending action: "
+            f"`{pending.action_id if pending is not None else 'none'}`",
+            f"- Supervisor UUID: "
+            f"`{context.state.supervisor_session_id or 'not available'}`",
+            f"- Summary: {summary}",
+            "",
+        )
+    )
+    _, _, sensitive_values = build_subprocess_environment(
+        context.services.environ
+    )
+    preflight_shadow_confidentiality(
+        (
+            str(package_path),
+            str(readme_path),
+            package,
+            markdown,
+        ),
+        sensitive_values,
+        label="shadow escalation package",
+        integrity=True,
+    )
     _write_json(
         package_path,
-        {
-            "schema_version": 1,
-            "calibration_id": context.state.calibration_id,
-            "status": "human_paused",
-            "reason": reason,
-            "summary": summary,
-            "proposal_id": (
-                context.state.pending_action.proposal_id
-                if context.state.pending_action is not None
-                else None
-            ),
-            "supervisor_session_id": (
-                context.state.supervisor_session_id
-            ),
-        },
+        package,
     )
-    _write_text(
-        readme_path,
-        "\n".join(
-            (
-                "# Shadow calibration escalation",
-                "",
-                "- Status: `human_paused`",
-                f"- Reason: `{reason}`",
-                f"- Summary: {summary}",
-                "",
-            )
-        ),
-    )
+    _write_text(readme_path, markdown)
     return _journal_event(
         context.run_directory,
         context.state,
@@ -1920,6 +2088,14 @@ def _validate_run(
     *,
     allowed_unjournaled_review: str | None = None,
 ) -> None:
+    persisted_state = _load_state(run_directory)
+    if persisted_state != state:
+        raise ShadowIntegrityError(
+            "shadow state changed before trusted run validation"
+        )
+    _validate_state_result_agreement(
+        run_directory, persisted_state, prepared
+    )
     _validate_journal(run_directory, state, prepared)
     if (
         _read_json(run_directory / "shadow-spec.normalized.json")
@@ -1999,6 +2175,20 @@ def _validate_run(
     ):
         raise ShadowStateError(
             "review directory contains missing or unjournaled artifacts"
+        )
+
+
+def _validate_state_result_agreement(
+    run_directory: Path,
+    state: ShadowState,
+    prepared: PreparedShadowSpecification,
+) -> None:
+    """Require the strict persisted public result to equal trusted state."""
+    expected = _result_for_state(state, prepared)
+    persisted = _load_result(run_directory)
+    if persisted != expected:
+        raise ShadowIntegrityError(
+            "shadow state and result snapshots disagree"
         )
 
 
@@ -2421,7 +2611,11 @@ def _valid_transition_form(entry: ShadowJournalEntry) -> bool:
     if entry.new_state == "human_paused":
         return (
             entry.previous_state
-            in {"supervisor_running", "proposal_validating"}
+            in {
+                "reconstructing",
+                "supervisor_running",
+                "proposal_validating",
+            }
             and set(entry.state_updates)
             == {"status", "pause_reason", "summary"}
             and entry.state_updates.get("status") == "human_paused"
@@ -2846,26 +3040,93 @@ class _ShadowLock:
         self.path = run_directory / LOCK_FILE
         self.utc_now = utc_now
         self.handle: IO[str] | None = None
+        self.device_inode: tuple[int, int] | None = None
 
     def __enter__(self) -> _ShadowLock:
+        handle: IO[str] | None = None
+        acquired = False
+        created = False
         try:
-            handle = self.path.open("a+", encoding="utf-8")
+            try:
+                inspected = self.path.lstat()
+            except FileNotFoundError:
+                inspected = None
+            if inspected is not None and (
+                stat.S_ISLNK(inspected.st_mode)
+                or not stat.S_ISREG(inspected.st_mode)
+            ):
+                raise ShadowLockError(
+                    "existing shadow lock is not a regular file"
+                )
+            flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags |= getattr(os, "O_NONBLOCK", 0)
+            if inspected is None:
+                flags |= os.O_CREAT | os.O_EXCL
+                created = True
+            descriptor = os.open(self.path, flags, 0o600)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                os.close(descriptor)
+                raise ShadowLockError(
+                    "opened shadow lock is not a regular file"
+                )
+            if inspected is not None and (
+                opened.st_dev,
+                opened.st_ino,
+            ) != (inspected.st_dev, inspected.st_ino):
+                os.close(descriptor)
+                raise ShadowLockError(
+                    "shadow lock path changed during open"
+                )
+            handle = os.fdopen(
+                descriptor,
+                "r+",
+                encoding="utf-8",
+                newline="\n",
+            )
+            self._require_path_identity(handle.fileno())
             fcntl.flock(
                 handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
             )
+            acquired = True
+            self._require_path_identity(handle.fileno())
         except BlockingIOError as exc:
-            with suppress(Exception):
+            if handle is not None:
+                if created:
+                    self._unlink_if_same(handle.fileno())
                 handle.close()
             raise ShadowLockError(
                 "shadow calibration is already locked"
             ) from exc
-        except OSError as exc:
+        except ShadowLockError:
+            if handle is not None:
+                if acquired:
+                    with suppress(OSError):
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                if created:
+                    self._unlink_if_same(handle.fileno())
+                handle.close()
+            raise
+        except (OSError, UnicodeError) as exc:
+            if handle is not None:
+                if acquired:
+                    with suppress(OSError):
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                if created:
+                    self._unlink_if_same(handle.fileno())
+                handle.close()
             raise ShadowLockError(
                 "shadow lock could not be acquired"
             ) from exc
         handle.seek(0)
-        existing_text = handle.read()
-        if existing_text.strip():
+        existing_text = handle.read(65_537)
+        if len(existing_text) > 65_536:
+            self._release_failed_enter(handle, created)
+            raise ShadowLockError(
+                "existing shadow lock metadata is too large"
+            )
+        if existing_text:
             try:
                 existing = json.loads(existing_text)
                 if (
@@ -2893,31 +3154,34 @@ class _ShadowLock:
                 ShadowStateError,
                 ValueError,
             ) as exc:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                handle.close()
+                self._release_failed_enter(handle, created)
                 raise ShadowLockError(
                     "existing shadow lock metadata is invalid"
                 ) from exc
             host = cast(str, existing["host"])
             pid = cast(int, existing["pid"])
             if host != socket.gethostname():
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                handle.close()
+                self._release_failed_enter(handle, created)
                 raise ShadowLockError(
                     "foreign-host shadow lock requires human action"
                 )
             if _pid_exists(pid):
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                handle.close()
+                self._release_failed_enter(handle, created)
                 raise ShadowLockError(
                     "shadow lock records a live local process"
                 )
+        elif not created:
+            self._release_failed_enter(handle, created)
+            raise ShadowLockError(
+                "existing shadow lock metadata is invalid"
+            )
         metadata = {
             "schema_version": 1,
             "pid": os.getpid(),
             "host": socket.gethostname(),
             "started_at": _utc_string(self.utc_now()),
         }
+        self._require_path_identity(handle.fileno())
         handle.seek(0)
         handle.truncate()
         handle.write(
@@ -2926,7 +3190,10 @@ class _ShadowLock:
         )
         handle.flush()
         os.fsync(handle.fileno())
+        _fsync_directory(self.path.parent)
+        opened = os.fstat(handle.fileno())
         self.handle = handle
+        self.device_inode = (opened.st_dev, opened.st_ino)
         return self
 
     def __exit__(
@@ -2937,13 +3204,89 @@ class _ShadowLock:
     ) -> None:
         if self.handle is None:
             return
-        self.handle.seek(0)
-        self.handle.truncate()
-        self.handle.flush()
-        os.fsync(self.handle.fileno())
-        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        self.handle.close()
+        handle = self.handle
+        identity_error = False
+        try:
+            self._require_path_identity(handle.fileno())
+            self._unlink_if_same(handle.fileno(), required=True)
+            _fsync_directory(self.path.parent)
+        except ShadowLockError:
+            identity_error = True
+        finally:
+            with suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
         self.handle = None
+        self.device_inode = None
+        if identity_error:
+            raise ShadowLockError(
+                "shadow lock path changed before release"
+            )
+
+    def _require_path_identity(self, descriptor: int) -> None:
+        try:
+            opened = os.fstat(descriptor)
+            current = self.path.lstat()
+        except OSError as exc:
+            raise ShadowLockError(
+                "shadow lock path identity could not be verified"
+            ) from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            raise ShadowLockError(
+                "shadow lock path identity changed"
+            )
+
+    def _unlink_if_same(
+        self,
+        descriptor: int,
+        *,
+        required: bool = False,
+    ) -> None:
+        try:
+            opened = os.fstat(descriptor)
+            current = self.path.lstat()
+            same = (
+                stat.S_ISREG(opened.st_mode)
+                and not stat.S_ISLNK(current.st_mode)
+                and stat.S_ISREG(current.st_mode)
+                and (opened.st_dev, opened.st_ino)
+                == (current.st_dev, current.st_ino)
+            )
+            if same:
+                self.path.unlink()
+            elif required:
+                raise ShadowLockError(
+                    "shadow lock path identity changed"
+                )
+        except FileNotFoundError:
+            if required:
+                raise ShadowLockError(
+                    "shadow lock path disappeared"
+                ) from None
+        except ShadowLockError:
+            raise
+        except OSError as exc:
+            if required:
+                raise ShadowLockError(
+                    "shadow lock could not be unlinked safely"
+                ) from exc
+
+    def _release_failed_enter(
+        self,
+        handle: IO[str],
+        created: bool,
+    ) -> None:
+        if created:
+            self._unlink_if_same(handle.fileno())
+        with suppress(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def _complete_stage1_artifacts_present(directory: Path) -> bool:

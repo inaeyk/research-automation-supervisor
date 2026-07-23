@@ -10,9 +10,22 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import UUID
 
 
-def _validate_exec_arguments(arguments: list[str]) -> str | None:
+def _canonical_non_nil_uuid(value: str) -> bool:
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return False
+    return parsed.int != 0 and str(parsed) == value
+
+
+def _validate_exec_arguments(
+    arguments: list[str],
+    *,
+    uuid_resume_required: bool = False,
+) -> str | None:
     """Reject the real parser defect this fake is intended to detect."""
     try:
         exec_index = arguments.index("exec")
@@ -28,6 +41,8 @@ def _validate_exec_arguments(arguments: list[str]) -> str | None:
         thread_id = arguments[exec_index + 2]
         if not thread_id or thread_id in {"--last", "--all", "-"}:
             return "resume requires one explicit thread ID"
+        if uuid_resume_required and not _canonical_non_nil_uuid(thread_id):
+            return "Stage 3 resume requires one canonical UUID"
     if "--last" in arguments or "--all" in arguments:
         return "recency-based resume is forbidden"
     return None
@@ -98,14 +113,6 @@ def main() -> int:
         print("codex-cli 0.200.0")
         return 0
 
-    parser_error = _validate_exec_arguments(sys.argv[1:])
-    if parser_error is not None:
-        print(f"fake codex parser error: {parser_error}", file=sys.stderr)
-        return 2
-    if "--help" in sys.argv[1:]:
-        print("fake codex exec help")
-        return 0
-
     workspace = Path.cwd()
     configuration_path = workspace / ".fake-codex.json"
     base_configuration = (
@@ -114,6 +121,18 @@ def main() -> int:
         else {}
     )
     configuration, call_index = _select_configuration(base_configuration)
+    parser_error = _validate_exec_arguments(
+        sys.argv[1:],
+        uuid_resume_required=bool(
+            configuration.get("require_stage3_policy")
+        ),
+    )
+    if parser_error is not None:
+        print(f"fake codex parser error: {parser_error}", file=sys.stderr)
+        return 2
+    if "--help" in sys.argv[1:]:
+        print("fake codex exec help")
+        return 0
     policy_error = _validate_stage2_policy(sys.argv[1:], configuration)
     if policy_error is not None:
         print(f"fake codex policy error: {policy_error}", file=sys.stderr)

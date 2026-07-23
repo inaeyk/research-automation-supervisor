@@ -17,7 +17,9 @@ from research_automation_supervisor.contract import (
     _UniqueKeySafeLoader,
 )
 from research_automation_supervisor.errors import ShadowInputError
-from research_automation_supervisor.redaction import would_redact_text
+from research_automation_supervisor.shadow_confidentiality import (
+    preflight_shadow_confidentiality,
+)
 from research_automation_supervisor.shadow_models import (
     DeterministicAssessment,
     HumanReview,
@@ -68,16 +70,16 @@ def load_shadow_review(
         raise ShadowInputError(
             f"shadow review validation failed: {details}"
         ) from exc
-    structural = (
-        str(path),
-        str(resolved),
-        review.proposal_id,
-        review.verdict,
+    preflight_shadow_confidentiality(
+        (
+            str(path),
+            str(resolved),
+            parsed,
+            review,
+        ),
+        sensitive_values,
+        label="shadow review",
     )
-    if any(would_redact_text(value, sensitive_values) for value in structural):
-        raise ShadowInputError(
-            "shadow review contains a structural redaction collision"
-        )
     return review
 
 

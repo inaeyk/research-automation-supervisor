@@ -196,4 +196,8 @@ installation, API calls, or project-specific research logic. A later stage may
 place an intelligent planning supervisor outside this deterministic boundary.
 Stage 3 now provides only a retrospective blind supervisor: it cannot intercept
 a live action, send a proposal, or weaken the frozen human approval and evidence
-guarantees described here.
+guarantees described here. `substage-status` remains strict when an external
+human-continuation instruction disappears. A separate Stage-3-only trusted read
+path reuses the same journal/action/handoff validation while permitting only
+that anchored source file to be absent so the retrospective comparison can be
+marked unavailable.

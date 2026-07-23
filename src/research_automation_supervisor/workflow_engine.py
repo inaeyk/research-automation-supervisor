@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
@@ -639,6 +640,51 @@ def substage_status(run_directory: Path) -> WorkflowResult:
     if result != state.to_result():
         raise WorkflowStateError("workflow state and result snapshots disagree")
     return result
+
+
+def read_stage2_source_for_shadow(
+    run_directory: Path,
+) -> tuple[WorkflowResult, WorkflowState, tuple[JournalEntry, ...]]:
+    """Strict Stage 2 read allowing only an absent continuation source file.
+
+    This is a Stage 3-only trust path. Public Stage 2 status remains strict.
+    The journal still anchors the exact continuation locator and expected hash;
+    an existing file must match, and every other durable artifact remains
+    mandatory.
+    """
+    resolved = _resolve_run_directory(run_directory)
+    state = _load_state(resolved)
+    entries = tuple(
+        _read_valid_journal(
+            resolved,
+            allow_missing_continuation_source=True,
+        )
+    )
+    if (
+        not entries
+        or len(entries) != state.journal_sequence
+        or entries[-1].entry_hash != state.journal_hash
+        or entries[-1].timestamp != state.updated_at
+    ):
+        raise WorkflowStateError(
+            "workflow state does not agree with the journal head"
+        )
+    _validate_journal_semantics(resolved, entries, state)
+    _validate_normalized_action_intents(
+        resolved,
+        state,
+        entries=entries,
+    )
+    if not _raw_frozen_inputs_match(resolved, state):
+        raise WorkflowStateError(
+            "frozen workflow inputs no longer match durable state"
+        )
+    result = _load_result(resolved)
+    if result != state.to_result():
+        raise WorkflowStateError(
+            "workflow state and result snapshots disagree"
+        )
+    return result, state, entries
 
 
 def abort_substage(
@@ -1823,7 +1869,11 @@ def _validate_journal(run_directory: Path, state: WorkflowState) -> None:
     _validate_journal_semantics(run_directory, entries, state)
 
 
-def _read_valid_journal(run_directory: Path) -> list[JournalEntry]:
+def _read_valid_journal(
+    run_directory: Path,
+    *,
+    allow_missing_continuation_source: bool = False,
+) -> list[JournalEntry]:
     journal = run_directory / JOURNAL_FILE
     previous_hash = ZERO_HASH
     try:
@@ -1843,11 +1893,77 @@ def _read_valid_journal(run_directory: Path) -> list[JournalEntry]:
         computed = hashlib.sha256(_canonical_json(body)).hexdigest()
         if entry.entry_hash != computed:
             raise WorkflowStateError("workflow journal hash chain is invalid")
-        verify_hash_mapping(entry.artifact_hashes)
+        _verify_journal_hash_mapping(
+            entry,
+            allow_missing_continuation_source=(
+                allow_missing_continuation_source
+            ),
+        )
         previous_hash = computed
         entries.append(entry)
     _validate_journal_semantics(run_directory, entries, None)
     return entries
+
+
+def _verify_journal_hash_mapping(
+    entry: JournalEntry,
+    *,
+    allow_missing_continuation_source: bool,
+) -> None:
+    permitted = (
+        _missing_continuation_source_locator(entry)
+        if allow_missing_continuation_source
+        else None
+    )
+    for locator, digest in entry.artifact_hashes.items():
+        if permitted == locator:
+            path = Path(locator)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                _validate_missing_continuation_parent(path)
+                continue
+            except OSError as exc:
+                raise WorkflowStateError(
+                    "continuation source locator could not be inspected"
+                ) from exc
+        verify_hash_mapping({locator: digest})
+
+
+def _missing_continuation_source_locator(
+    entry: JournalEntry,
+) -> str | None:
+    path = entry.state_updates.get("continuation_path")
+    digest = entry.state_updates.get("continuation_sha256")
+    if (
+        entry.event_type == "transition"
+        and entry.reason == "human_continuation_requested"
+        and isinstance(path, str)
+        and isinstance(digest, str)
+        and entry.artifact_hashes.get(path) == digest
+    ):
+        return path
+    return None
+
+
+def _validate_missing_continuation_parent(path: Path) -> None:
+    if not path.is_absolute():
+        raise WorkflowStateError(
+            "continuation source locator is not absolute"
+        )
+    current = Path(path.anchor)
+    try:
+        for component in path.parent.parts[1:]:
+            current = current / component
+            status = current.lstat()
+            if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(
+                status.st_mode
+            ):
+                raise OSError
+    except OSError as exc:
+        raise WorkflowStateError(
+            "missing continuation source has an invalid parent chain"
+        ) from exc
 
 
 def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
@@ -2770,6 +2886,8 @@ def _validate_context_action_intents(context: _WorkflowContext) -> None:
 def _validate_normalized_action_intents(
     run_directory: Path,
     state: WorkflowState,
+    *,
+    entries: Sequence[JournalEntry] | None = None,
 ) -> None:
     """Cross-check status-time action identity without Git or process launches."""
     normalized = _read_json(run_directory / "spec.normalized.json")
@@ -2777,7 +2895,12 @@ def _validate_normalized_action_intents(
     if not isinstance(tests, list):
         raise WorkflowStateError("normalized specification tests are invalid")
     expected_workspace = normalized.get("workspace")
-    for entry in _read_valid_journal(run_directory):
+    journal_entries = (
+        tuple(entries)
+        if entries is not None
+        else tuple(_read_valid_journal(run_directory))
+    )
+    for entry in journal_entries:
         if entry.event_type != "action_intent":
             continue
         try:

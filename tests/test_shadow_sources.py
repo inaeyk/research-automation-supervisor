@@ -6,17 +6,27 @@ from pathlib import Path
 import pytest
 import yaml
 
-from research_automation_supervisor.errors import ShadowInputError
+from research_automation_supervisor.errors import (
+    ShadowInputError,
+    ShadowIntegrityError,
+    WorkflowStateError,
+)
+from research_automation_supervisor.shadow_prompts import (
+    build_blind_supervisor_prompt,
+)
 from research_automation_supervisor.shadow_sources import (
     load_shadow_specification,
 )
 from research_automation_supervisor.workflow_engine import (
     WorkflowServices,
     _WorkflowLock,
+    abort_substage,
     continue_substage,
     run_substage,
+    substage_status,
 )
 from tests.shadow_helpers import (
+    create_human_continuation_shadow_tree,
     create_shadow_specification,
     create_shadow_tree,
 )
@@ -24,6 +34,7 @@ from tests.workflow_helpers import (
     auditor_result,
     codex_response,
     create_workflow_tree,
+    git,
     worker_result,
 )
 
@@ -80,6 +91,16 @@ def test_shadow_spec_rejects_unknown_duplicate_and_symlinked_context(
     with pytest.raises(ShadowInputError, match="symbolic-link"):
         load_shadow_specification(spec)
 
+    data["project_context_paths"] = [
+        {"path": "project-context.md", "unknown": True}
+    ]
+    spec.write_text(
+        yaml.safe_dump(data, sort_keys=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(ShadowInputError):
+        load_shadow_specification(spec)
+
 
 def test_source_artifact_mutation_fails_trusted_validation(
     tmp_path: Path,
@@ -90,7 +111,32 @@ def test_source_artifact_mutation_fails_trusted_validation(
     value["repair_round"] = 1
     action.write_text(json.dumps(value), encoding="utf-8")
 
-    with pytest.raises(ShadowInputError, match="integrity"):
+    with pytest.raises(ShadowIntegrityError, match="integrity"):
+        load_shadow_specification(spec)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "handoffs/worker-r000.json",
+        "git/round-000/evidence.json",
+        "tests/round-000/suite.json",
+    ],
+)
+def test_altered_handoff_git_or_test_evidence_is_integrity_failure(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    spec, source_run, _, _ = create_shadow_tree(tmp_path)
+    path = source_run / relative
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["unexpected"] = True
+    path.write_text(
+        json.dumps(value, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ShadowIntegrityError):
         load_shadow_specification(spec)
 
 
@@ -220,3 +266,171 @@ def test_reconstructs_every_repair_decision_kind_from_pre_action_evidence(
     )
     assert selected.point.comparison_available
     assert selected.authoritative_rendered is not None
+    blind = build_blind_supervisor_prompt(prepared, selected).content
+    for decision in prepared.source.decisions:
+        if decision.authoritative_source is not None:
+            assert decision.authoritative_source.content not in blind
+            assert str(decision.authoritative_source.path).encode() not in blind
+            assert decision.authoritative_source.sha256.encode() not in blind
+        if decision.authoritative_rendered is not None:
+            assert decision.authoritative_rendered.content not in blind
+            assert (
+                decision.authoritative_rendered.rendered_sha256.encode()
+                not in blind
+            )
+
+
+def test_missing_continuation_source_is_the_only_unavailable_comparison(
+    tmp_path: Path,
+) -> None:
+    spec, source_run, _, _, instruction = (
+        create_human_continuation_shadow_tree(tmp_path)
+    )
+    instruction.unlink()
+
+    with pytest.raises(WorkflowStateError):
+        substage_status(source_run)
+    prepared = load_shadow_specification(spec)
+    continuation = next(
+        decision
+        for decision in prepared.source.decisions
+        if decision.point.proposal_kind
+        == "worker_human_continuation"
+    )
+
+    assert continuation.point.comparison_available is False
+    assert (
+        continuation.point.comparison_unavailable_reason
+        == "continuation_source_unavailable"
+    )
+    assert continuation.authoritative_source is None
+    assert continuation.authoritative_rendered is None
+    assert continuation.blind_evidence["current_state"] == "human_paused"
+
+
+def test_altered_continuation_source_is_an_integrity_failure(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, _, instruction = create_human_continuation_shadow_tree(
+        tmp_path
+    )
+    instruction.write_text("Altered instruction.\n", encoding="utf-8")
+
+    with pytest.raises(ShadowIntegrityError, match="integrity"):
+        load_shadow_specification(spec)
+
+
+def test_parent_component_symlink_is_rejected(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, _ = create_shadow_tree(tmp_path)
+    value = yaml.safe_load(spec.read_text(encoding="utf-8"))
+    linked_parent = tmp_path / "linked-shadow-control"
+    linked_parent.symlink_to(spec.parent, target_is_directory=True)
+    value["project_context_paths"] = [
+        str(linked_parent / "project-context.md")
+    ]
+    spec.write_text(
+        yaml.safe_dump(value, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ShadowInputError, match="symbolic-link"):
+        load_shadow_specification(spec)
+
+
+def test_source_frozen_input_and_repository_drift_are_integrity_failures(
+    tmp_path: Path,
+) -> None:
+    spec, _, project, _ = create_shadow_tree(tmp_path / "frozen")
+    (project / "control/worker-initial.md").write_text(
+        "changed\n", encoding="utf-8"
+    )
+    with pytest.raises(ShadowIntegrityError):
+        load_shadow_specification(spec)
+
+    spec, _, project, _ = create_shadow_tree(tmp_path / "repository")
+    (project / "new.txt").write_text("new\n", encoding="utf-8")
+    git(project, "add", "new.txt")
+    git(project, "commit", "-q", "-m", "drift")
+    with pytest.raises(ShadowIntegrityError):
+        load_shadow_specification(spec)
+
+
+@pytest.mark.parametrize(
+    "source_status",
+    [
+        "completed",
+        "checkpoint_paused",
+        "human_paused",
+        "repair_limit_paused",
+        "failed",
+        "aborted",
+    ],
+)
+def test_every_contract_allowed_terminal_source_status_is_accepted(
+    tmp_path: Path,
+    source_status: str,
+) -> None:
+    options: dict[str, object] = {}
+    if source_status in {"completed", "checkpoint_paused"}:
+        responses = [
+            codex_response("worker", "worker", worker_result()),
+            codex_response("auditor", "auditor", auditor_result()),
+        ]
+        options["checkpoint_after"] = source_status == "checkpoint_paused"
+    elif source_status in {"human_paused", "aborted"}:
+        responses = [
+            codex_response(
+                "worker", "worker", worker_result("blocked")
+            )
+        ]
+    elif source_status == "repair_limit_paused":
+        responses = [
+            codex_response(
+                "worker",
+                "worker",
+                worker_result(),
+                write_files={"outside.txt": "outside\n"},
+            )
+        ]
+        options["max_repair_rounds"] = 0
+    else:
+        responses = None
+    stage2_spec, project, fake = create_workflow_tree(
+        tmp_path / "stage2",
+        responses=responses,
+        **options,  # type: ignore[arg-type]
+    )
+    services = WorkflowServices(codex_executable=str(fake))
+    if source_status == "failed":
+
+        def fail_invariant(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise WorkflowStateError("injected local invariant")
+
+        services = WorkflowServices(
+            codex_executable=str(fake),
+            codex_invoker=fail_invariant,  # type: ignore[arg-type]
+        )
+    result = run_substage(
+        stage2_spec,
+        runs_dir=tmp_path / "source-runs",
+        services=services,
+    )
+    if source_status == "aborted":
+        result = abort_substage(
+            Path(result.artifact_directory),
+            "stop",
+            services=WorkflowServices(codex_executable=str(fake)),
+        )
+    assert result.status == source_status
+    shadow_spec = create_shadow_specification(
+        tmp_path,
+        Path(result.artifact_directory),
+        project,
+    )
+
+    prepared = load_shadow_specification(shadow_spec)
+
+    assert prepared.source.state.status == source_status
