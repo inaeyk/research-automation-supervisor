@@ -61,6 +61,11 @@ def redact_text(text: str, sensitive_values: Sequence[str] = ()) -> str:
     return redacted
 
 
+def would_redact_text(text: str, sensitive_values: Sequence[str] = ()) -> bool:
+    """Whether the complete text-redaction policy would modify a string."""
+    return redact_text(text, sensitive_values) != text
+
+
 def redact_json(value: Any, sensitive_values: Sequence[str] = ()) -> Any:
     """Recursively redact JSON-like data while preserving non-string scalars."""
     if isinstance(value, Mapping):

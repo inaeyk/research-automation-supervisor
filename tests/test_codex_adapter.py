@@ -21,6 +21,7 @@ from research_automation_supervisor.codex_adapter import (
     build_codex_command,
     execute_codex_request,
     run_prepared_codex,
+    validate_locator_confidentiality,
 )
 from research_automation_supervisor.codex_models import (
     CodexRunResult,
@@ -33,6 +34,7 @@ from research_automation_supervisor.errors import (
     CodexDependencyError,
     CodexRequestError,
 )
+from research_automation_supervisor.redaction import redact_text
 
 FAKE_CODEX = (Path(__file__).parent / "fixtures" / "fake_codex.py").resolve()
 ARTIFACT_NAMES = {
@@ -72,6 +74,28 @@ def prepared_request(
     request_path = tmp_path / "request.yaml"
     request_path.write_text(yaml.safe_dump(request_data(role)), encoding="utf-8")
     return load_codex_request(request_path, git_worktree_checker=lambda _: True)
+
+
+def structural_request_path(tmp_path: Path, field: str, value: str) -> Path:
+    """Create a valid request whose selected exact structure contains a value."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    data = request_data()
+    workspace_name = f"workspace-{value}" if field == "workspace" else "workspace"
+    prompt_name = f"prompt-{value}.md" if field == "prompt_path" else "prompt.md"
+    request_name = f"request-{value}.yaml" if field == "request_path" else "request.yaml"
+    if field in {"run_id", "model"}:
+        data[field] = value
+    data["workspace"] = workspace_name
+    data["prompt_path"] = prompt_name
+
+    (tmp_path / workspace_name).mkdir()
+    (tmp_path / prompt_name).write_text(
+        "One exact human-written prompt.\n",
+        encoding="utf-8",
+    )
+    request_path = tmp_path / request_name
+    request_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return request_path
 
 
 def configure(prepared: PreparedCodexRequest, **configuration: object) -> None:
@@ -261,6 +285,7 @@ def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path
     assert metadata["package_version"] == "0.1.0"
     assert metadata["codex_version"] == "0.200.0"
     assert metadata["thread_id"] == "thread-123"
+    assert metadata["artifact_directory"] == result.artifact_directory
     assert metadata["valid_event_count"] == 2
     assert metadata["malformed_event_count"] == 0
     assert metadata["command"][:4] == [
@@ -762,7 +787,7 @@ def test_every_request_locator_collision_is_rejected_before_directory_creation(
     for sensitive_value in locator_values:
         with pytest.raises(
             CodexConfidentialityError,
-            match="conflicts with a sensitive environment value",
+            match="structural redaction collision",
         ) as captured:
             run_prepared_codex(
                 prepared,
@@ -812,7 +837,7 @@ def test_run_id_sensitive_collision_is_rejected_by_run_cli_without_writes(
         assert invocation.exit_code == 2
         assert secret not in rendered
         assert str(prepared.request_path) not in rendered
-        assert "sensitive environment value" in rendered
+        assert "structural redaction collision" in rendered
         assert not runs_dir.exists()
 
 
@@ -844,11 +869,176 @@ def test_validate_cli_rejects_confidentiality_collision_in_human_and_json_modes(
     assert str(prepared.request_path) not in human.output
     assert str(prepared.request_path) not in machine.stdout
     assert json.loads(machine.stdout) == {
-        "error": "Codex request conflicts with a sensitive environment value",
+        "error": "Codex request contains a structural redaction collision",
         "error_kind": "input",
         "ok": False,
         "path": "<REDACTED>",
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "token"),
+    [
+        ("run_id", "sk-AUDIT_TOKEN_SHOULD_REDACT"),
+        ("model", "ghp_AUDIT_TOKEN_SHOULD_REDACT"),
+        ("request_path", "github_pat_AUDIT_TOKEN_SHOULD_REDACT"),
+        ("workspace", "xoxb-AUDIT-TOKEN"),
+        ("prompt_path", "xoxp-AUDIT-TOKEN"),
+    ],
+)
+def test_validate_cli_rejects_builtin_token_structures_in_human_and_json_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    token: str,
+) -> None:
+    request_path = structural_request_path(tmp_path, field, token)
+    monkeypatch.setattr(
+        "research_automation_supervisor.codex_models._default_git_worktree_checker",
+        lambda: lambda workspace: True,
+    )
+
+    human = CliRunner().invoke(app, ["validate-codex-request", str(request_path)])
+    machine = CliRunner().invoke(
+        app,
+        ["validate-codex-request", str(request_path), "--json"],
+    )
+
+    for invocation in (human, machine):
+        rendered = invocation.stdout + invocation.stderr
+        assert invocation.exit_code == 2
+        assert token not in rendered
+        assert str(request_path) not in rendered
+        assert "structural redaction collision" in rendered
+        assert "Traceback" not in rendered
+    assert json.loads(machine.stdout) == {
+        "error": "Codex request contains a structural redaction collision",
+        "error_kind": "input",
+        "ok": False,
+        "path": "<REDACTED>",
+    }
+    assert not (tmp_path / "runs").exists()
+
+
+def test_service_rejects_token_shaped_request_path_before_loading_or_writing(
+    tmp_path: Path,
+) -> None:
+    token = "github_pat_AUDIT_TOKEN_SHOULD_REDACT"
+    request_path = tmp_path / f"missing-{token}.yaml"
+    runs_dir = tmp_path / "service-runs"
+
+    with pytest.raises(
+        CodexConfidentialityError,
+        match="structural redaction collision",
+    ) as captured:
+        execute_codex_request(
+            request_path,
+            runs_dir=runs_dir,
+            codex_executable=str(FAKE_CODEX),
+            environ=fake_environment(),
+            git_worktree_checker=lambda workspace: True,
+        )
+
+    assert token not in str(captured.value)
+    assert str(request_path) not in str(captured.value)
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "structural_value",
+    [
+        "Authorization: Bearer AUDIT_TOKEN_SHOULD_REDACT",
+        "sk-AUDIT_TOKEN_SHOULD_REDACT",
+        "ghp_AUDIT_TOKEN_SHOULD_REDACT",
+        "github_pat_AUDIT_TOKEN_SHOULD_REDACT",
+        "xoxb-AUDIT-TOKEN",
+        "xoxp-AUDIT-TOKEN",
+        "token=AUDIT_ASSIGNMENT_SHOULD_REDACT",
+    ],
+)
+def test_structural_preflight_cannot_diverge_from_complete_redaction_policy(
+    structural_value: str,
+) -> None:
+    assert redact_text(structural_value) != structural_value
+
+    with pytest.raises(CodexConfidentialityError, match="structural redaction collision"):
+        validate_locator_confidentiality((structural_value,), ())
+
+
+@pytest.mark.parametrize(
+    ("structural_field", "token"),
+    [
+        ("run_id", "sk-AUDIT_TOKEN_SHOULD_REDACT"),
+        ("model", "ghp_AUDIT_TOKEN_SHOULD_REDACT"),
+        ("request_path", "github_pat_AUDIT_TOKEN_SHOULD_REDACT"),
+        ("workspace", "xoxb-AUDIT-TOKEN"),
+        ("prompt_path", "xoxp-AUDIT-TOKEN"),
+        ("runs_directory", "xoxb-AUDIT-TOKEN"),
+        ("runs_directory", "Authorization: Bearer AUDIT_TOKEN_SHOULD_REDACT"),
+        ("artifact_directory", "sk-AUDIT_ARTIFACT_SHOULD_REDACT"),
+        ("assignment_runs_directory", "token=AUDIT_ASSIGNMENT_SHOULD_REDACT"),
+    ],
+)
+def test_run_cli_rejects_complete_policy_structural_collisions_without_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    structural_field: str,
+    token: str,
+) -> None:
+    request_field = "run_id" if structural_field == "artifact_directory" else structural_field
+    if request_field in {"run_id", "model", "request_path", "workspace", "prompt_path"}:
+        request_path = structural_request_path(tmp_path, request_field, token)
+    else:
+        request_path = structural_request_path(tmp_path, "ordinary", token)
+    request_run_id = token if request_field == "run_id" else "worker-run"
+
+    def execute_with_fake(path: Path, *, runs_dir: Path) -> CodexRunResult:
+        return execute_codex_request(
+            path,
+            runs_dir=runs_dir,
+            codex_executable=str(FAKE_CODEX),
+            environ=fake_environment(),
+            git_worktree_checker=lambda workspace: True,
+        )
+
+    monkeypatch.setattr(
+        "research_automation_supervisor.cli.execute_codex_request",
+        execute_with_fake,
+    )
+
+    for mode_arguments, mode_name in (([], "human"), (["--json"], "json")):
+        if structural_field in {"runs_directory", "assignment_runs_directory"}:
+            runs_dir = tmp_path / f"{token}-{mode_name}"
+        else:
+            runs_dir = tmp_path / f"runs-{mode_name}"
+        artifact_directory = runs_dir.resolve() / request_run_id
+        invocation = CliRunner().invoke(
+            app,
+            [
+                "run-codex",
+                str(request_path),
+                "--runs-dir",
+                str(runs_dir),
+                *mode_arguments,
+            ],
+        )
+
+        rendered = invocation.stdout + invocation.stderr
+        assert invocation.exit_code == 2
+        assert token not in rendered
+        assert str(request_path) not in rendered
+        assert str(runs_dir) not in rendered
+        assert "structural redaction collision" in rendered
+        assert "Traceback" not in rendered
+        assert not runs_dir.exists()
+        assert not artifact_directory.exists()
+        if mode_arguments:
+            assert json.loads(invocation.stdout) == {
+                "error": "Codex request contains a structural redaction collision",
+                "error_kind": "input",
+                "ok": False,
+                "path": "<REDACTED>",
+            }
 
 
 def test_existing_run_directory_collision_is_refused(tmp_path: Path) -> None:
@@ -965,10 +1155,18 @@ def test_validate_codex_request_cli_is_read_only_and_stable(
         lambda path: prepared,
     )
 
+    human = CliRunner().invoke(
+        app, ["validate-codex-request", str(prepared.request_path)]
+    )
     invocation = CliRunner().invoke(
         app, ["validate-codex-request", str(prepared.request_path), "--json"]
     )
 
+    assert human.exit_code == 0
+    assert (
+        f"Valid Codex request {prepared.request.run_id} "
+        f"({prepared.request.role}): {prepared.request_path}"
+    ) in human.stdout
     assert invocation.exit_code == 0
     assert json.loads(invocation.stdout) == {
         "ok": True,

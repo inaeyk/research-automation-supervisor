@@ -38,6 +38,7 @@ from research_automation_supervisor.redaction import (
     is_sensitive_name,
     redact_json,
     redact_text,
+    would_redact_text,
 )
 
 STDOUT_LIMIT_BYTES = 100 * 1024 * 1024
@@ -409,7 +410,7 @@ def validate_request_confidentiality(
     request_locator: Path | None = None,
     runs_dir: Path | None = None,
 ) -> Path | None:
-    """Reject request-derived locators containing removed environment values."""
+    """Reject exact request structures that the complete redactor would modify."""
     locators = [
         str(prepared.request_path),
         prepared.request.run_id,
@@ -441,12 +442,11 @@ def validate_locator_confidentiality(
     locators: Sequence[str | Path],
     sensitive_values: Sequence[str],
 ) -> None:
-    """Reject exact structural strings containing removed environment values."""
+    """Reject exact structural strings that cannot be rendered unchanged."""
     rendered_locators = tuple(str(locator) for locator in locators)
-    literals = tuple(value for value in sensitive_values if value)
-    if any(value in locator for value in literals for locator in rendered_locators):
+    if any(would_redact_text(locator, sensitive_values) for locator in rendered_locators):
         raise CodexConfidentialityError(
-            "Codex request conflicts with a sensitive environment value"
+            "Codex request contains a structural redaction collision"
         )
 
 

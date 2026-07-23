@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from research_automation_supervisor.codex_adapter import build_subprocess_environment
-from research_automation_supervisor.redaction import REDACTED, redact_json, redact_text
+from research_automation_supervisor.redaction import (
+    REDACTED,
+    redact_json,
+    redact_text,
+    would_redact_text,
+)
 
 
 def test_redacts_bearer_and_common_token_forms() -> None:
@@ -29,6 +36,36 @@ def test_redacts_case_insensitive_secret_assignments() -> None:
     for secret in ("alpha", "beta", "gamma", "delta"):
         assert secret not in rendered
     assert "ordinary=keep" in rendered
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Authorization: Bearer AUDIT_TOKEN_SHOULD_REDACT",
+        "sk-AUDIT_TOKEN_SHOULD_REDACT",
+        "ghp_AUDIT_TOKEN_SHOULD_REDACT",
+        "github_pat_AUDIT_TOKEN_SHOULD_REDACT",
+        "xoxb-AUDIT-TOKEN",
+        "xoxp-AUDIT-TOKEN",
+        "token=AUDIT_ASSIGNMENT_SHOULD_REDACT",
+    ],
+)
+def test_structural_detector_cannot_diverge_from_builtin_redaction_policy(
+    source: str,
+) -> None:
+    redacted = redact_text(source)
+
+    assert redacted != source
+    assert would_redact_text(source)
+    assert would_redact_text(source) == (redact_text(source) != source)
+
+
+def test_structural_detector_uses_sensitive_literals_and_accepts_ordinary_text() -> None:
+    removed_value = "REMOVED_ENVIRONMENT_LITERAL"
+
+    assert would_redact_text(f"prefix-{removed_value}-suffix", (removed_value,))
+    assert not would_redact_text("ordinary-worker-run", (removed_value,))
+    assert not would_redact_text(REDACTED, (removed_value,))
 
 
 def test_recursive_redaction_preserves_non_string_scalar_types() -> None:

@@ -31,14 +31,19 @@ directory. The workspace must be a directory in a Git worktree. The prompt must
 be a nonempty regular UTF-8 file of at most 1 MiB. It is read once before launch
 and only its byte count and SHA-256 are recorded.
 
-Before successful validation output, the adapter compares every nonempty value
-removed from a credential-shaped environment variable against the request file
-locator, run ID, model, resolved workspace, and resolved prompt path. A run also
-checks the supplied and resolved runs directory and the exact prospective
-`<runs-dir>/<run_id>` artifact directory. Any collision is rejected as a generic
-input error (exit 2), without rendering the value or locator and before creating
-the run directory. Accepted runs therefore retain an exact, existing artifact
-directory rather than redacting or renaming a required locator.
+Before successful validation output, the adapter calls `would_redact_text`,
+defined as whether `redact_text` changes the input, for every exact request
+structure it will render: the request locator, run ID, role, model, reasoning
+effort, resolved workspace and prompt, prompt hash, and fixed role-policy
+strings. A run also checks the
+supplied and resolved runs directory and the exact prospective
+`<runs-dir>/<run_id>` artifact directory. Detection therefore covers removed
+environment literals, Authorization/Bearer forms, built-in API-token prefixes,
+and supported sensitive assignments without maintaining a second pattern list.
+Any value that redaction would modify is rejected as a generic input error (exit
+2), without rendering the value or surrounding locator and before creating the
+run directory. Accepted runs retain an exact, existing artifact directory
+rather than redacting, hashing, or renaming a required locator.
 
 ## Fixed policy and command
 

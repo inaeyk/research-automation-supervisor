@@ -26,7 +26,7 @@ class CodexRequestError(CodexAdapterError):
 
 
 class CodexConfidentialityError(CodexRequestError):
-    """A request locator collides with a removed sensitive environment value."""
+    """An exact request structure would be modified by mandatory redaction."""
 
 
 class CodexDependencyError(CodexAdapterError):
