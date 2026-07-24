@@ -269,6 +269,48 @@ class LiveShadowFailure(BaseModel):
     recorded_at: str
 
 
+class LiveComparisonUnavailableRecord(BaseModel):
+    """Immutable proof that a terminal authoritative action cannot be compared."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = 1
+    decision_id: Identifier
+    source_action_id: Identifier
+    envelope_sha256: Sha256
+    authoritative_run_directory: str
+    authoritative_run_token: Identifier
+    authoritative_substage_id: Identifier
+    authoritative_status: WorkflowStatus
+    authoritative_pause_reason: str | None
+    authoritative_result_sha256: Sha256
+    authoritative_journal_sha256: Sha256
+    authoritative_journal_sequence: Annotated[int, Field(ge=1)]
+    authoritative_journal_hash: Sha256
+    reason: Literal["authoritative_action_unfinished_after_terminal"]
+    recorded_at: str
+    record_sha256: Sha256
+
+
+class FailedSupervisorActionRecord(BaseModel):
+    """Typed immutable finalization of an uncompleted or unlaunchable shadow action."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = 1
+    action_id: Identifier
+    proposal_id: Identifier
+    proposal_kind: ProposalKind
+    stage1_artifact_directory: str
+    resume_session_id: SupervisorUUID | None
+    prompt_sha256: Sha256
+    blind_manifest_sha256: Sha256
+    output_schema_sha256: Sha256
+    reason: BoundedString
+    detail: BoundedString
+    finalized_at: str
+
+
 class LiveShadowJournalEntry(BaseModel):
     """One strict hash-chained Stage 4 journal entry."""
 

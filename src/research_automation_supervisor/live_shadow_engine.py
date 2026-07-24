@@ -48,6 +48,8 @@ from research_automation_supervisor.live_shadow_models import (
     AuthoritativeLaunchRecord,
     AuthoritativeRunRecord,
     AuthoritativeTerminalRecord,
+    FailedSupervisorActionRecord,
+    LiveComparisonUnavailableRecord,
     LiveDecisionEnvelope,
     LiveReadinessReport,
     LiveShadowFailure,
@@ -355,25 +357,6 @@ def resume_live_shadow(
             },
             utc_now=services.utc_now,
         )
-    if state.pending_action is not None:
-        completion = (
-            Path(state.pending_action.stage1_artifact_directory)
-            / "stage2-completion.json"
-        )
-        if not completion.is_file():
-            state = _transition_state_only(
-                resolved,
-                state,
-                prepared,
-                "human_paused",
-                "supervisor_action_launch_unproven",
-                (
-                    "A durable supervisor intent has no provable completion; "
-                    "Stage 2 remains independent and no action was relaunched."
-                ),
-                services.utc_now,
-            )
-            return _result_for_state(state, prepared)
     context = _LiveContext(
         prepared=prepared,
         run_directory=resolved,
@@ -481,6 +464,10 @@ def live_shadow_report(run_directory: Path) -> dict[str, object]:
         proposal_id: _load_assessment(resolved, proposal_id)
         for proposal_id in state.comparison_ids
     }
+    comparisons = {
+        proposal_id: _load_comparison(resolved, proposal_id)
+        for proposal_id in state.comparison_ids
+    }
     report = {
         "schema_version": 1,
         "live_shadow_id": state.live_shadow_id,
@@ -504,6 +491,21 @@ def live_shadow_report(run_directory: Path) -> dict[str, object]:
                 ),
             }
             for proposal_id in state.comparison_ids
+        ],
+        "comparisons": [
+            comparisons[proposal_id].model_dump(mode="json")
+            for proposal_id in state.comparison_ids
+        ],
+        "comparison_unavailable_records": [
+            _load_unavailable_record(
+                resolved,
+                proposal_id,
+            ).model_dump(mode="json")
+            for proposal_id in state.comparison_ids
+            if comparisons[
+                proposal_id
+            ].comparison_unavailable_reason
+            == "authoritative_action_unfinished_after_terminal"
         ],
         "shadow_failures": [
             failure.model_dump(mode="json") for failure in state.shadow_failures
@@ -783,7 +785,7 @@ def _launch_authoritative(context: _LiveContext) -> None:
         if context.services.authoritative_environ is None
         else context.services.authoritative_environ
     )
-    environment, _, _ = build_subprocess_environment(environment_source)
+    environment = dict(environment_source)
     try:
         process = subprocess.Popen(
             [
@@ -1539,6 +1541,12 @@ def _record_failed_proposal(
     }
     _write_immutable_json(result_path, result_value)
     _write_immutable_bytes(candidate_path, b"")
+    failed_action_path = _write_failed_supervisor_action(
+        context,
+        pending,
+        reason,
+        detail,
+    )
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1555,6 +1563,7 @@ def _record_failed_proposal(
         artifact_hashes={
             str(result_path): sha256_regular_file(result_path),
             str(candidate_path): sha256_regular_file(candidate_path),
+            str(failed_action_path): sha256_regular_file(failed_action_path),
         },
         utc_now=context.services.utc_now,
     )
@@ -1631,6 +1640,12 @@ def _finalize_unlaunchable_decision(
         },
     )
     _write_immutable_bytes(candidate_path, b"")
+    failed_action_path = _write_failed_supervisor_action(
+        context,
+        pending,
+        reason,
+        detail,
+    )
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1646,6 +1661,7 @@ def _finalize_unlaunchable_decision(
         artifact_hashes={
             str(result_path): sha256_regular_file(result_path),
             str(candidate_path): sha256_regular_file(candidate_path),
+            str(failed_action_path): sha256_regular_file(failed_action_path),
         },
         utc_now=context.services.utc_now,
     )
@@ -1656,6 +1672,52 @@ def _finalize_unlaunchable_decision(
         detail=detail,
         temporal_or_integrity=reason == "supervisor_session_unavailable",
     )
+
+
+def _write_failed_supervisor_action(
+    context: _LiveContext,
+    pending: PendingSupervisorAction,
+    reason: str,
+    detail: str,
+) -> Path:
+    path = (
+        context.run_directory
+        / "proposals"
+        / pending.proposal_id
+        / "failed-supervisor-action.json"
+    )
+    candidate = FailedSupervisorActionRecord(
+        action_id=pending.action_id,
+        proposal_id=pending.proposal_id,
+        proposal_kind=pending.proposal_kind,
+        stage1_artifact_directory=pending.stage1_artifact_directory,
+        resume_session_id=pending.resume_session_id,
+        prompt_sha256=pending.prompt_sha256,
+        blind_manifest_sha256=pending.blind_manifest_sha256,
+        output_schema_sha256=pending.output_schema_sha256,
+        reason=reason,
+        detail=detail,
+        finalized_at=_utc_string(context.services.utc_now()),
+    )
+    if path.exists():
+        existing = _load_model(
+            path,
+            FailedSupervisorActionRecord,
+            "failed supervisor action",
+        )
+        if existing.model_dump(
+            mode="json",
+            exclude={"finalized_at"},
+        ) != candidate.model_dump(
+            mode="json",
+            exclude={"finalized_at"},
+        ):
+            raise LiveShadowStateError(
+                "failed supervisor action contradicts durable recovery"
+            )
+        return path
+    _write_immutable_json(path, candidate.model_dump(mode="json"))
+    return path
 
 
 def _finalize_ready_comparisons(context: _LiveContext) -> None:
@@ -1926,6 +1988,172 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
         )
 
 
+def _finalize_unfinished_authoritative_comparison(
+    context: _LiveContext,
+    proposal_id: str,
+) -> None:
+    """Finalize one decision whose terminal Stage 2 action can no longer complete."""
+    if proposal_id in context.state.comparison_ids:
+        return
+    envelope = _load_envelope(context.run_directory, proposal_id)
+    if any(
+        entry.event_type == "action_completion"
+        and entry.action_id == envelope.source_action_id
+        for entry in _observed_stage2_entries(context)
+    ):
+        raise LiveShadowStateError(
+            "unfinished authoritative comparison has a durable action completion"
+        )
+    run_record = _load_model(
+        context.run_directory / "authoritative" / "stage2-run.json",
+        AuthoritativeRunRecord,
+        "authoritative run",
+    )
+    terminal = _load_model(
+        context.run_directory / "authoritative" / "result.json",
+        AuthoritativeTerminalRecord,
+        "authoritative terminal result",
+    )
+    if (
+        context.state.authoritative_status is None
+        or context.state.authoritative_result_sha256 is None
+        or context.state.authoritative_run_directory != terminal.run_directory
+        or context.state.authoritative_status != terminal.status
+        or context.state.authoritative_pause_reason != terminal.pause_reason
+        or context.state.authoritative_result_sha256 != terminal.result_sha256
+        or context.state.authoritative_journal_sequence
+        != terminal.journal_sequence
+        or context.state.authoritative_journal_hash != terminal.journal_head
+    ):
+        raise LiveShadowIntegrityError(
+            "unfinished authoritative comparison lacks a verified terminal journal"
+        )
+    proposal_directory = context.run_directory / "proposals" / proposal_id
+    candidate_path = proposal_directory / "candidate-prompt.md"
+    candidate_bytes = candidate_path.read_bytes()
+    reason = "authoritative_action_unfinished_after_terminal"
+    comparison = ProposalComparison(
+        proposal_id=proposal_id,
+        proposal_kind=envelope.proposal_kind,
+        source_stage2_action_id=envelope.source_action_id,
+        candidate_sha256=(
+            hashlib.sha256(candidate_bytes).hexdigest()
+            if candidate_bytes
+            else None
+        ),
+        candidate_byte_count=len(candidate_bytes),
+        authoritative_source_sha256=None,
+        authoritative_source_byte_count=None,
+        authoritative_rendered_sha256=None,
+        authoritative_rendered_byte_count=None,
+        comparison_available=False,
+        comparison_unavailable_reason=reason,
+    )
+    assessment = _unavailable_assessment(
+        context,
+        envelope,
+        comparison,
+        reason,
+        b"",
+    )
+    record_body = {
+        "schema_version": 1,
+        "decision_id": proposal_id,
+        "source_action_id": envelope.source_action_id,
+        "envelope_sha256": envelope.envelope_sha256,
+        "authoritative_run_directory": terminal.run_directory,
+        "authoritative_run_token": run_record.run_token,
+        "authoritative_substage_id": run_record.substage_id,
+        "authoritative_status": terminal.status,
+        "authoritative_pause_reason": terminal.pause_reason,
+        "authoritative_result_sha256": terminal.result_sha256,
+        "authoritative_journal_sha256": terminal.journal_sha256,
+        "authoritative_journal_sequence": terminal.journal_sequence,
+        "authoritative_journal_hash": terminal.journal_head,
+        "reason": reason,
+        "recorded_at": _utc_string(context.services.utc_now()),
+    }
+    record = LiveComparisonUnavailableRecord.model_validate(
+        {
+            **record_body,
+            "record_sha256": hashlib.sha256(
+                _canonical_json(record_body)
+            ).hexdigest(),
+        }
+    )
+    comparison_directory = context.run_directory / "comparisons" / proposal_id
+    comparison_directory.mkdir(parents=True, exist_ok=True)
+    comparison_path = comparison_directory / "comparison.json"
+    unavailable_path = comparison_directory / "comparison-unavailable.json"
+    assessment_path = proposal_directory / "assessment.json"
+    source_path = comparison_directory / "authoritative-source.md"
+    rendered_path = comparison_directory / "authoritative-rendered.md"
+    if source_path.exists() or rendered_path.exists():
+        raise LiveShadowStateError(
+            "unfinished authoritative comparison contains source material"
+        )
+    if unavailable_path.exists():
+        existing = _load_unavailable_record(context.run_directory, proposal_id)
+        if existing.model_dump(
+            mode="json",
+            exclude={"recorded_at", "record_sha256"},
+        ) != record.model_dump(
+            mode="json",
+            exclude={"recorded_at", "record_sha256"},
+        ):
+            raise LiveShadowStateError(
+                "comparison-unavailable record contradicts durable recovery"
+            )
+        record = existing
+    _write_immutable_json(
+        comparison_path,
+        comparison.model_dump(mode="json"),
+    )
+    _write_immutable_json(
+        assessment_path,
+        assessment.model_dump(mode="json"),
+    )
+    _write_immutable_json(
+        unavailable_path,
+        record.model_dump(mode="json"),
+    )
+    context.state = _journal_event(
+        context.run_directory,
+        context.state,
+        context.prepared,
+        event_type="comparison",
+        reason="comparison_unavailable",
+        action_id=None,
+        decision_id=proposal_id,
+        updates={
+            "comparison_ids": (*context.state.comparison_ids, proposal_id),
+            "disqualified_proposal_ids": (
+                *context.state.disqualified_proposal_ids,
+                proposal_id,
+            ),
+            "summary": (
+                f"Terminal unfinished authoritative action finalized for {proposal_id}."
+            ),
+        },
+        artifact_hashes={
+            str(comparison_path): sha256_regular_file(comparison_path),
+            str(assessment_path): sha256_regular_file(assessment_path),
+            str(unavailable_path): sha256_regular_file(unavailable_path),
+        },
+        utc_now=context.services.utc_now,
+    )
+    context.state = _record_shadow_failure(
+        context,
+        decision_id=proposal_id,
+        reason=reason,
+        detail=(
+            "The authoritative Stage 2 process exited with its observed action "
+            "unfinished; comparison was boundedly finalized without prompt material."
+        ),
+        temporal_or_integrity=False,
+    )
+
+
 def _record_authoritative_terminal(context: _LiveContext) -> None:
     run_value = context.state.authoritative_run_directory
     if run_value is None:
@@ -2063,6 +2291,13 @@ def _finalize_after_authoritative(context: _LiveContext) -> None:
             "Queued supervisor turn was not launched before the completion timeout.",
         )
     _finalize_ready_comparisons(context)
+    if timed_out:
+        for proposal_id in tuple(context.state.proposal_ids):
+            if proposal_id not in context.state.comparison_ids:
+                _finalize_unfinished_authoritative_comparison(
+                    context,
+                    proposal_id,
+                )
     if len(context.state.comparison_ids) < len(context.state.proposal_ids):
         return
     unavailable = [
@@ -2072,6 +2307,58 @@ def _finalize_after_authoritative(context: _LiveContext) -> None:
             context.run_directory, proposal_id
         ).comparison_available
     ]
+    for proposal_id in unavailable:
+        comparison = _load_comparison(
+            context.run_directory,
+            proposal_id,
+        )
+        reason = comparison.comparison_unavailable_reason
+        if (
+            reason == "authoritative_action_unfinished_after_terminal"
+            and not any(
+                failure.decision_id == proposal_id
+                and failure.reason == reason
+                for failure in context.state.shadow_failures
+            )
+        ):
+            context.state = _record_shadow_failure(
+                context,
+                decision_id=proposal_id,
+                reason=reason,
+                detail=(
+                    "The authoritative Stage 2 process exited with its observed "
+                    "action unfinished; comparison was boundedly finalized "
+                    "without prompt material."
+                ),
+                temporal_or_integrity=False,
+            )
+    for proposal_id in context.state.proposal_ids:
+        failed_path = (
+            context.run_directory
+            / "proposals"
+            / proposal_id
+            / "failed-supervisor-action.json"
+        )
+        if not failed_path.exists():
+            continue
+        failed = _load_model(
+            failed_path,
+            FailedSupervisorActionRecord,
+            "failed supervisor action",
+        )
+        if any(
+            failure.decision_id == proposal_id
+            and failure.reason == failed.reason
+            for failure in context.state.shadow_failures
+        ):
+            continue
+        context.state = _record_shadow_failure(
+            context,
+            decision_id=proposal_id,
+            reason=failed.reason,
+            detail=failed.detail,
+            temporal_or_integrity=failed.reason.endswith("unprovable"),
+        )
     if context.state.shadow_failures or unavailable:
         context.state = _transition(
             context,
@@ -2343,6 +2630,7 @@ def _journal_event(
                 os.fsync(handle.fileno())
         except OSError as exc:
             raise LiveShadowStateError("Stage 4 journal could not be appended") from exc
+        _snapshot_checkpoint("after_journal_fsync")
         copied = dict(updates)
         copied.update(
             {
@@ -2511,8 +2799,14 @@ def _persist_state(
         raise LiveShadowIntegrityError(
             "live-shadow state or result failed confidentiality preflight"
         ) from exc
-    _write_json(run_directory / STATE_FILE, state.model_dump(mode="json"))
+    # The journal is the semantic source of truth.  The public result may be
+    # replaced first, but state.json is the final snapshot commit point.
+    _snapshot_checkpoint("before_result_replacement")
     _write_json(run_directory / RESULT_FILE, result.model_dump(mode="json"))
+    _snapshot_checkpoint("after_result_replacement")
+    _snapshot_checkpoint("before_state_replacement")
+    _write_json(run_directory / STATE_FILE, state.model_dump(mode="json"))
+    _snapshot_checkpoint("after_state_replacement")
 
 
 def _result_for_state(
@@ -2746,6 +3040,43 @@ def _validate_run(
         proposal_directory = run_directory / "proposals" / proposal_id
         sha256_regular_file(proposal_directory / "supervisor-result.json")
         sha256_regular_file(proposal_directory / "candidate-prompt.md")
+        failed_action_path = proposal_directory / "failed-supervisor-action.json"
+        completed_action_path = proposal_directory / "supervisor-action.json"
+        if failed_action_path.exists() and completed_action_path.exists():
+            raise LiveShadowStateError(
+                "supervisor action is both completed and failed"
+            )
+        if failed_action_path.exists():
+            failed = _load_model(
+                failed_action_path,
+                FailedSupervisorActionRecord,
+                "failed supervisor action",
+            )
+            envelope = _load_envelope(run_directory, proposal_id)
+            if (
+                failed.action_id != f"supervisor-{proposal_id}"
+                or failed.proposal_id != proposal_id
+                or failed.proposal_kind != envelope.proposal_kind
+                or failed.stage1_artifact_directory
+                != str(proposal_directory / "stage1-run")
+                or failed.blind_manifest_sha256
+                != sha256_regular_file(
+                    run_directory
+                    / "decisions"
+                    / proposal_id
+                    / "blind-input-manifest.json"
+                )
+                or failed.output_schema_sha256
+                != sha256_regular_file(
+                    run_directory
+                    / "decisions"
+                    / proposal_id
+                    / "output-schema.json"
+                )
+            ):
+                raise LiveShadowStateError(
+                    "failed supervisor action identity changed"
+                )
     for proposal_id in state.comparison_ids:
         comparison = _load_comparison(run_directory, proposal_id)
         assessment = _load_assessment(run_directory, proposal_id)
@@ -2764,6 +3095,59 @@ def _validate_run(
         elif source.exists() or rendered.exists():
             raise LiveShadowStateError(
                 "unavailable comparison contains authoritative material"
+            )
+        unavailable_path = comparison_directory / "comparison-unavailable.json"
+        if (
+            comparison.comparison_unavailable_reason
+            == "authoritative_action_unfinished_after_terminal"
+        ):
+            unavailable = _load_unavailable_record(
+                run_directory,
+                proposal_id,
+            )
+            envelope = _load_envelope(run_directory, proposal_id)
+            terminal = _load_model(
+                run_directory / "authoritative" / "result.json",
+                AuthoritativeTerminalRecord,
+                "authoritative terminal result",
+            )
+            run_record = _load_model(
+                run_directory / "authoritative" / "stage2-run.json",
+                AuthoritativeRunRecord,
+                "authoritative run",
+            )
+            if (
+                unavailable.decision_id != proposal_id
+                or unavailable.source_action_id
+                != comparison.source_stage2_action_id
+                or unavailable.source_action_id
+                != envelope.source_action_id
+                or unavailable.envelope_sha256
+                != envelope.envelope_sha256
+                or unavailable.authoritative_run_directory
+                != terminal.run_directory
+                or unavailable.authoritative_run_token
+                != run_record.run_token
+                or unavailable.authoritative_substage_id
+                != run_record.substage_id
+                or unavailable.authoritative_status != terminal.status
+                or unavailable.authoritative_pause_reason
+                != terminal.pause_reason
+                or unavailable.authoritative_result_sha256
+                != terminal.result_sha256
+                or unavailable.authoritative_journal_sha256
+                != terminal.journal_sha256
+                or unavailable.authoritative_journal_sequence
+                != terminal.journal_sequence
+                or unavailable.authoritative_journal_hash
+                != terminal.journal_head
+            ):
+                raise LiveShadowStateError(
+                    "comparison-unavailable terminal binding changed"
+                )
+        elif unavailable_path.exists():
+            raise LiveShadowStateError(
+                "comparison has an unexpected unavailable-record artifact"
             )
     for proposal_id in state.reviewed_proposal_ids:
         review = _load_review(run_directory, proposal_id)
@@ -2823,6 +3207,7 @@ def _load_reconciled_run(
         state = _load_state(run_directory)
         prepared = _reload_prepared(state, services)
         entries = _read_live_journal(run_directory)
+        persisted_result = _load_result(run_directory)
         if state.journal_sequence > len(entries):
             raise LiveShadowStateError(
                 "live-shadow state is ahead of its durable journal"
@@ -2838,7 +3223,12 @@ def _load_reconciled_run(
             raise LiveShadowStateError(
                 "live-shadow state journal prefix does not match"
             )
+        _validate_live_journal_replay(
+            entries[: state.journal_sequence],
+            state,
+        )
         if state.journal_sequence < len(entries):
+            pre_recovery_result = _result_for_state(state, prepared)
             values = state.model_dump(mode="json")
             for entry in entries[state.journal_sequence :]:
                 values.update(entry.state_updates)
@@ -2857,6 +3247,15 @@ def _load_reconciled_run(
                     "live-shadow journal recovery produced invalid state"
                 ) from exc
             _validate_live_journal_replay(entries, state)
+            recovered_result = _result_for_state(state, prepared)
+            if persisted_result not in (
+                pre_recovery_result,
+                recovered_result,
+            ):
+                raise LiveShadowStateError(
+                    "live-shadow result snapshot contradicts every recoverable "
+                    "journal generation"
+                )
             _persist_state(run_directory, state, prepared)
         _validate_run(run_directory, state, prepared)
         return state, prepared
@@ -3000,6 +3399,26 @@ def _load_assessment(
         DeterministicAssessment,
         "live deterministic assessment",
     )
+
+
+def _load_unavailable_record(
+    run_directory: Path,
+    proposal_id: str,
+) -> LiveComparisonUnavailableRecord:
+    record = _load_model(
+        run_directory
+        / "comparisons"
+        / proposal_id
+        / "comparison-unavailable.json",
+        LiveComparisonUnavailableRecord,
+        "comparison-unavailable record",
+    )
+    body = record.model_dump(mode="json", exclude={"record_sha256"})
+    if hashlib.sha256(_canonical_json(body)).hexdigest() != record.record_sha256:
+        raise LiveShadowStateError(
+            "comparison-unavailable record self-hash is invalid"
+        )
+    return record
 
 
 def _load_review(run_directory: Path, proposal_id: str) -> HumanReview:
@@ -3210,6 +3629,11 @@ def _write_immutable_bytes(path: Path, value: bytes) -> None:
             )
         return
     _atomic_write(path, value)
+
+
+def _snapshot_checkpoint(name: str) -> None:
+    """Deterministic no-op boundary used by crash-ordering regression tests."""
+    del name
 
 
 def _atomic_write(path: Path, value: bytes) -> None:
