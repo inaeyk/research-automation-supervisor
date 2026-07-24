@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -42,6 +44,56 @@ def test_reviews_are_immutable_and_readiness_never_enables_automation(
     run_directory = Path(result.artifact_directory)
     first_id = "worker_initial-r000-a001"
     second_id = "auditor-r000-a002"
+    assessment_paths = tuple(
+        run_directory / "proposals" / proposal_id / "assessment.json"
+        for proposal_id in (first_id, second_id)
+    )
+
+    def fingerprints(paths: tuple[Path, ...]) -> dict[Path, tuple[str, int]]:
+        return {
+            path: (
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                path.stat().st_mtime_ns,
+            )
+            for path in paths
+        }
+
+    def report_without_writes() -> dict[str, object]:
+        files = tuple(
+            path for path in run_directory.rglob("*") if path.is_file()
+        )
+        before = fingerprints(files)
+        report = shadow_calibration_report(run_directory)
+        assert fingerprints(files) == before
+        assert tuple(
+            path for path in run_directory.rglob("*") if path.is_file()
+        ) == files
+        return report
+
+    def reported_review_statuses(
+        report: dict[str, object],
+    ) -> dict[str, str]:
+        assessments = cast(
+            list[dict[str, str]], report["assessments"]
+        )
+        return {
+            assessment["proposal_id"]: assessment["review_status"]
+            for assessment in assessments
+        }
+
+    assessment_fingerprints = fingerprints(assessment_paths)
+    pre_review_report = report_without_writes()
+    pre_review_readiness = cast(
+        dict[str, object], pre_review_report["readiness"]
+    )
+    assert pre_review_report["status"] == result.status
+    assert pre_review_readiness["status"] == result.readiness
+    assert pre_review_readiness["reviewed_proposal_count"] == 0
+    assert pre_review_readiness["acceptable_review_count"] == 0
+    assert reported_review_statuses(pre_review_report) == {
+        first_id: "unreviewed",
+        second_id: "unreviewed",
+    }
 
     first = record_shadow_review(
         run_directory,
@@ -50,6 +102,19 @@ def test_reviews_are_immutable_and_readiness_never_enables_automation(
         services=shadow_services(fake),
     )
     assert first.status == "awaiting_reviews"
+    assert first.readiness == "insufficient_data"
+    one_review_report = report_without_writes()
+    one_review_readiness = cast(
+        dict[str, object], one_review_report["readiness"]
+    )
+    assert one_review_report["status"] == first.status
+    assert one_review_readiness["status"] == first.readiness
+    assert one_review_readiness["reviewed_proposal_count"] == 1
+    assert one_review_readiness["acceptable_review_count"] == 1
+    assert reported_review_statuses(one_review_report) == {
+        first_id: "reviewed",
+        second_id: "unreviewed",
+    }
     with pytest.raises(ShadowInputError, match="already"):
         record_shadow_review(
             run_directory,
@@ -66,10 +131,24 @@ def test_reviews_are_immutable_and_readiness_never_enables_automation(
     )
     assert completed.status == "completed"
     assert completed.readiness == "candidate_ready_for_live_shadow"
-    report = shadow_calibration_report(run_directory)
-    readiness = report["readiness"]
-    assert readiness["informational_only"] is True  # type: ignore[index]
-    assert readiness["automation_enabled"] is False  # type: ignore[index]
+    report = report_without_writes()
+    readiness = cast(dict[str, object], report["readiness"])
+    assert report["status"] == completed.status
+    assert readiness["status"] == completed.readiness
+    assert readiness["reviewed_proposal_count"] == 2
+    assert readiness["acceptable_review_count"] == 2
+    assert readiness["informational_only"] is True
+    assert readiness["automation_enabled"] is False
+    assert reported_review_statuses(report) == {
+        first_id: "reviewed",
+        second_id: "reviewed",
+    }
+    assert fingerprints(assessment_paths) == assessment_fingerprints
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["review_status"]
+        == "unreviewed"
+        for path in assessment_paths
+    )
     assert (tmp_path / "shadow-counter").read_text() == "2"
 
 

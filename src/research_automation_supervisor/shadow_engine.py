@@ -763,7 +763,14 @@ def shadow_calibration_report(
         "status": state.status,
         "readiness": readiness.model_dump(mode="json"),
         "assessments": [
-            assessments[proposal_id].model_dump(mode="json")
+            {
+                **assessments[proposal_id].model_dump(mode="json"),
+                "review_status": (
+                    "reviewed"
+                    if proposal_id in reviews
+                    else "unreviewed"
+                ),
+            }
             for proposal_id in state.proposal_ids
             if proposal_id in assessments
         ],

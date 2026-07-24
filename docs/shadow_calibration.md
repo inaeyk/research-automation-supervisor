@@ -116,6 +116,10 @@ structured human reviews.
 
 ## Human review and readiness
 
+The persisted `assessment.json` is immutable pre-review evidence and retains
+`review_status: unreviewed`. The aggregate calibration report overlays
+`reviewed` only when a valid immutable review exists for that proposal.
+
 `record-shadow-review` accepts one safe strict YAML review for an existing
 comparison-available proposal. Reviews cannot be overwritten and never change
 the proposal, source Stage 2 run, or supervisor session. `better` or
