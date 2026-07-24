@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from research_automation_supervisor.cli import app
+from research_automation_supervisor.errors import LiveShadowDependencyError
 from research_automation_supervisor.live_shadow_engine import live_shadow_exit_code
 from tests.live_shadow_helpers import create_live_shadow_tree
 
@@ -43,3 +45,26 @@ def test_live_shadow_exit_codes_are_frozen() -> None:
     assert live_shadow_exit_code("human_paused") == 5
     assert live_shadow_exit_code("failed") == 4
     assert live_shadow_exit_code("aborted") == 8
+
+
+def test_run_live_shadow_bubblewrap_dependency_error_exits_three(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.cli as cli
+
+    spec, _, _, _, _ = create_live_shadow_tree(tmp_path)
+
+    def missing_backend(*_: object, **__: object) -> object:
+        raise LiveShadowDependencyError(
+            "Bubblewrap synthetic-root capability probe failed"
+        )
+
+    monkeypatch.setattr(cli, "run_live_shadow", missing_backend)
+    result = runner.invoke(
+        app,
+        ["run-live-shadow", str(spec), "--json"],
+    )
+    assert result.exit_code == 3
+    assert '"ok": false' in result.stdout
+    assert "Bubblewrap" in result.stdout

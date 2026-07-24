@@ -311,11 +311,16 @@ def test_live_run_preserves_authority_and_quarantines_two_proposals(
         Path(result.authoritative_stage2_run or "")
     )
     assert authoritative.status == "completed"
-    assert not tuple((run_directory / "quarantine").iterdir())
+    quarantine = run_directory / "quarantine"
+    assert {path.name for path in quarantine.iterdir()} == {
+        "codex-home",
+        "workspace",
+    }
+    assert not tuple((quarantine / "workspace").iterdir())
     observations = json.loads(
         (tmp_path / "live-shadow-observation.json").read_text(encoding="utf-8")
     )
-    assert observations["cwd"] == str(run_directory / "quarantine")
+    assert observations["cwd"] == str(quarantine / "workspace")
     prompt = base64.b64decode(observations["prompt_base64"])
     assert str(project).encode("utf-8") not in prompt
     assert str(result.authoritative_stage2_run).encode("utf-8") not in prompt
@@ -438,6 +443,13 @@ def test_supervisor_session_failure_is_isolated_from_authoritative_stage2(
         authoritative_observation["prompt_base64"]
     )
     assert b"QUARANTINED-SHADOW-ONLY-SENTINEL" not in authoritative_prompt
+    authoritative_run = Path(str(result.authoritative_stage2_run))
+    for artifact in authoritative_run.rglob("*"):
+        if artifact.is_file():
+            assert (
+                b"QUARANTINED-SHADOW-ONLY-SENTINEL"
+                not in artifact.read_bytes()
+            ), artifact
 
 
 def test_terminal_unfinished_authoritative_action_is_boundedly_unavailable(

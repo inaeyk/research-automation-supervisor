@@ -194,6 +194,27 @@ UtcNow = Callable[[], datetime]
 Monotonic = Callable[[], float]
 
 
+@dataclass(frozen=True)
+class CodexProcessLaunch:
+    """Exact subprocess boundary selected after the semantic Codex argv is built."""
+
+    command: tuple[str, ...]
+    cwd: Path
+    environment: Mapping[str, str]
+
+
+ProcessLaunchBuilder = Callable[
+    [
+        Sequence[str],
+        PreparedCodexRequest,
+        Mapping[str, str],
+        Path,
+        Path | None,
+    ],
+    CodexProcessLaunch,
+]
+
+
 def execute_codex_request(
     request_path: Path,
     *,
@@ -263,6 +284,7 @@ def run_prepared_codex(
     output_schema: Path | None = None,
     resume_thread_id: str | None = None,
     confidential_fragments: Sequence[str] = (),
+    process_launch_builder: ProcessLaunchBuilder | None = None,
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
@@ -314,12 +336,28 @@ def run_prepared_codex(
             output_schema=resolved_output_schema,
             resume_thread_id=resume_thread_id,
         )
-        with event_path.open("wb") as event_file:
-            event_processor = _EventProcessor(event_file, redaction_values)
-            _run_process(
+        launch = (
+            process_launch_builder(
                 command,
                 prepared,
                 environment,
+                temporary_final,
+                resolved_output_schema,
+            )
+            if process_launch_builder is not None
+            else CodexProcessLaunch(
+                command=tuple(command),
+                cwd=prepared.workspace,
+                environment=environment,
+            )
+        )
+        with event_path.open("wb") as event_file:
+            event_processor = _EventProcessor(event_file, redaction_values)
+            _run_process(
+                launch.command,
+                prepared,
+                launch.environment,
+                launch.cwd,
                 event_processor,
                 observation,
                 limits,
@@ -395,7 +433,7 @@ def run_prepared_codex(
     metadata = _build_metadata(
         prepared=prepared,
         artifact_directory=artifact_directory,
-        command=command,
+        command=launch.command,
         executable_path=executable_path,
         codex_version=codex_version,
         removed_names=removed_names,
@@ -642,6 +680,7 @@ def _run_process(
     command: Sequence[str],
     prepared: PreparedCodexRequest,
     environment: Mapping[str, str],
+    cwd: Path,
     events: _EventProcessor,
     observation: _ProcessObservation,
     limits: AdapterLimits,
@@ -651,12 +690,13 @@ def _run_process(
     try:
         process = subprocess.Popen(
             list(command),
-            cwd=prepared.workspace,
+            cwd=cwd,
             env=dict(environment),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            close_fds=True,
         )
     except (OSError, subprocess.SubprocessError):
         observation.launch_error = "Codex process launch failed"

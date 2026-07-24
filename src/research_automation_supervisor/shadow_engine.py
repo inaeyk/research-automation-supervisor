@@ -1303,6 +1303,10 @@ def _verify_supervisor_artifacts(
     *,
     prompt_source_path: str | None = None,
     proposal_workspace: Path | None = None,
+    command_verifier: Callable[
+        [PendingSupervisorAction, CodexMetadata], None
+    ]
+    | None = None,
 ) -> _SupervisorProof:
     directory = Path(pending.stage1_artifact_directory)
     _require_exact_directory(directory, STAGE2_STAGE1_ARTIFACT_NAMES)
@@ -1503,7 +1507,7 @@ def _verify_supervisor_artifacts(
         raise ShadowStateError(
             "supervisor timing evidence is contradictory"
         )
-    _verify_supervisor_command(pending, metadata)
+    (command_verifier or _verify_supervisor_command)(pending, metadata)
     transport_proposal: SupervisorProposal | None = None
     if result.status == "succeeded":
         try:

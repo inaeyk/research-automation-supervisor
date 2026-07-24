@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from uuid import UUID
 from pydantic import BaseModel, ValidationError
 
 from research_automation_supervisor.codex_adapter import (
+    CodexProcessLaunch,
     build_subprocess_environment,
     run_prepared_codex,
 )
@@ -44,6 +46,17 @@ from research_automation_supervisor.errors import (
     WorkflowStateError,
 )
 from research_automation_supervisor.git_evidence import GitBaseline
+from research_automation_supervisor.live_shadow_isolation import (
+    BubblewrapBackendIdentity,
+    BubblewrapCapability,
+    IsolationPreflight,
+    build_bubblewrap_process_launch,
+    load_backend_identity,
+    preflight_bubblewrap_isolation,
+    validate_runtime_home_contents,
+    verify_recorded_bubblewrap_command,
+    write_backend_identity,
+)
 from research_automation_supervisor.live_shadow_models import (
     AuthoritativeLaunchRecord,
     AuthoritativeRunRecord,
@@ -103,6 +116,7 @@ from research_automation_supervisor.workflow_engine import (
     workflow_exit_code,
 )
 from research_automation_supervisor.workflow_integrity import (
+    CodexMetadata,
     JournalEntry,
     parse_journal_entry,
     sha256_regular_file,
@@ -153,7 +167,10 @@ class LiveShadowServices:
     """Injectable process, identity, clock, and polling boundaries."""
 
     codex_executable: str | None = None
-    supervisor_invoker: SupervisorInvoker = run_prepared_codex
+    supervisor_invoker: SupervisorInvoker | None = None
+    isolation_preflight: IsolationPreflight = preflight_bubblewrap_isolation
+    bubblewrap_executable: str | None = None
+    codex_authentication_file: Path | None = None
     environ: Mapping[str, str] | None = None
     authoritative_environ: Mapping[str, str] | None = None
     token_factory: Callable[[], str] = lambda: secrets.token_hex(16)
@@ -174,6 +191,8 @@ class _LiveContext:
     state: LiveShadowState
     codex_executable: str
     services: LiveShadowServices
+    isolation_capability: BubblewrapCapability | None
+    isolation_dependency_failure: str | None = None
     authoritative_process: subprocess.Popen[bytes] | None = None
     supervisor_task: _SupervisorTask | None = None
 
@@ -233,7 +252,21 @@ def run_live_shadow(
     except (OSError, RuntimeError, ValueError) as exc:
         raise LiveShadowInputError("run directory could not be resolved") from exc
     run_directory = resolved_runs / f"{prepared.specification.live_shadow_id}-{token}"
-    _validate_quarantine_location(run_directory / "quarantine", prepared)
+    _validate_run_root_separation(
+        run_directory,
+        resolved_stage2_runs,
+        prepared,
+    )
+    capability = services.isolation_preflight(
+        bubblewrap_executable=services.bubblewrap_executable,
+        codex_executable=executable,
+        authentication_file=services.codex_authentication_file,
+        environ=services.environ,
+        forbidden_roots=(
+            prepared.stage2.repository_root,
+            resolved_stage2_runs,
+        ),
+    )
     try:
         preflight_shadow_confidentiality(
             (
@@ -263,7 +296,7 @@ def run_live_shadow(
 
     now = _utc_string(services.utc_now())
     state = _initial_state(run_directory, prepared, token=token, timestamp=now)
-    _initialize_artifacts(run_directory, prepared)
+    _initialize_artifacts(run_directory, prepared, capability.identity)
     _persist_state(run_directory, state, prepared)
     state = _journal_event(
         run_directory,
@@ -282,6 +315,7 @@ def run_live_shadow(
         state=state,
         codex_executable=executable,
         services=services,
+        isolation_capability=capability,
     )
     context.state = _transition(
         context,
@@ -357,17 +391,67 @@ def resume_live_shadow(
             },
             utc_now=services.utc_now,
         )
+    codex_executable = services.codex_executable or launch.codex_executable
+    capability: BubblewrapCapability | None = None
+    isolation_failure: str | None = None
+    isolation_needed = (
+        state.authoritative_status is None
+        or len(state.proposal_ids) < len(state.observed_decision_ids)
+    )
+    if isolation_needed:
+        try:
+            resolved_codex = _resolve_codex_executable(
+                codex_executable,
+                sensitive_values,
+            )
+            capability = services.isolation_preflight(
+                bubblewrap_executable=services.bubblewrap_executable,
+                codex_executable=resolved_codex,
+                authentication_file=services.codex_authentication_file,
+                environ=services.environ,
+                forbidden_roots=(
+                    prepared.stage2.repository_root,
+                    Path(launch.stage2_runs_directory),
+                ),
+            )
+            recorded_identity = load_backend_identity(
+                resolved / "isolation.json"
+            )
+            if capability.identity != recorded_identity:
+                raise LiveShadowDependencyError(
+                    "Bubblewrap isolation backend identity changed"
+                )
+            codex_executable = resolved_codex
+        except LiveShadowDependencyError:
+            isolation_failure = (
+                "Bubblewrap isolation is unavailable during live-shadow recovery."
+            )
+    else:
+        codex_executable = launch.codex_executable
     context = _LiveContext(
         prepared=prepared,
         run_directory=resolved,
         stage2_runs_directory=Path(launch.stage2_runs_directory),
         state=state,
-        codex_executable=_resolve_codex_executable(
-            services.codex_executable or launch.codex_executable,
-            sensitive_values,
-        ),
+        codex_executable=codex_executable,
         services=services,
+        isolation_capability=capability,
+        isolation_dependency_failure=isolation_failure,
     )
+    if (
+        isolation_failure is not None
+        and not any(
+            failure.reason == "isolation_dependency_failure"
+            for failure in context.state.shadow_failures
+        )
+    ):
+        context.state = _record_shadow_failure(
+            context,
+            decision_id=None,
+            reason="isolation_dependency_failure",
+            detail=isolation_failure,
+            temporal_or_integrity=True,
+        )
     return _drive(context)
 
 
@@ -669,9 +753,9 @@ def _initial_state(
 def _initialize_artifacts(
     run_directory: Path,
     prepared: PreparedLiveShadowSpecification,
+    isolation_identity: BubblewrapBackendIdentity,
 ) -> None:
     for name in (
-        "quarantine",
         "authoritative",
         "decisions",
         "proposals",
@@ -681,6 +765,11 @@ def _initialize_artifacts(
         "escalation",
     ):
         (run_directory / name).mkdir(parents=True, exist_ok=False)
+    quarantine = run_directory / "quarantine"
+    quarantine.mkdir(exist_ok=False)
+    (quarantine / "workspace").mkdir(exist_ok=False)
+    runtime_home = quarantine / "codex-home"
+    runtime_home.mkdir(mode=0o700, exist_ok=False)
     _write_json(
         run_directory / "live-shadow-spec.normalized.json",
         prepared.normalized_dict(),
@@ -712,6 +801,7 @@ def _initialize_artifacts(
         },
     )
     _write_text(run_directory / JOURNAL_FILE, "")
+    write_backend_identity(run_directory / "isolation.json", isolation_identity)
 
 
 def _initial_artifact_hashes(run_directory: Path) -> dict[str, str]:
@@ -723,6 +813,7 @@ def _initial_artifact_hashes(run_directory: Path) -> dict[str, str]:
             "policy.sha256",
             "context.sha256.json",
             "source-inputs.sha256.json",
+            "isolation.json",
         )
     }
 
@@ -1226,6 +1317,8 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
     ]
     if not remaining:
         return
+    if context.isolation_capability is None:
+        return
     decision_id = remaining[0]
     if (
         context.state.supervisor_session_id is None
@@ -1239,6 +1332,7 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
         )
         return
     envelope = _load_envelope(context.run_directory, decision_id)
+    quarantine_workspace = _quarantine_workspace(context.run_directory)
     _validate_quarantine_workspace(context.run_directory / "quarantine")
     rendered = build_live_blind_supervisor_prompt(
         context.prepared,
@@ -1262,7 +1356,7 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
         proposal_kind=envelope.proposal_kind,
         decision_index=envelope.ordinal - 1,
         stage1_artifact_directory=str(stage1_directory),
-        workspace=str(context.run_directory / "quarantine"),
+        workspace=str(quarantine_workspace),
         role="supervisor",
         model=context.prepared.specification.supervisor_model,
         reasoning_effort=context.prepared.specification.supervisor_reasoning_effort,
@@ -1308,15 +1402,57 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
 
     def invoke() -> None:
         try:
-            holder.returned_result = context.services.supervisor_invoker(
-                request,
-                runs_dir=proposal_directory,
-                codex_executable=context.codex_executable,
-                environ=context.services.environ,
-                output_schema=schema_path,
-                resume_thread_id=pending.resume_session_id,
-                confidential_fragments=(),
-            )
+            if context.services.supervisor_invoker is not None:
+                holder.returned_result = context.services.supervisor_invoker(
+                    request,
+                    runs_dir=proposal_directory,
+                    codex_executable=context.codex_executable,
+                    environ=context.services.environ,
+                    output_schema=schema_path,
+                    resume_thread_id=pending.resume_session_id,
+                    confidential_fragments=(),
+                )
+            else:
+                capability = context.isolation_capability
+                if capability is None:
+                    raise LiveShadowDependencyError(
+                        "Bubblewrap isolation is unavailable"
+                    )
+
+                def isolated_launch(
+                    command: Sequence[str],
+                    prepared_request: PreparedCodexRequest,
+                    environment: Mapping[str, str],
+                    final_message_path: Path,
+                    resolved_schema: Path | None,
+                ) -> CodexProcessLaunch:
+                    return build_bubblewrap_process_launch(
+                        command,
+                        prepared_request,
+                        environment,
+                        final_message_path,
+                        resolved_schema,
+                        capability=capability,
+                        stage4_run_root=context.run_directory,
+                        runtime_home=_codex_runtime_home(
+                            context.run_directory
+                        ),
+                        forbidden_roots=_isolation_forbidden_roots(
+                            context
+                        ),
+                    )
+
+                holder.returned_result = run_prepared_codex(
+                    request,
+                    runs_dir=proposal_directory,
+                    codex_executable=context.codex_executable,
+                    environ=context.services.environ,
+                    output_schema=schema_path,
+                    resume_thread_id=pending.resume_session_id,
+                    confidential_fragments=(),
+                    process_launch_builder=isolated_launch,
+                    version_probe=lambda _executable, _environment, _workspace: None,
+                )
         except BaseException as exc:
             holder.error = exc
 
@@ -1339,7 +1475,7 @@ def _prepared_supervisor_request(
         schema_version=1,
         run_id="stage1-run",
         role="supervisor",
-        workspace=str(context.run_directory / "quarantine"),
+        workspace=str(_quarantine_workspace(context.run_directory)),
         prompt_path=str(context.prepared.policy.path),
         model=context.prepared.specification.supervisor_model,
         reasoning_effort=context.prepared.specification.supervisor_reasoning_effort,
@@ -1348,7 +1484,7 @@ def _prepared_supervisor_request(
     return PreparedCodexRequest(
         request_path=context.prepared.specification_path,
         request=request,
-        workspace=context.run_directory / "quarantine",
+        workspace=_quarantine_workspace(context.run_directory),
         prompt_path=context.prepared.policy.path,
         prompt_bytes=rendered.content,
         prompt_sha256=rendered.manifest.rendered_blind_input_sha256,
@@ -1386,6 +1522,17 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
             (decision,),
             prompt_source_path=str(context.prepared.policy.path),
             proposal_workspace=context.prepared.stage2.workspace,
+            command_verifier=(
+                lambda command_pending, metadata: (
+                    _verify_isolated_supervisor_command(
+                        context,
+                        command_pending,
+                        metadata,
+                    )
+                )
+                if context.services.supervisor_invoker is None
+                else None
+            ),
         )
         if (
             task is not None
@@ -1591,7 +1738,7 @@ def _finalize_unlaunchable_decision(
         stage1_artifact_directory=str(
             context.run_directory / "proposals" / decision_id / "stage1-run"
         ),
-        workspace=str(context.run_directory / "quarantine"),
+        workspace=str(_quarantine_workspace(context.run_directory)),
         role="supervisor",
         model=context.prepared.specification.supervisor_model,
         reasoning_effort=context.prepared.specification.supervisor_reasoning_effort,
@@ -1778,6 +1925,17 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
                 (decision,),
                 prompt_source_path=str(context.prepared.policy.path),
                 proposal_workspace=context.prepared.stage2.workspace,
+                command_verifier=(
+                    lambda command_pending, metadata: (
+                        _verify_isolated_supervisor_command(
+                            context,
+                            command_pending,
+                            metadata,
+                        )
+                    )
+                    if context.services.supervisor_invoker is None
+                    else None
+                ),
             )
         except Exception:
             proof = None
@@ -2284,11 +2442,24 @@ def _finalize_after_authoritative(context: _LiveContext) -> None:
         _launch_next_supervisor_if_ready(context)
         return
     for decision_id in remaining:
+        dependency_unavailable = context.isolation_dependency_failure is not None
         _finalize_unlaunchable_decision(
             context,
             decision_id,
-            "shadow_completion_timeout",
-            "Queued supervisor turn was not launched before the completion timeout.",
+            (
+                "isolation_dependency_failure"
+                if dependency_unavailable
+                else "shadow_completion_timeout"
+            ),
+            (
+                "Queued supervisor turn could not launch because Bubblewrap "
+                "isolation was unavailable during recovery."
+                if dependency_unavailable
+                else (
+                    "Queued supervisor turn was not launched before the "
+                    "completion timeout."
+                )
+            ),
         )
     _finalize_ready_comparisons(context)
     if timed_out:
@@ -2909,6 +3080,7 @@ def _validate_run(
     }
     if source_hashes != expected_source:
         raise LiveShadowIntegrityError("frozen Stage 2 source hashes drifted")
+    load_backend_identity(run_directory / "isolation.json")
     _validate_quarantine_workspace(run_directory / "quarantine")
     if state.authoritative_run_directory is not None:
         authoritative_path = Path(state.authoritative_run_directory)
@@ -3447,18 +3619,23 @@ def _load_result(run_directory: Path) -> LiveShadowResult:
     return _load_model(run_directory / RESULT_FILE, LiveShadowResult, "Stage 4 result")
 
 
-def _validate_quarantine_location(
-    quarantine: Path,
+def _validate_run_root_separation(
+    run_directory: Path,
+    stage2_runs_directory: Path,
     prepared: PreparedLiveShadowSpecification,
 ) -> None:
     try:
-        resolved = quarantine.resolve(strict=False)
+        resolved = run_directory.resolve(strict=False)
+        stage2_runs = stage2_runs_directory.resolve(strict=False)
         repository = prepared.stage2.repository_root.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise LiveShadowInputError("quarantine location could not be resolved") from exc
-    if _is_relative_to(resolved, repository) or _is_relative_to(repository, resolved):
+        raise LiveShadowInputError("live-shadow run separation could not be resolved") from exc
+    if (
+        _paths_overlap(resolved, repository)
+        or _paths_overlap(resolved, stage2_runs)
+    ):
         raise LiveShadowInputError(
-            "quarantine workspace must be outside the authoritative repository"
+            "Stage 4 run, authoritative repository, and Stage 2 runs must be separate"
         )
 
 
@@ -3471,15 +3648,66 @@ def _validate_quarantine_workspace(path: Path) -> None:
             or os.path.ismount(path)
         ):
             raise OSError
-        entries = tuple(path.iterdir())
+        entries = {entry.name: entry for entry in path.iterdir()}
+        if set(entries) != {"workspace", "codex-home"}:
+            raise OSError
+        workspace = entries["workspace"]
+        runtime_home = entries["codex-home"]
+        for directory in (workspace, runtime_home):
+            directory_status = directory.lstat()
+            if (
+                not stat.S_ISDIR(directory_status.st_mode)
+                or directory.is_symlink()
+                or os.path.ismount(directory)
+            ):
+                raise OSError
+        if tuple(workspace.iterdir()):
+            raise OSError
+        validate_runtime_home_contents(runtime_home)
     except OSError as exc:
         raise LiveShadowIntegrityError(
             "quarantine workspace is unavailable or not an exact directory"
         ) from exc
-    if not status or entries:
-        raise LiveShadowIntegrityError(
-            "quarantine workspace contains repository content or non-engine files"
-        )
+    if not status:
+        raise LiveShadowIntegrityError("quarantine workspace status is unavailable")
+
+
+def _quarantine_workspace(run_directory: Path) -> Path:
+    return run_directory / "quarantine" / "workspace"
+
+
+def _codex_runtime_home(run_directory: Path) -> Path:
+    return run_directory / "quarantine" / "codex-home"
+
+
+def _isolation_forbidden_roots(context: _LiveContext) -> tuple[Path, ...]:
+    roots = [
+        context.prepared.stage2.repository_root,
+        context.stage2_runs_directory,
+    ]
+    if context.state.authoritative_run_directory is not None:
+        roots.append(Path(context.state.authoritative_run_directory))
+    return tuple(roots)
+
+
+def _verify_isolated_supervisor_command(
+    context: _LiveContext,
+    pending: PendingSupervisorAction,
+    metadata: CodexMetadata,
+) -> None:
+    verify_recorded_bubblewrap_command(
+        pending,
+        metadata,
+        identity=load_backend_identity(
+            context.run_directory / "isolation.json"
+        ),
+        runtime_home=_codex_runtime_home(context.run_directory),
+        authentication_file=(
+            context.isolation_capability.authentication_file
+            if context.isolation_capability is not None
+            else None
+        ),
+    )
 
 
 def _resolve_codex_executable(
@@ -3709,6 +3937,10 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return _is_relative_to(left, right) or _is_relative_to(right, left)
 
 
 def _reject_json_constant(value: str) -> None:

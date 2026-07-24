@@ -52,9 +52,14 @@ specification and creates hash-bound envelopes from verified Stage 2 journal
 prefixes. `live_shadow_prompts.py` assembles the non-persisted live blind input.
 `live_shadow_engine.py` launches one unchanged Stage 2 child independently,
 tails only durable action intents, serializes one persistent supervisor queue
-in an empty read-only quarantine, and waits until both proposal and
-authoritative action finalize before reusing Stage 3 comparison and assessment
-semantics. `live_shadow_review.py` reuses immutable Stage 3 reviews to compute
-informational readiness. Supervisor failures can degrade Stage 4 but cannot
-signal, modify, delay, retry, or reinterpret the authoritative Stage 2 run;
-automation remains disabled.
+through the OS-enforced synthetic filesystem in `live_shadow_isolation.py`, and
+waits until both proposal and authoritative action finalize before reusing
+Stage 3 comparison and assessment semantics. Bubblewrap exposes only an empty
+read-only workspace, the current action/schema paths, a dedicated persistent
+Codex home with a read-only authentication-file over-mount, and explicit system
+runtime resources. Its network namespace stays shared only for Codex transport;
+model web/tool network remains disabled by policy. `live_shadow_review.py`
+reuses immutable Stage 3 reviews to compute informational readiness. Supervisor
+or isolation failures can degrade Stage 4 but cannot signal, modify, delay,
+retry, or reinterpret the authoritative Stage 2 run; automation remains
+disabled and there is no unisolated fallback.

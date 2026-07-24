@@ -6,7 +6,12 @@ from pathlib import Path
 
 import yaml
 
+from research_automation_supervisor.codex_adapter import run_prepared_codex
 from research_automation_supervisor.live_shadow_engine import LiveShadowServices
+from research_automation_supervisor.live_shadow_isolation import (
+    BubblewrapBackendIdentity,
+    BubblewrapCapability,
+)
 from tests.shadow_helpers import (
     SOURCE_AUDITOR_UUID,
     SOURCE_WORKER_UUID,
@@ -118,8 +123,26 @@ def create_live_shadow_tree(
     )
     supervisor_environment = dict(os.environ)
     supervisor_environment["FAKE_CODEX_CONFIG"] = str(supervisor_config)
+    fake_authentication = tmp_path / "fake-auth.json"
+    fake_authentication.write_text("{}\n", encoding="ascii")
+
+    def fake_isolation_preflight(**_: object) -> BubblewrapCapability:
+        return BubblewrapCapability(
+            identity=BubblewrapBackendIdentity(
+                schema_version=1,
+                isolation_schema_version=1,
+                backend="bubblewrap",
+                canonical_bubblewrap_path="/usr/bin/bwrap",
+                bubblewrap_version="bubblewrap test-double",
+                capability_result="passed",
+            ),
+            authentication_file=fake_authentication,
+        )
+
     services = LiveShadowServices(
         codex_executable=str(fake),
+        supervisor_invoker=run_prepared_codex,
+        isolation_preflight=fake_isolation_preflight,
         environ=supervisor_environment,
         token_factory=lambda: "deterministic-live-token",
     )
