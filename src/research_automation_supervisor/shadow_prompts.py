@@ -40,9 +40,17 @@ SHADOW_INSTRUCTION = (
     b"\nThis is retrospective shadow calibration only. Your proposal is advisory "
     b"and will never be sent automatically to a worker or auditor. The frozen "
     b"contract, tests, conventions, scope, and permissions cannot be changed. "
-    b"Use only evidence available at this decision point. Recommend a human "
-    b"pause when evidence is insufficient. Return only the strict JSON object "
-    b"required by the engine-owned schema.\n"
+    b"Use only evidence available at this decision point. In the structured "
+    b"metadata, referenced_paths means only the workspace paths that the "
+    b"proposed worker or auditor is being authorized to modify. Use normalized "
+    b"workspace-relative POSIX paths there. Do not list read-only contracts, "
+    b"tests, control files, protected paths, or evidence in referenced_paths. "
+    b"required_checks means exact acceptance-test IDs supplied in the evidence; "
+    b"do not put shell commands in required_checks. The proposed natural-language "
+    b"prompt itself should still name the exact files to read or modify and the "
+    b"exact commands to run. Recommend a human pause when evidence is "
+    b"insufficient. Return only the strict JSON object required by the "
+    b"engine-owned schema.\n"
 )
 
 SUPERVISOR_OUTPUT_SCHEMA: dict[str, object] = normalize_production_schema({
@@ -82,28 +90,49 @@ SUPERVISOR_OUTPUT_SCHEMA: dict[str, object] = normalize_production_schema({
         },
         "prompt": {
             "type": ["string", "null"],
+            "minLength": 1,
             "maxLength": 2 * 1024 * 1024,
         },
-        "summary": {"type": "string", "maxLength": 16384},
+        "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+        },
         "referenced_paths": {
             "type": "array",
             "maxItems": 200,
-            "items": {"type": "string", "maxLength": 16384},
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+            },
         },
         "required_checks": {
             "type": "array",
             "maxItems": 200,
-            "items": {"type": "string", "maxLength": 16384},
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+            },
         },
         "assumptions": {
             "type": "array",
             "maxItems": 200,
-            "items": {"type": "string", "maxLength": 16384},
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+            },
         },
         "questions": {
             "type": "array",
             "maxItems": 200,
-            "items": {"type": "string", "maxLength": 16384},
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+            },
         },
         "contract_change_requested": {"type": "boolean"},
         "scope_expansion_requested": {"type": "boolean"},

@@ -1,0 +1,29 @@
+{
+  "acceptance_change_requested": false,
+  "assumptions": [
+    "The clean baseline at commit ffc6e6298da0eae0e3d0d30520ad587d89ecfae0 is the worker's starting state.",
+    "This is an initial implementation turn; no prior implementation or failure evidence is present."
+  ],
+  "contract_change_requested": false,
+  "convention_change_requested": false,
+  "disposition": "propose",
+  "permission_change_requested": false,
+  "prompt": "You are the implementation worker, not the independent auditor.\n\nIn repository `/home/inaeyk/researchrepo/ras-stage3-first-trial/target`, implement `parse_duration(text: str) -> int` in `src/duration_parser.py` according to `control/stage2-contract.md`.\n\nFrozen behavior:\n- Accept one or more ASCII integer-unit components in fixed descending order: `[hours h][minutes m][seconds s]`.\n- Each unit may occur at most once; at least one component is required.\n- Hours must be 0–999; minutes and seconds must be 0–59.\n- Permit leading zeroes.\n- Reject strings containing whitespace, signs, decimal points, separators, uppercase units, reordered/repeated units, omitted numbers, out-of-range values, non-ASCII digits, trailing data, or anything else outside the complete grammar.\n- Return the total seconds.\n- Raise `TypeError` for non-string input and `ValueError` for an invalid string.\n- Preserve the public function name and signature exactly.\n\nScope and permissions:\n- Modify only `src/duration_parser.py`.\n- Do not modify `tests/**`, `control/**`, `.gitignore`, or any other path.\n- Use only the Python standard library. Do not add dependencies or access the network.\n- Do not change the contract, tests, acceptance criteria, or add unrelated functionality.\n- Preserve any already-correct content in the allowed file.\n\nAfter implementation, run exactly:\n`/home/inaeyk/researchrepo/research-automation-supervisor/.venv/bin/python -m unittest discover -s tests -v`\n\nThen inspect `git status --short` and `git diff --check` to confirm scope compliance and a clean patch. Report the modified file, a concise implementation summary, and the exact results of all checks. Do not perform independent audit approval; leave that to the auditor.",
+  "proposal_kind": "worker_initial",
+  "questions": [],
+  "referenced_paths": [
+    "/home/inaeyk/researchrepo/ras-stage3-first-trial/target/src/duration_parser.py",
+    "/home/inaeyk/researchrepo/ras-stage3-first-trial/target/control/stage2-contract.md",
+    "/home/inaeyk/researchrepo/ras-stage3-first-trial/target/tests/**",
+    "/home/inaeyk/researchrepo/ras-stage3-first-trial/target/control/**",
+    "/home/inaeyk/researchrepo/ras-stage3-first-trial/target/.gitignore"
+  ],
+  "required_checks": [
+    "/home/inaeyk/researchrepo/research-automation-supervisor/.venv/bin/python -m unittest discover -s tests -v",
+    "git status --short",
+    "git diff --check"
+  ],
+  "schema_version": 1,
+  "scope_expansion_requested": false,
+  "summary": "Propose an initial implementation worker prompt that freezes the duration-parser contract, permits changes only to src/duration_parser.py, requires the exact acceptance suite and scope checks, and reserves independent approval for a later auditor."
+}

@@ -6,6 +6,8 @@ import fcntl
 import hashlib
 import json
 import os
+import posixpath
+import re
 import secrets
 import shutil
 import socket
@@ -53,6 +55,7 @@ from research_automation_supervisor.shadow_models import (
     BlindInputManifest,
     DeterministicAssessment,
     HumanReview,
+    NormalizedSupervisorProposal,
     PathScopeFinding,
     PendingSupervisorAction,
     ProposalComparison,
@@ -157,7 +160,7 @@ class _SupervisorProof:
     adapter_result: CodexRunResult
     metadata: CodexMetadata
     session_ids: tuple[str, ...]
-    proposal: SupervisorProposal | None
+    proposal: NormalizedSupervisorProposal | None
     final_bytes: bytes
     artifact_hashes: dict[str, str]
 
@@ -1484,23 +1487,31 @@ def _verify_supervisor_artifacts(
             "supervisor timing evidence is contradictory"
         )
     _verify_supervisor_command(pending, metadata)
-    proposal: SupervisorProposal | None = None
+    transport_proposal: SupervisorProposal | None = None
     if result.status == "succeeded":
         try:
             value = json.loads(
                 final_bytes.decode("utf-8"),
                 parse_constant=_reject_json_constant,
             )
-            proposal = SupervisorProposal.model_validate(value)
-            if proposal.proposal_kind != decision.point.proposal_kind:
-                proposal = None
+            transport_proposal = SupervisorProposal.model_validate(value)
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
             ValueError,
             ValidationError,
         ):
-            proposal = None
+            transport_proposal = None
+    proposal = (
+        _normalize_supervisor_proposal(
+            transport_proposal,
+            Path(pending.workspace),
+        )
+        if transport_proposal is not None
+        and transport_proposal.proposal_kind
+        == decision.point.proposal_kind
+        else None
+    )
     _assert_no_authoritative_material(directory, all_decisions)
     artifact_hashes = {
         str(directory / name): sha256_regular_file(directory / name)
@@ -1520,6 +1531,48 @@ def _verify_supervisor_artifacts(
         final_bytes=final_bytes,
         artifact_hashes=artifact_hashes,
     )
+
+
+def _normalize_supervisor_proposal(
+    proposal: SupervisorProposal,
+    workspace: Path,
+) -> NormalizedSupervisorProposal:
+    """Build the persisted proposal used for deterministic assessment."""
+    value = proposal.model_dump(mode="json")
+    value["referenced_paths"] = [
+        _normalize_proposal_path(path, workspace)
+        for path in proposal.referenced_paths
+    ]
+    return NormalizedSupervisorProposal.model_validate(value)
+
+
+def _normalize_proposal_path(value: str, workspace: Path) -> str:
+    """Lexically normalize one transport path without rejecting its meaning."""
+    normalized = posixpath.normpath(value.replace("\\", "/"))
+    if _is_windows_absolute_path(normalized):
+        return normalized
+    if not posixpath.isabs(normalized):
+        return normalized
+
+    normalized_workspace = posixpath.normpath(
+        workspace.as_posix().replace("\\", "/")
+    )
+    try:
+        inside_workspace = (
+            posixpath.commonpath(
+                (normalized_workspace, normalized)
+            )
+            == normalized_workspace
+        )
+    except ValueError:
+        inside_workspace = False
+    if not inside_workspace:
+        return normalized
+    return posixpath.relpath(normalized, normalized_workspace)
+
+
+def _is_windows_absolute_path(value: str) -> bool:
+    return re.match(r"^[A-Za-z]:/", value) is not None
 
 
 def manifest_path_source(pending: PendingSupervisorAction) -> str:
@@ -1948,7 +2001,7 @@ def _assess_proposal(
     pending: PendingSupervisorAction,
     decision: DecisionReconstruction,
     proof: _SupervisorProof,
-    proposal: SupervisorProposal,
+    proposal: NormalizedSupervisorProposal,
     comparison: ProposalComparison,
     *,
     session_integrity: bool,
@@ -1968,8 +2021,36 @@ def _assess_proposal(
     }
     findings: list[PathScopeFinding] = []
     specification = context.prepared.source.prepared.specification
+    seen_paths: set[str] = set()
     for path in proposal.referenced_paths:
-        if path_matches_any(path, specification.protected_paths):
+        if path in seen_paths:
+            findings.append(
+                PathScopeFinding(
+                    path=path,
+                    reason="duplicate_normalized_path",
+                )
+            )
+            continue
+        seen_paths.add(path)
+        if _is_windows_absolute_path(path) or posixpath.isabs(path):
+            findings.append(
+                PathScopeFinding(
+                    path=path,
+                    reason="absolute_outside_workspace",
+                )
+            )
+        elif path == ".." or path.startswith("../"):
+            findings.append(
+                PathScopeFinding(path=path, reason="traversal_escape")
+            )
+        elif path in {"", "."}:
+            findings.append(
+                PathScopeFinding(
+                    path=path,
+                    reason="outside_allowed_paths",
+                )
+            )
+        elif path_matches_any(path, specification.protected_paths):
             findings.append(
                 PathScopeFinding(path=path, reason="protected_path")
             )
@@ -1991,10 +2072,18 @@ def _assess_proposal(
     missing = tuple(
         test_id for test_id in test_ids if test_id not in covered
     )
+    unknown = tuple(
+        dict.fromkeys(
+            check
+            for check in proposal.required_checks
+            if check not in test_ids
+        )
+    )
     coverage = RequiredCheckCoverage(
         required_test_ids=test_ids,
         covered_test_ids=covered,
         missing_test_ids=missing,
+        unknown_check_ids=unknown,
     )
     _, _, sensitive_values = build_subprocess_environment(
         context.services.environ
@@ -2017,6 +2106,12 @@ def _assess_proposal(
     reasons.extend(
         f"referenced_path_{finding.reason}:{finding.path}"
         for finding in findings
+    )
+    reasons.extend(
+        f"required_check_missing:{test_id}" for test_id in missing
+    )
+    reasons.extend(
+        f"required_check_unknown:{check}" for check in unknown
     )
     if structural_collision:
         reasons.append("structural_redaction_collision")
@@ -2091,6 +2186,7 @@ def _malformed_assessment(
             required_test_ids=test_ids,
             covered_test_ids=(),
             missing_test_ids=test_ids,
+            unknown_check_ids=(),
         ),
         disposition="malformed",
         disqualified=True,

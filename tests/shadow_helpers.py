@@ -36,7 +36,9 @@ def supervisor_proposal(
             "disposition": "propose",
             "prompt": f"Candidate {proposal_kind} prompt.",
             "summary": f"candidate {proposal_kind}",
-            "referenced_paths": ["src/output.txt"],
+            "referenced_paths": (
+                [] if proposal_kind == "auditor" else ["src/output.txt"]
+            ),
             "required_checks": ["fixed-test"],
             "assumptions": [],
             "questions": [],

@@ -218,6 +218,29 @@ def test_uncertain_action_pauses_and_malformed_result_pauses(
     assert malformed.status == "human_paused"
     assert malformed.pause_reason == "supervisor_result_malformed"
 
+    schema_invalid_value = json.loads(
+        supervisor_proposal("worker_initial")
+    )
+    schema_invalid_value.pop("required_checks")
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path / "schema-invalid",
+        supervisor_responses=[
+            supervisor_response(
+                "worker_initial",
+                final=json.dumps(schema_invalid_value, sort_keys=True),
+            )
+        ],
+    )
+    schema_invalid = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "schema-invalid-runs",
+        services=shadow_services(fake),
+    )
+    assert schema_invalid.status == "human_paused"
+    assert (
+        schema_invalid.pause_reason == "supervisor_result_malformed"
+    )
+
 
 def test_mutated_completed_assessment_fails_status_integrity(
     tmp_path: Path,
@@ -1042,25 +1065,41 @@ def test_every_requested_change_flag_disqualifies(
 
 
 @pytest.mark.parametrize(
-    ("path", "expected_reason"),
+    ("path", "normalized_path", "expected_reason"),
     [
-        ("src/output.txt", None),
-        ("control/contract.md", "protected_path"),
-        ("outside.txt", "outside_allowed_paths"),
+        ("src/output.txt", "src/output.txt", None),
+        ("$WORKSPACE/src/output.txt", "src/output.txt", None),
+        (
+            "/outside-workspace/output.txt",
+            "/outside-workspace/output.txt",
+            "absolute_outside_workspace",
+        ),
+        ("control/contract.md", "control/contract.md", "protected_path"),
+        ("../escape.txt", "../escape.txt", "traversal_escape"),
+        ("outside.txt", "outside.txt", "outside_allowed_paths"),
+        ("src\\output.txt", "src/output.txt", None),
+        ("src/./output.txt", "src/output.txt", None),
+        ("src/**", "src/**", None),
     ],
 )
 def test_referenced_path_scope_is_assessed_exactly(
     tmp_path: Path,
     path: str,
+    normalized_path: str,
     expected_reason: str | None,
 ) -> None:
+    spec, _, project, fake = create_shadow_tree(
+        tmp_path,
+    )
+    submitted_path = path.replace("$WORKSPACE", project.as_posix())
     value = json.loads(supervisor_proposal("worker_initial"))
-    value["referenced_paths"] = [path]
+    value["referenced_paths"] = [submitted_path]
     first = supervisor_response("worker_initial")
     first["final"] = json.dumps(value, sort_keys=True)
-    spec, _, _, fake = create_shadow_tree(
+    _replace_shadow_responses(
+        project,
         tmp_path,
-        supervisor_responses=[
+        [
             first,
             supervisor_response(
                 "auditor",
@@ -1084,8 +1123,64 @@ def test_referenced_path_scope_is_assessed_exactly(
     if expected_reason is None:
         assert findings == []
     else:
-        assert findings == [{"path": path, "reason": expected_reason}]
+        assert findings == [
+            {
+                "path": normalized_path,
+                "reason": expected_reason,
+            }
+        ]
         assert assessment["disqualified"] is True
+    persisted = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/supervisor-result.json"
+        ).read_text()
+    )
+    assert persisted["referenced_paths"] == [normalized_path]
+
+
+def test_duplicate_path_is_found_after_workspace_normalization(
+    tmp_path: Path,
+) -> None:
+    spec, _, project, fake = create_shadow_tree(tmp_path)
+    value = json.loads(supervisor_proposal("worker_initial"))
+    value["referenced_paths"] = [
+        "src/output.txt",
+        str(project / "src/output.txt"),
+    ]
+    first = supervisor_response("worker_initial")
+    first["final"] = json.dumps(value, sort_keys=True)
+    _replace_shadow_responses(
+        project,
+        tmp_path,
+        [
+            first,
+            supervisor_response(
+                "auditor",
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    assessment = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+
+    assert assessment["path_scope_findings"] == [
+        {
+            "path": "src/output.txt",
+            "reason": "duplicate_normalized_path",
+        }
+    ]
+    assert assessment["disqualified"] is True
 
 
 def test_required_check_coverage_records_exact_ids_without_semantic_scoring(
@@ -1121,7 +1216,173 @@ def test_required_check_coverage_records_exact_ids_without_semantic_scoring(
         "required_test_ids": ["fixed-test"],
         "covered_test_ids": [],
         "missing_test_ids": ["fixed-test"],
+        "unknown_check_ids": ["not-the-frozen-test"],
     }
+    assert assessment["disqualified"] is True
+    assert "required_check_missing:fixed-test" in (
+        assessment["disqualification_reasons"]
+    )
+    assert "required_check_unknown:not-the-frozen-test" in (
+        assessment["disqualification_reasons"]
+    )
+
+
+def test_shell_commands_are_unknown_required_check_ids(
+    tmp_path: Path,
+) -> None:
+    value = json.loads(supervisor_proposal("worker_initial"))
+    command = "python -m unittest discover -s tests -v"
+    value["required_checks"] = [command]
+    first = supervisor_response("worker_initial")
+    first["final"] = json.dumps(value, sort_keys=True)
+    spec, _, _, fake = create_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            first,
+            supervisor_response(
+                "auditor",
+                expected_resume_thread_id=SUPERVISOR_UUID,
+            ),
+        ],
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+    assessment = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+
+    assert assessment["required_check_coverage"]["unknown_check_ids"] == [
+        command
+    ]
+    assert f"required_check_unknown:{command}" in (
+        assessment["disqualification_reasons"]
+    )
+    assert assessment["disqualified"] is True
+
+
+def test_real_result_is_parsed_normalized_and_disqualified_without_pause(
+    tmp_path: Path,
+) -> None:
+    spec, project, fake, submitted = _create_real_result_trial(
+        tmp_path,
+        compliant=False,
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+
+    assert result.status == "awaiting_reviews"
+    assert result.pause_reason is None
+    assert result.proposal_count == 2
+    assert result.disqualification_count == 1
+    run_directory = Path(result.artifact_directory)
+    raw_transport = json.loads(
+        (
+            run_directory
+            / "proposals/worker_initial-r000-a001"
+            / "stage1-run/final-message.md"
+        ).read_text()
+    )
+    assert raw_transport == submitted
+    normalized = json.loads(
+        (
+            run_directory
+            / "proposals/worker_initial-r000-a001"
+            / "supervisor-result.json"
+        ).read_text()
+    )
+    assert normalized["referenced_paths"] == [
+        "src/duration_parser.py",
+        "control/stage2-contract.md",
+        "tests/**",
+        "control/**",
+        ".gitignore",
+    ]
+    assessment = json.loads(
+        (
+            run_directory
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+    assert assessment["schema_integrity"] is True
+    assert assessment["disqualified"] is True
+    assert assessment["required_check_coverage"] == {
+        "required_test_ids": ["duration-parser-unittest"],
+        "covered_test_ids": [],
+        "missing_test_ids": ["duration-parser-unittest"],
+        "unknown_check_ids": submitted["required_checks"],
+    }
+    findings = assessment["path_scope_findings"]
+    assert {
+        ("control/stage2-contract.md", "protected_path"),
+        ("tests/**", "protected_path"),
+        ("control/**", "protected_path"),
+        (".gitignore", "protected_path"),
+    }.issubset(
+        {(item["path"], item["reason"]) for item in findings}
+    )
+    action = json.loads(
+        (
+            run_directory
+            / "supervisor/supervisor-worker_initial-r000-a001.json"
+        ).read_text()
+    )
+    assert action["structured_result_valid"] is True
+    assert (
+        run_directory
+        / "proposals/auditor-r000-a002/assessment.json"
+    ).is_file()
+    assert project.is_dir()
+
+
+def test_compliant_real_result_variant_advances_through_auditor(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake, _ = _create_real_result_trial(
+        tmp_path,
+        compliant=True,
+    )
+
+    result = run_shadow_calibration(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=shadow_services(fake),
+    )
+
+    assert result.status == "awaiting_reviews"
+    assert result.proposal_count == 2
+    assert result.disqualification_count == 0
+    run_directory = Path(result.artifact_directory)
+    assessment = json.loads(
+        (
+            run_directory
+            / "proposals/worker_initial-r000-a001/assessment.json"
+        ).read_text()
+    )
+    assert assessment["schema_integrity"] is True
+    assert assessment["path_scope_findings"] == []
+    assert assessment["required_check_coverage"] == {
+        "required_test_ids": ["duration-parser-unittest"],
+        "covered_test_ids": ["duration-parser-unittest"],
+        "missing_test_ids": [],
+        "unknown_check_ids": [],
+    }
+    assert assessment["disqualified"] is False
+    assert (
+        run_directory
+        / "proposals/auditor-r000-a002/assessment.json"
+    ).is_file()
+    assert (tmp_path / "shadow-counter").read_text() == "2"
 
 
 @pytest.mark.parametrize(
@@ -1197,3 +1458,91 @@ def test_transport_failure_pauses_without_worker_auditor_or_test_launch(
     assert result.pause_reason == "supervisor_process_failed"
     assert result.proposal_count == 1
     assert (tmp_path / "shadow-counter").read_text() == "1"
+
+
+def _replace_shadow_responses(
+    project: Path,
+    root: Path,
+    responses: list[dict[str, object]],
+) -> None:
+    (project / ".fake-codex.json").write_text(
+        json.dumps(
+            {
+                "counter_path": str(root / "shadow-counter"),
+                "observation_path": str(
+                    root / "shadow-observation.json"
+                ),
+                "responses": responses,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _create_real_result_trial(
+    tmp_path: Path,
+    *,
+    compliant: bool,
+) -> tuple[Path, Path, Path, dict[str, object]]:
+    stage2_spec, project, fake = create_workflow_tree(
+        tmp_path / "stage2"
+    )
+    stage2_value = yaml.safe_load(
+        stage2_spec.read_text(encoding="utf-8")
+    )
+    stage2_value["acceptance_tests"][0]["id"] = (
+        "duration-parser-unittest"
+    )
+    stage2_value["protected_paths"] = [
+        "control/**",
+        "tests/**",
+        ".gitignore",
+        "tools/**",
+        ".fake-codex.json",
+    ]
+    stage2_spec.write_text(
+        yaml.safe_dump(stage2_value, sort_keys=False),
+        encoding="utf-8",
+    )
+    source = run_substage(
+        stage2_spec,
+        runs_dir=tmp_path / "stage2-runs",
+        services=WorkflowServices(codex_executable=str(fake)),
+    )
+
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures/stage3_real_supervisor_result.json"
+    )
+    submitted: dict[str, object] = json.loads(
+        fixture_path.read_text(encoding="utf-8")
+    )
+    if compliant:
+        submitted["referenced_paths"] = ["src/duration_parser.py"]
+        submitted["required_checks"] = ["duration-parser-unittest"]
+    else:
+        real_workspace = (
+            "/home/inaeyk/researchrepo/"
+            "ras-stage3-first-trial/target"
+        )
+        submitted["referenced_paths"] = [
+            f"{project.as_posix()}{path[len(real_workspace):]}"
+            for path in submitted["referenced_paths"]
+        ]
+    first = supervisor_response("worker_initial")
+    first["final"] = json.dumps(submitted, sort_keys=True)
+    auditor_value = json.loads(supervisor_proposal("auditor"))
+    auditor_value["required_checks"] = ["duration-parser-unittest"]
+    auditor = supervisor_response(
+        "auditor",
+        expected_resume_thread_id=SUPERVISOR_UUID,
+    )
+    auditor["final"] = json.dumps(auditor_value, sort_keys=True)
+    spec = create_shadow_specification(
+        tmp_path,
+        Path(source.artifact_directory),
+        project,
+        supervisor_responses=[first, auditor],
+    )
+    return spec, project, fake, submitted

@@ -48,6 +48,10 @@ def test_blind_prompt_contains_frozen_allowed_inputs_but_no_authoritative_prompt
     assert rendered.manifest.authoritative_sentinel_absent
     assert rendered.manifest.shadow_only
     assert rendered.manifest.automatic_send_disabled
+    assert b"referenced_paths means only the workspace paths" in rendered.content
+    assert b"normalized workspace-relative POSIX paths" in rendered.content
+    assert b"do not put shell commands in required_checks" in rendered.content
+    assert b"prompt itself should still name the exact files" in rendered.content
 
 
 def test_initial_blind_evidence_excludes_every_future_outcome_domain(
@@ -129,5 +133,19 @@ def test_every_supervisor_literal_schema_node_has_its_exact_type(
     }
     assert properties["prompt"] == {
         "type": ["string", "null"],
+        "minLength": 1,
         "maxLength": 4096,
     }
+    for name in (
+        "referenced_paths",
+        "required_checks",
+        "assumptions",
+        "questions",
+    ):
+        node = properties[name]
+        assert isinstance(node, dict)
+        assert node["items"] == {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+        }

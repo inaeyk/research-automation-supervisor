@@ -24,7 +24,6 @@ from research_automation_supervisor.codex_models import (
 from research_automation_supervisor.workflow_models import (
     Identifier,
     _freeze_sequence,
-    normalize_relative_path,
 )
 
 MAX_SHADOW_STRING_BYTES = 16 * 1024
@@ -225,7 +224,7 @@ class DecisionPoint(BaseModel):
 
 
 class SupervisorProposal(BaseModel):
-    """Strict structured advisory output from the blind supervisor."""
+    """Strict transport/schema output from the blind supervisor."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -243,11 +242,7 @@ class SupervisorProposal(BaseModel):
         Field(min_length=1, max_length=MAX_PROPOSAL_BYTES),
     ] | None
     summary: BoundedString
-    referenced_paths: Annotated[
-        tuple[str, ...],
-        BeforeValidator(_freeze_sequence),
-        Field(max_length=MAX_LIST_ITEMS),
-    ]
+    referenced_paths: StringTuple
     required_checks: StringTuple
     assumptions: StringTuple
     questions: StringTuple
@@ -257,25 +252,6 @@ class SupervisorProposal(BaseModel):
     acceptance_change_requested: bool
     convention_change_requested: bool
 
-    @field_validator("referenced_paths")
-    @classmethod
-    def normalize_referenced_paths(
-        cls, value: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        normalized = tuple(normalize_relative_path(item) for item in value)
-        if any(
-            len(item.encode("utf-8")) > MAX_SHADOW_STRING_BYTES
-            for item in normalized
-        ):
-            raise ValueError(
-                "referenced_paths contains a path over the byte limit"
-            )
-        if len(set(normalized)) != len(normalized):
-            raise ValueError(
-                "referenced_paths contains duplicate normalized paths"
-            )
-        return normalized
-
     @field_validator("prompt")
     @classmethod
     def validate_prompt_bytes(cls, value: str | None) -> str | None:
@@ -284,15 +260,6 @@ class SupervisorProposal(BaseModel):
             and len(value.encode("utf-8")) > MAX_PROPOSAL_BYTES
         ):
             raise ValueError("prompt exceeds its UTF-8 byte limit")
-        return value
-
-    @field_validator("required_checks")
-    @classmethod
-    def validate_required_checks(
-        cls, value: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        if len(set(value)) != len(value):
-            raise ValueError("required_checks contains duplicates")
         return value
 
     @model_validator(mode="after")
@@ -306,6 +273,10 @@ class SupervisorProposal(BaseModel):
                 "recommend_human_pause requires a null prompt and a question"
             )
         return self
+
+
+class NormalizedSupervisorProposal(SupervisorProposal):
+    """Persisted proposal after deterministic lexical path normalization."""
 
 
 class BlindInputManifest(BaseModel):
@@ -338,7 +309,13 @@ class PathScopeFinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     path: str
-    reason: Literal["outside_allowed_paths", "protected_path"]
+    reason: Literal[
+        "absolute_outside_workspace",
+        "traversal_escape",
+        "protected_path",
+        "outside_allowed_paths",
+        "duplicate_normalized_path",
+    ]
 
 
 class RequiredCheckCoverage(BaseModel):
@@ -355,6 +332,9 @@ class RequiredCheckCoverage(BaseModel):
     missing_test_ids: Annotated[
         tuple[str, ...], BeforeValidator(_freeze_sequence)
     ]
+    unknown_check_ids: Annotated[
+        tuple[str, ...], BeforeValidator(_freeze_sequence)
+    ] = ()
 
 
 class DeterministicAssessment(BaseModel):

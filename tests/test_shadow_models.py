@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,7 @@ def test_shadow_specification_is_strict_and_thresholds_are_bounded(
         ShadowSpecification.model_validate(invalid)
 
 
-def test_supervisor_proposal_requires_exact_disposition_and_normalized_paths() -> None:
+def test_supervisor_proposal_requires_exact_disposition() -> None:
     proposal = SupervisorProposal.model_validate_json(
         supervisor_proposal("worker_initial")
     )
@@ -66,6 +67,27 @@ def test_supervisor_proposal_requires_exact_disposition_and_normalized_paths() -
     value["questions"] = ["Which interpretation is authoritative?"]
     paused = SupervisorProposal.model_validate(value)
     assert paused.prompt is None
+
+
+def test_supervisor_proposal_transport_accepts_semantic_path_violations() -> None:
+    value = json.loads(supervisor_proposal("worker_initial"))
+    value["referenced_paths"] = [
+        "/workspace/src/output.txt",
+        "../escape.txt",
+        "src\\output.txt",
+        "src/output.txt",
+    ]
+    value["required_checks"] = ["fixed-test", "fixed-test"]
+
+    proposal = SupervisorProposal.model_validate(value)
+
+    assert proposal.referenced_paths == (
+        "/workspace/src/output.txt",
+        "../escape.txt",
+        "src\\output.txt",
+        "src/output.txt",
+    )
+    assert proposal.required_checks == ("fixed-test", "fixed-test")
 
 
 def test_unsafe_human_review_requires_a_blocking_issue() -> None:
