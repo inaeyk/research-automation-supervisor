@@ -371,6 +371,11 @@ class LiveShadowState(BaseModel):
     supervisor_model: ModelName
     supervisor_reasoning_effort: ReasoningEffort
     supervisor_session_id: SupervisorUUID | None
+    supervisor_session_usable: bool = True
+    auth_confidentiality_enabled: bool = True
+    auth_protected_value_count: Annotated[int, Field(ge=1)] = 1
+    auth_scan_completed: bool = True
+    auth_confidentiality_violation_detected: bool = False
     observed_decision_ids: StringTuple
     proposal_ids: StringTuple
     comparison_ids: StringTuple
@@ -442,6 +447,11 @@ class LiveShadowResult(BaseModel):
     supervisor_model: ModelName
     supervisor_reasoning_effort: ReasoningEffort
     supervisor_session_id: SupervisorUUID | None
+    supervisor_session_usable: bool = True
+    auth_confidentiality_enabled: bool = True
+    auth_protected_value_count: Annotated[int, Field(ge=1)] = 1
+    auth_scan_completed: bool = True
+    auth_confidentiality_violation_detected: bool = False
     observed_decision_count: Annotated[int, Field(ge=0)]
     proposal_count: Annotated[int, Field(ge=0)]
     comparison_count: Annotated[int, Field(ge=0)]

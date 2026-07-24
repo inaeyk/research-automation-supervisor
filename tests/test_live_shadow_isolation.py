@@ -12,9 +12,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import pytest
 
+from research_automation_supervisor.auth_confidentiality import (
+    load_authentication_confidentiality,
+)
 from research_automation_supervisor.codex_adapter import (
     CodexProcessLaunch,
     build_codex_command,
@@ -67,6 +71,101 @@ from tests.workflow_helpers import (
     git,
     worker_result,
 )
+
+
+def test_authentication_fragments_cover_sensitive_encodings_without_repr(
+    tmp_path: Path,
+) -> None:
+    access = "ACCESS-unique-0123456789/+"
+    refresh = "REFRESH-unique-9876543210_-"
+    jwt = (
+        "eyJhbGciOiJIUzI1NiJ9."
+        "eyJzdWIiOiJ1bmlxdWUtdXNlciJ9."
+        "uniquesignaturevalue"
+    )
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps(
+            {
+                "mode": "subscription",
+                "provider": "openai",
+                "expires_at": "2099-01-01",
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": refresh,
+                },
+                "identity": jwt,
+            }
+        ),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=(tmp_path / "forbidden", tmp_path / "runs"),
+    )
+    fragments = protection.text_fragments()
+    assert protection.enabled is True
+    assert protection.scan_completed is True
+    assert protection.protected_logical_value_count == 4
+    for secret in (access, refresh, jwt):
+        raw = secret.encode("utf-8")
+        assert secret in fragments
+        assert base64.b64encode(raw).decode("ascii") in fragments
+        assert base64.urlsafe_b64encode(raw).decode("ascii") in fragments
+        assert raw.hex() in fragments
+        assert quote(secret, safe="") in fragments
+        assert f"Bearer {secret}" in fragments
+        assert protection.contains_bytes(raw)
+    rendered = repr(protection)
+    assert access not in rendered
+    assert refresh not in rendered
+    assert jwt not in rendered
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("symlink", "nonregular", "malformed", "forbidden", "unsafe_field"),
+)
+def test_authentication_derivation_fails_closed_safely(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    target = tmp_path / "target-auth.json"
+    target.write_text(
+        json.dumps({"access_token": "unique-secret-0123456789"}),
+        encoding="utf-8",
+    )
+    auth = target
+    forbidden = tmp_path / "forbidden"
+    forbidden.mkdir()
+    if kind == "symlink":
+        auth = tmp_path / "auth.json"
+        auth.symlink_to(target)
+    elif kind == "nonregular":
+        auth = tmp_path / "auth-dir"
+        auth.mkdir()
+    elif kind == "malformed":
+        auth.write_text("{not-json", encoding="utf-8")
+    elif kind == "forbidden":
+        auth = forbidden / "auth.json"
+        auth.write_text(
+            json.dumps({"access_token": "unique-secret-0123456789"}),
+            encoding="utf-8",
+        )
+    elif kind == "unsafe_field":
+        auth.write_text(
+            json.dumps({"access_token": {"value": 123}}),
+            encoding="utf-8",
+        )
+    with pytest.raises(
+        LiveShadowDependencyError,
+        match="authentication is unavailable",
+    ) as captured:
+        load_authentication_confidentiality(
+            auth,
+            forbidden_roots=(forbidden, tmp_path / "runs"),
+        )
+    assert "unique-secret" not in str(captured.value)
 
 
 def _prepared_supervisor(
@@ -606,6 +705,7 @@ def _write_isolation_fake(
     path: Path,
     *,
     authoritative_workspace: Path,
+    authoritative_stage2_runs: Path,
     worker_release: Path,
     future_sentinel: str,
 ) -> None:
@@ -614,6 +714,9 @@ def _write_isolation_fake(
     ).decode("ascii")
     release_b64 = base64.b64encode(
         str(worker_release).encode("utf-8")
+    ).decode("ascii")
+    stage2_b64 = base64.b64encode(
+        str(authoritative_stage2_runs).encode("utf-8")
     ).decode("ascii")
     sentinel_b64 = base64.b64encode(future_sentinel.encode("utf-8")).decode(
         "ascii"
@@ -631,6 +734,7 @@ import time
 from pathlib import Path
 
 WORKSPACE = base64.b64decode({workspace_b64!r}).decode()
+STAGE2_RUNS = base64.b64decode({stage2_b64!r}).decode()
 WORKER_RELEASE = base64.b64decode({release_b64!r}).decode()
 SENTINEL = base64.b64decode({sentinel_b64!r}).decode()
 SUPERVISOR_UUID = {SUPERVISOR_UUID!r}
@@ -652,15 +756,15 @@ def direct_read(target):
     except OSError:
         return True
 
-def supervisor():
+def supervisor(blind_stdin):
     home = Path("/home/supervisor")
+    auth_object = json.loads(
+        (home / "auth.json").read_text(encoding="utf-8")
+    )
     release = home / "probe-release"
-    targets = home / "targets.json"
     deadline = time.monotonic() + 15
-    while (not release.is_file() or not targets.is_file()) and time.monotonic() < deadline:
+    while not release.is_file() and time.monotonic() < deadline:
         time.sleep(0.01)
-    target_data = json.loads(targets.read_text(encoding="utf-8"))
-    stage2 = target_data["stage2_run"]
     turn_path = home / "turn-count"
     turn = int(turn_path.read_text(encoding="ascii")) + 1 if turn_path.exists() else 1
     turn_path.write_text(str(turn), encoding="ascii")
@@ -714,8 +818,8 @@ def supervisor():
         "exact_resume": exact_resume,
         "workspace_absent": not os.path.exists(WORKSPACE),
         "workspace_read_denied": direct_read(WORKSPACE),
-        "stage2_absent": not os.path.exists(stage2),
-        "stage2_read_denied": direct_read(stage2),
+        "stage2_absent": not os.path.exists(STAGE2_RUNS),
+        "stage2_read_denied": direct_read(STAGE2_RUNS),
         "proc_self_denied": direct_read("/proc/self/root" + WORKSPACE),
         "proc_1_denied": direct_read("/proc/1/root" + WORKSPACE),
         "proc_self_root": os.readlink("/proc/self/root"),
@@ -723,10 +827,14 @@ def supervisor():
         "home_entries": home_entries,
         "mnt_entries": mnt_entries,
         "future_sentinel_found": root_found,
+        "stdin_future_sentinel_absent": SENTINEL.encode() not in blind_stdin,
+        "stdin_authoritative_workspace_absent": WORKSPACE.encode() not in blind_stdin,
+        "stdin_stage2_locator_absent": STAGE2_RUNS.encode() not in blind_stdin,
         "unexpected_fds": inherited,
         "workspace_read_only": workspace_read_only,
         "schema_readable": Path("/control/output-schema.json").is_file(),
         "auth_readable": Path("/home/supervisor/auth.json").is_file(),
+        "auth_used": bool(auth_object.get("token")),
         "auth_read_only": auth_read_only,
         "home": os.environ.get("HOME"),
         "codex_home": os.environ.get("CODEX_HOME"),
@@ -747,8 +855,8 @@ def main():
     sandbox = option("--sandbox")
     ephemeral = "--ephemeral" in sys.argv
     if sandbox == "read-only" and not ephemeral:
-        sys.stdin.buffer.read()
-        return supervisor()
+        blind_stdin = sys.stdin.buffer.read()
+        return supervisor(blind_stdin)
     if sandbox == "workspace-write":
         Path({str(worker_release.parent / "worker-ready")!r}).write_text("ready")
         deadline = time.monotonic() + 15
@@ -813,6 +921,7 @@ def test_real_bubblewrap_denies_authority_proc_roots_and_future_sentinel(
     _write_isolation_fake(
         fake,
         authoritative_workspace=project,
+        authoritative_stage2_runs=tmp_path / "stage2-runs",
         worker_release=worker_release,
         future_sentinel=future_sentinel,
     )
@@ -875,10 +984,6 @@ def test_real_bubblewrap_denies_authority_proc_roots_and_future_sentinel(
         encoding="ascii",
     )
     runtime_home = run_directory / "quarantine" / "codex-home"
-    (runtime_home / "targets.json").write_text(
-        json.dumps({"stage2_run": str(stage2_run)}),
-        encoding="utf-8",
-    )
     (runtime_home / "probe-release").write_text("release", encoding="ascii")
     worker_release.write_text("release", encoding="ascii")
     thread.join(timeout=20)
@@ -908,10 +1013,14 @@ def test_real_bubblewrap_denies_authority_proc_roots_and_future_sentinel(
         assert report["home_entries"] == ["supervisor"]
         assert report["mnt_entries"] == []
         assert report["future_sentinel_found"] is False
+        assert report["stdin_future_sentinel_absent"] is True
+        assert report["stdin_authoritative_workspace_absent"] is True
+        assert report["stdin_stage2_locator_absent"] is True
         assert report["unexpected_fds"] == []
         assert report["workspace_read_only"] is True
         assert report["schema_readable"] is True
         assert report["auth_readable"] is True
+        assert report["auth_used"] is True
         assert report["auth_read_only"] is True
         assert report["home"] == ISOLATED_HOME
         assert report["codex_home"] == ISOLATED_HOME
@@ -957,3 +1066,204 @@ def test_real_bubblewrap_denies_authority_proc_roots_and_future_sentinel(
             content = artifact.read_bytes()
             assert sentinel_bytes not in content, artifact
             assert auth_bytes not in content, artifact
+
+
+def _write_auth_exfiltration_fake(path: Path) -> None:
+    worker_final = worker_result()
+    auditor_final = auditor_result()
+    source = f"""#!/usr/bin/python3
+import base64
+import json
+import sys
+from pathlib import Path
+from urllib.parse import quote, quote_plus
+
+WORKER_UUID = {SOURCE_WORKER_UUID!r}
+AUDITOR_UUID = {SOURCE_AUDITOR_UUID!r}
+SUPERVISOR_UUID = {SUPERVISOR_UUID!r}
+
+def option(name):
+    index = sys.argv.index(name)
+    return sys.argv[index + 1]
+
+def main():
+    if sys.argv[1:] == ["--version"]:
+        print("codex-cli 0.200.0")
+        return 0
+    sandbox = option("--sandbox")
+    ephemeral = "--ephemeral" in sys.argv
+    sys.stdin.buffer.read()
+    if sandbox == "read-only" and not ephemeral:
+        auth_text = Path("/home/supervisor/auth.json").read_text(encoding="utf-8")
+        token = json.loads(auth_text)["access_token"]
+        raw = token.encode()
+        forms = [
+            token,
+            json.dumps(token)[1:-1],
+            base64.b64encode(raw).decode(),
+            base64.urlsafe_b64encode(raw).decode(),
+            raw.hex(),
+            "Bearer " + token,
+            quote(token, safe=""),
+            quote_plus(token, safe=""),
+        ]
+        home = Path("/home/supervisor")
+        count_path = home / "supervisor-launch-count"
+        count = int(count_path.read_text()) + 1 if count_path.exists() else 1
+        count_path.write_text(str(count), encoding="ascii")
+        (home / "auth-read-ok").write_text("yes", encoding="ascii")
+        (home / "copied-auth.txt").write_text(forms[2], encoding="utf-8")
+        Path("/action/arbitrary-copy.bin").write_bytes(
+            ("\\n".join(forms)).encode("utf-8")
+        )
+        Path(option("--output-last-message")).write_text(
+            json.dumps({{"proposal_kind": "worker_initial", "prompt": forms[5]}}),
+            encoding="utf-8",
+        )
+        print(json.dumps({{"type": "thread.started", "thread_id": SUPERVISOR_UUID}}))
+        print(json.dumps({{"type": "auth.copy", "value": forms[0]}}))
+        print(forms[3])
+        print(forms[4], file=sys.stderr)
+        return 0
+    if sandbox == "workspace-write":
+        final = {worker_final!r}
+        thread = WORKER_UUID
+    else:
+        final = {auditor_final!r}
+        thread = AUDITOR_UUID
+    Path(option("--output-last-message")).write_text(final, encoding="utf-8")
+    print(json.dumps({{"type": "thread.started", "thread_id": thread}}))
+    return 0
+
+raise SystemExit(main())
+"""
+    path.write_text(source, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def test_real_bubblewrap_rejects_and_scrubs_authentication_exfiltration(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if not Path("/usr/bin/bwrap").is_file():
+        pytest.skip("Bubblewrap executable genuinely does not exist")
+    probe = subprocess.run(
+        [
+            "/usr/bin/bwrap",
+            "--unshare-user",
+            "--unshare-pid",
+            "--proc",
+            "/proc",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--",
+            "/usr/bin/true",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        close_fds=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("Bubblewrap user namespaces are genuinely unavailable")
+    spec, _, _, _, base_services = create_live_shadow_tree(tmp_path)
+    fake = tmp_path / "auth-exfiltration-fake-codex"
+    _write_auth_exfiltration_fake(fake)
+    unique = hashlib.sha256(os.urandom(32)).hexdigest()
+    auth_secret = f'AUTH-{unique}/+\\"END'
+    auth = tmp_path / "subscription-auth.json"
+    auth.write_text(
+        json.dumps(
+            {
+                "auth_mode": "subscription",
+                "provider": "openai",
+                "access_token": auth_secret,
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    services = replace(
+        base_services,
+        codex_executable=str(fake),
+        supervisor_invoker=None,
+        isolation_preflight=preflight_bubblewrap_isolation,
+        bubblewrap_executable="/usr/bin/bwrap",
+        codex_authentication_file=auth,
+        environ={
+            key: value
+            for key, value in os.environ.items()
+            if key != "FAKE_CODEX_CONFIG"
+        },
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    assert result.status == "shadow_degraded"
+    assert result.authoritative_stage2_status == "completed"
+    assert result.auth_confidentiality_violation_detected is True
+    assert result.supervisor_session_usable is False
+    assert result.proposal_count == 2
+    run_directory = Path(result.artifact_directory)
+    state = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    assert any(
+        failure["reason"] == "auth_confidentiality_violation"
+        for failure in state["shadow_failures"]
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    assert not (runtime_home / "copied-auth.txt").exists()
+    assert (
+        runtime_home / "supervisor-launch-count"
+    ).read_text(encoding="ascii") == "1"
+    assert not (
+        run_directory
+        / "proposals/auditor-r000-a002/stage1-run/stage2-completion.json"
+    ).exists()
+    first_metadata = json.loads(
+        (
+            run_directory
+            / "proposals/worker_initial-r000-a001/stage1-run/metadata.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert first_metadata["confidentiality_violation_detected"] is True
+    assert "<AUTHENTICATION_FILE>" in first_metadata["command"]
+    assert str(auth) not in first_metadata["command"]
+    raw = auth_secret.encode("utf-8")
+    protected = {
+        raw,
+        json.dumps(auth_secret)[1:-1].encode("utf-8"),
+        base64.b64encode(raw),
+        base64.urlsafe_b64encode(raw),
+        raw.hex().encode("ascii"),
+        raw.hex().upper().encode("ascii"),
+        f"Bearer {auth_secret}".encode(),
+        quote(auth_secret, safe="").encode("ascii"),
+        quote_plus(auth_secret, safe="").encode("ascii"),
+    }
+    report_bytes = json.dumps(
+        live_shadow_report(run_directory, services=services),
+        sort_keys=True,
+    ).encode("utf-8")
+    captured = capsys.readouterr()
+    captured_bytes = (
+        captured.out + captured.err
+    ).encode("utf-8", errors="replace")
+    for fragment in protected:
+        assert fragment not in report_bytes
+        assert fragment not in captured_bytes
+        for artifact in run_directory.rglob("*"):
+            if artifact.is_file():
+                assert fragment not in artifact.read_bytes(), artifact

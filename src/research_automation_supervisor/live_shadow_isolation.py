@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -12,6 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
+from research_automation_supervisor.auth_confidentiality import (
+    AuthenticationConfidentiality,
+    load_authentication_confidentiality,
+)
 from research_automation_supervisor.codex_adapter import CodexProcessLaunch
 from research_automation_supervisor.codex_models import PreparedCodexRequest
 from research_automation_supervisor.errors import (
@@ -30,6 +35,11 @@ ISOLATED_OUTPUT_SCHEMA_PATH = "/control/output-schema.json"
 ISOLATED_HOME = "/home/supervisor"
 ISOLATED_AUTH_PATH = "/home/supervisor/auth.json"
 ISOLATED_TMPDIR = "/tmp"
+RECORDED_AUTH_SOURCE = "<AUTHENTICATION_FILE>"
+MAX_RUNTIME_HOME_FILES = 4096
+MAX_RUNTIME_HOME_DEPTH = 16
+MAX_RUNTIME_HOME_BYTES = 64 * 1024 * 1024
+MAX_RUNTIME_HOME_FILE_BYTES = 16 * 1024 * 1024
 
 _TRUSTED_EXECUTABLE_DIRECTORIES = (
     Path("/usr/bin"),
@@ -123,6 +133,17 @@ class BubblewrapCapability:
 
     identity: BubblewrapBackendIdentity
     authentication_file: Path = field(repr=False, compare=False)
+    authentication_confidentiality: AuthenticationConfidentiality = field(
+        default_factory=lambda: AuthenticationConfidentiality(
+            enabled=True,
+            protected_logical_value_count=1,
+            scan_completed=True,
+            _fragments=(),
+            _byte_fragments=(),
+        ),
+        repr=False,
+        compare=False,
+    )
 
 
 class IsolationPreflight(Protocol):
@@ -165,6 +186,10 @@ def preflight_bubblewrap_isolation(
     if not os.access(codex, os.X_OK):
         raise LiveShadowDependencyError("Codex executable is not executable")
     auth = _resolve_authentication_file(authentication_file, environ)
+    authentication_confidentiality = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=forbidden_roots,
+    )
     help_text = _run_dependency_probe((str(bwrap), "--help"))
     missing = sorted(option for option in _REQUIRED_OPTIONS if option not in help_text)
     if missing:
@@ -259,6 +284,21 @@ def preflight_bubblewrap_isolation(
             capability_result="passed",
         ),
         authentication_file=auth,
+        authentication_confidentiality=authentication_confidentiality,
+    )
+
+
+def resolve_authentication_confidentiality(
+    *,
+    authentication_file: Path | None,
+    environ: Mapping[str, str] | None,
+    forbidden_roots: Sequence[Path],
+) -> AuthenticationConfidentiality:
+    """Derive current auth protection without launching Bubblewrap or Codex."""
+    auth = _resolve_authentication_file(authentication_file, environ)
+    return load_authentication_confidentiality(
+        auth,
+        forbidden_roots=forbidden_roots,
     )
 
 
@@ -318,7 +358,10 @@ def build_bubblewrap_process_launch(
         raise LiveShadowIntegrityError(
             "isolated output schema is outside the exact current decision path"
         )
-    validate_runtime_home_contents(home)
+    validate_runtime_home_contents(
+        home,
+        authentication_confidentiality=capability.authentication_confidentiality,
+    )
 
     codex = _canonical_engine_path(
         Path(semantic_command[0]),
@@ -432,7 +475,7 @@ def verify_recorded_bubblewrap_command(
         or not action_source.name.startswith("research-supervisor-codex-")
         or (
             authentication_file is not None
-            and auth_source != authentication_file
+            and auth_source != Path(RECORDED_AUTH_SOURCE)
         )
     ):
         raise LiveShadowIntegrityError(
@@ -444,12 +487,25 @@ def verify_recorded_bubblewrap_command(
         output_schema=Path(pending.output_schema_path),
         runtime_home=runtime_home,
         codex_executable=Path(pending.codex_executable),
-        authentication_file=auth_source,
+        authentication_file=(
+            authentication_file
+            if authentication_file is not None
+            else auth_source
+        ),
     )
     expected = _bubblewrap_prefix(
         Path(identity.canonical_bubblewrap_path),
         mounts,
     )
+    expected = [
+        (
+            RECORDED_AUTH_SOURCE
+            if authentication_file is not None
+            and item == str(authentication_file)
+            else item
+        )
+        for item in expected
+    ]
     common = [
         "-c",
         f"model_reasoning_effort={pending.reasoning_effort}",
@@ -864,28 +920,224 @@ def _canonical_forbidden_root(roots: Sequence[Path], index: int) -> Path:
         raise LiveShadowIntegrityError("forbidden root could not be resolved") from exc
 
 
-def validate_runtime_home_contents(runtime_home: Path) -> None:
+def validate_runtime_home_contents(
+    runtime_home: Path,
+    *,
+    authentication_confidentiality: AuthenticationConfidentiality | None = None,
+    forbidden_fragments: Sequence[bytes] = (),
+) -> None:
+    """Read-only validation of the complete bounded persistent runtime home."""
+    findings = _scan_runtime_home(
+        runtime_home,
+        authentication_confidentiality=authentication_confidentiality,
+        forbidden_fragments=forbidden_fragments,
+        scrub=False,
+    )
+    if findings:
+        raise LiveShadowIntegrityError(
+            "Codex runtime home failed its clean-content invariant"
+        )
+
+
+def scrub_runtime_home_contamination(
+    runtime_home: Path,
+    *,
+    authentication_confidentiality: AuthenticationConfidentiality,
+    forbidden_fragments: Sequence[bytes] = (),
+) -> tuple[str, ...]:
+    """Remove contaminated engine-owned entries and return only safe categories."""
+    return _scan_runtime_home(
+        runtime_home,
+        authentication_confidentiality=authentication_confidentiality,
+        forbidden_fragments=forbidden_fragments,
+        scrub=True,
+    )
+
+
+def _scan_runtime_home(
+    runtime_home: Path,
+    *,
+    authentication_confidentiality: AuthenticationConfidentiality | None,
+    forbidden_fragments: Sequence[bytes],
+    scrub: bool,
+) -> tuple[str, ...]:
     try:
-        for current, directories, files in os.walk(
-            runtime_home,
-            topdown=True,
-            followlinks=False,
-        ):
-            current_path = Path(current)
-            for name in (*directories, *files):
-                path = current_path / name
-                if path.is_symlink():
-                    raise LiveShadowIntegrityError(
-                        "Codex runtime home contains a symlink"
-                    )
-            if ".git" in directories or ".git" in files:
-                raise LiveShadowIntegrityError(
-                    "Codex runtime home contains repository material"
-                )
+        root_status = runtime_home.lstat()
     except OSError as exc:
         raise LiveShadowIntegrityError(
             "Codex runtime home could not be checked"
         ) from exc
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or runtime_home.is_symlink()
+        or os.path.ismount(runtime_home)
+    ):
+        raise LiveShadowIntegrityError(
+            "Codex runtime home is not an exact engine-owned directory"
+        )
+    forbidden = tuple(
+        sorted(
+            {fragment for fragment in forbidden_fragments if len(fragment) >= 8},
+            key=lambda item: (-len(item), item),
+        )
+    )
+    findings: set[str] = set()
+    file_count = 0
+    total_bytes = 0
+    stack = [runtime_home]
+    try:
+        while stack:
+            directory = stack.pop()
+            depth = len(directory.relative_to(runtime_home).parts)
+            if depth > MAX_RUNTIME_HOME_DEPTH:
+                findings.add("runtime_home_bound_violation")
+                if scrub:
+                    _scrub_runtime_home(runtime_home)
+                    return tuple(sorted(findings))
+                continue
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+            for entry in entries:
+                path = directory / entry.name
+                file_count += 1
+                if file_count > MAX_RUNTIME_HOME_FILES:
+                    findings.add("runtime_home_bound_violation")
+                    if scrub:
+                        _scrub_runtime_home(runtime_home)
+                        return tuple(sorted(findings))
+                    continue
+                status = entry.stat(follow_symlinks=False)
+                if entry.is_symlink():
+                    findings.add("runtime_home_symlink")
+                    if scrub:
+                        path.unlink()
+                        _fsync_directory(directory)
+                    continue
+                if entry.name == ".git":
+                    findings.add("runtime_home_repository_material")
+                    if scrub:
+                        _remove_runtime_entry(path, status)
+                        _fsync_directory(directory)
+                    continue
+                if stat.S_ISDIR(status.st_mode):
+                    stack.append(path)
+                    continue
+                if not stat.S_ISREG(status.st_mode):
+                    findings.add("runtime_home_nonregular_entry")
+                    if scrub:
+                        _remove_runtime_entry(path, status)
+                        _fsync_directory(directory)
+                    continue
+                if status.st_nlink != 1:
+                    findings.add("runtime_home_hard_link")
+                    if scrub:
+                        path.unlink()
+                        _fsync_directory(directory)
+                    continue
+                total_bytes += status.st_size
+                if (
+                    status.st_size > MAX_RUNTIME_HOME_FILE_BYTES
+                    or total_bytes > MAX_RUNTIME_HOME_BYTES
+                ):
+                    findings.add("runtime_home_bound_violation")
+                    if scrub:
+                        _scrub_runtime_home(runtime_home)
+                        return tuple(sorted(findings))
+                    continue
+                content = _read_runtime_regular_file(path, status)
+                auth_match = (
+                    authentication_confidentiality is not None
+                    and authentication_confidentiality.contains_bytes(content)
+                )
+                forbidden_match = any(fragment in content for fragment in forbidden)
+                if auth_match:
+                    findings.add("auth_confidentiality_violation")
+                if forbidden_match:
+                    findings.add("runtime_home_forbidden_content")
+                if scrub and (auth_match or forbidden_match):
+                    path.unlink()
+                    _fsync_directory(directory)
+    except OSError as exc:
+        if scrub:
+            try:
+                _scrub_runtime_home(runtime_home)
+            except OSError as scrub_exc:
+                raise LiveShadowIntegrityError(
+                    "Codex runtime-home contamination could not be scrubbed"
+                ) from scrub_exc
+        raise LiveShadowIntegrityError(
+            "Codex runtime home could not be checked"
+        ) from exc
+    if scrub and findings:
+        validate_runtime_home_contents(
+            runtime_home,
+            authentication_confidentiality=authentication_confidentiality,
+            forbidden_fragments=forbidden_fragments,
+        )
+    return tuple(sorted(findings))
+
+
+def _read_runtime_regular_file(path: Path, expected: os.stat_result) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or (before.st_dev, before.st_ino, before.st_size)
+            != (expected.st_dev, expected.st_ino, expected.st_size)
+        ):
+            raise OSError
+        content = bytearray()
+        while len(content) <= MAX_RUNTIME_HOME_FILE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    64 * 1024,
+                    MAX_RUNTIME_HOME_FILE_BYTES + 1 - len(content),
+                ),
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            len(content) > MAX_RUNTIME_HOME_FILE_BYTES
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise OSError
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def _remove_runtime_entry(path: Path, status: os.stat_result) -> None:
+    if stat.S_ISDIR(status.st_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _scrub_runtime_home(runtime_home: Path) -> None:
+    with os.scandir(runtime_home) as iterator:
+        entries = tuple(iterator)
+    for entry in entries:
+        status = entry.stat(follow_symlinks=False)
+        _remove_runtime_entry(runtime_home / entry.name, status)
+    _fsync_directory(runtime_home)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

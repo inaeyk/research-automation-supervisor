@@ -55,6 +55,8 @@ def create_live_shadow_tree(
     *,
     supervisor_responses: list[dict[str, object]] | None = None,
     stage2_responses: list[dict[str, object]] | None = None,
+    max_repair_rounds: int = 2,
+    test_requires_marker: bool = False,
 ) -> tuple[Path, Path, Path, Path, LiveShadowServices]:
     stage2_spec, project, fake = create_workflow_tree(
         tmp_path / "stage2",
@@ -71,6 +73,8 @@ def create_live_shadow_tree(
                 auditor_result(),
             ),
         ],
+        max_repair_rounds=max_repair_rounds,
+        test_requires_marker=test_requires_marker,
     )
     control = tmp_path / "live-control"
     control.mkdir()

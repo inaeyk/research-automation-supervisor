@@ -8,6 +8,7 @@ import os
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -120,12 +121,14 @@ class _ProcessObservation:
     stderr_bytes: int = 0
     stderr: bytearray = field(default_factory=bytearray)
     launch_error: str | None = None
+    confidentiality_violation_detected: bool = False
 
 
 @dataclass
 class _EventProcessor:
     destination: Any
     sensitive_values: tuple[str, ...]
+    rejected_values: tuple[bytes, ...] = ()
     pending: bytearray = field(default_factory=bytearray)
     event_count: int = 0
     malformed_hashes: list[str] = field(default_factory=list)
@@ -133,6 +136,7 @@ class _EventProcessor:
     identifier_kind: str | None = None
     identifier_value: str | None = None
     started_thread_ids: list[str] = field(default_factory=list)
+    confidentiality_violation_detected: bool = False
 
     def feed(self, chunk: bytes) -> None:
         """Accept a bounded stdout chunk and emit all complete redacted events."""
@@ -155,6 +159,9 @@ class _EventProcessor:
     def _process_line(self, line: bytes) -> None:
         if not line.strip():
             return
+        rejected = _contains_confidential_fragment(line, self.rejected_values)
+        if rejected:
+            self.confidentiality_violation_detected = True
         try:
             value = json.loads(line.decode("utf-8"), parse_constant=_reject_json_constant)
             if not isinstance(value, dict):
@@ -171,7 +178,14 @@ class _EventProcessor:
             kind, identifier = _extract_identifier(value)
             started_thread_id = _extract_started_thread_id(value)
         except Exception:
-            self.malformed_hashes.append(hashlib.sha256(line).hexdigest())
+            malformed_evidence = (
+                b"confidentiality-violation"
+                if rejected
+                else line
+            )
+            self.malformed_hashes.append(
+                hashlib.sha256(malformed_evidence).hexdigest()
+            )
             return
 
         self.event_count += 1
@@ -284,6 +298,8 @@ def run_prepared_codex(
     output_schema: Path | None = None,
     resume_thread_id: str | None = None,
     confidential_fragments: Sequence[str] = (),
+    rejected_confidential_fragments: Sequence[str] = (),
+    durable_command_replacements: Mapping[str, str] | None = None,
     process_launch_builder: ProcessLaunchBuilder | None = None,
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
@@ -315,7 +331,17 @@ def run_prepared_codex(
             key=lambda item: (-len(item), item),
         )
     )
-    _initialize_artifacts(artifact_directory, prepared, sensitive_values)
+    rejected_values = tuple(
+        sorted(
+            {
+                value.encode("utf-8")
+                for value in rejected_confidential_fragments
+                if value
+            },
+            key=lambda item: (-len(item), item),
+        )
+    )
+    _initialize_artifacts(artifact_directory, prepared, redaction_values)
 
     executable_path = str(Path(codex_executable).resolve())
     probe = version_probe or probe_codex_version
@@ -352,7 +378,11 @@ def run_prepared_codex(
             )
         )
         with event_path.open("wb") as event_file:
-            event_processor = _EventProcessor(event_file, redaction_values)
+            event_processor = _EventProcessor(
+                event_file,
+                redaction_values,
+                rejected_values,
+            )
             _run_process(
                 launch.command,
                 prepared,
@@ -363,6 +393,7 @@ def run_prepared_codex(
                 limits,
                 started_monotonic,
                 monotonic,
+                rejected_values,
             )
             event_processor.finish()
 
@@ -371,10 +402,20 @@ def run_prepared_codex(
                 raw_final_bytes = temporary_final.read_bytes()
         except OSError:
             raw_final_bytes = None
+        if _scan_temporary_action_directory(
+            Path(temporary),
+            rejected_values,
+        ):
+            observation.confidentiality_violation_detected = True
 
     ended_monotonic = monotonic()
     ended_at = utc_now()
     duration = max(0.0, ended_monotonic - started_monotonic)
+    if _contains_confidential_fragment(
+        bytes(observation.stderr),
+        rejected_values,
+    ):
+        observation.confidentiality_violation_detected = True
     stderr_text = bytes(observation.stderr).decode("utf-8", errors="replace")
     prompt_text = prepared.prompt_bytes.decode("utf-8")
     redacted_stderr = redact_text(
@@ -385,6 +426,8 @@ def run_prepared_codex(
 
     final_message = ""
     if raw_final_bytes is not None:
+        if _contains_confidential_fragment(raw_final_bytes, rejected_values):
+            observation.confidentiality_violation_detected = True
         final_message = redact_text(
             raw_final_bytes.decode("utf-8", errors="replace"),
             redaction_values,
@@ -409,8 +452,20 @@ def run_prepared_codex(
         event_processor,
         final_message_present,
         permission_evidence,
+        (
+            observation.confidentiality_violation_detected
+            or event_processor.confidentiality_violation_detected
+        ),
     )
-    summary, error = _status_messages(status, observation)
+    confidentiality_violation_detected = (
+        observation.confidentiality_violation_detected
+        or event_processor.confidentiality_violation_detected
+    )
+    summary, error = _status_messages(
+        status,
+        observation,
+        confidentiality_violation_detected,
+    )
     result = _sanitize_result(
         CodexRunResult(
             run_id=prepared.request.run_id,
@@ -424,10 +479,13 @@ def run_prepared_codex(
             malformed_event_count=len(event_processor.malformed_hashes),
             final_message_present=final_message_present,
             permission_evidence=permission_evidence,
+            confidentiality_violation_detected=(
+                confidentiality_violation_detected
+            ),
             summary=summary,
             error=error,
         ),
-        sensitive_values,
+        redaction_values,
     )
 
     metadata = _build_metadata(
@@ -447,10 +505,14 @@ def run_prepared_codex(
         output_schema=resolved_output_schema,
         resume_thread_id=resume_thread_id,
         limits=limits,
+        confidentiality_violation_detected=(
+            confidentiality_violation_detected
+        ),
+        durable_command_replacements=durable_command_replacements or {},
     )
     _atomic_write_json(
         artifact_directory / "metadata.json",
-        redact_json(metadata, sensitive_values),
+        redact_json(metadata, redaction_values),
     )
     _atomic_write_json(
         artifact_directory / "result.json",
@@ -686,6 +748,7 @@ def _run_process(
     limits: AdapterLimits,
     started_monotonic: float,
     monotonic: Monotonic,
+    rejected_values: Sequence[bytes],
 ) -> None:
     try:
         process = subprocess.Popen(
@@ -842,6 +905,8 @@ def _run_process(
                     else:
                         stderr_open = False
                     continue
+                if _contains_confidential_fragment(chunk, rejected_values):
+                    observation.confidentiality_violation_detected = True
                 if stream_name == "stdout":
                     accepted = _accepted_prefix(
                         chunk,
@@ -916,6 +981,90 @@ def _write_prompt_chunk(
 def _accepted_prefix(chunk: bytes, count_before: int, limit: int) -> bytes:
     remaining = max(0, limit - count_before)
     return chunk[:remaining]
+
+
+def _contains_confidential_fragment(
+    value: bytes,
+    fragments: Sequence[bytes],
+) -> bool:
+    return any(fragment in value for fragment in fragments)
+
+
+def _scan_temporary_action_directory(
+    directory: Path,
+    rejected_values: Sequence[bytes],
+) -> bool:
+    """Fail closed on protected bytes or an unscannable writable action entry."""
+    if not rejected_values:
+        return False
+    file_count = 0
+    total_bytes = 0
+    try:
+        for current, directories, files in os.walk(
+            directory,
+            topdown=True,
+            followlinks=False,
+        ):
+            current_path = Path(current)
+            depth = len(current_path.relative_to(directory).parts)
+            if depth > 8:
+                return True
+            for name in (*directories, *files):
+                path = current_path / name
+                status = path.lstat()
+                file_count += 1
+                if file_count > 256 or path.is_symlink():
+                    return True
+                if stat.S_ISDIR(status.st_mode):
+                    continue
+                if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+                    return True
+                if status.st_size > 4 * 1024 * 1024:
+                    return True
+                total_bytes += status.st_size
+                if total_bytes > 8 * 1024 * 1024:
+                    return True
+                flags = os.O_RDONLY
+                if hasattr(os, "O_CLOEXEC"):
+                    flags |= os.O_CLOEXEC
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(path, flags)
+                try:
+                    before = os.fstat(descriptor)
+                    content = bytearray()
+                    while len(content) <= 4 * 1024 * 1024:
+                        chunk = os.read(descriptor, 64 * 1024)
+                        if not chunk:
+                            break
+                        content.extend(chunk)
+                    after = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+                if (
+                    len(content) > 4 * 1024 * 1024
+                    or (
+                        before.st_dev,
+                        before.st_ino,
+                        before.st_size,
+                        before.st_mtime_ns,
+                    )
+                    != (
+                        after.st_dev,
+                        after.st_ino,
+                        after.st_size,
+                        after.st_mtime_ns,
+                    )
+                ):
+                    return True
+                if _contains_confidential_fragment(
+                    bytes(content),
+                    rejected_values,
+                ):
+                    return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
 
 
 def _start_output_limit_termination(
@@ -1033,6 +1182,8 @@ def _build_metadata(
     output_schema: Path | None,
     resume_thread_id: str | None,
     limits: AdapterLimits,
+    confidentiality_violation_detected: bool,
+    durable_command_replacements: Mapping[str, str],
 ) -> dict[str, object]:
     terminating_signal = (
         -observation.exit_code
@@ -1042,6 +1193,10 @@ def _build_metadata(
     recorded_command = list(command)
     recorded_command[recorded_command.index("--output-last-message") + 1] = "<FINAL_MESSAGE_TEMP>"
     recorded_command[-1] = "<PROMPT_FROM_STDIN>"
+    recorded_command = [
+        durable_command_replacements.get(item, item)
+        for item in recorded_command
+    ]
     metadata: dict[str, object] = {
         "schema_version": 1,
         "package_version": __version__,
@@ -1105,6 +1260,8 @@ def _build_metadata(
             (artifact_directory / "final-message.md").read_bytes()
         ).hexdigest(),
     }
+    if confidentiality_violation_detected:
+        metadata["confidentiality_violation_detected"] = True
     return metadata
 
 
@@ -1152,6 +1309,7 @@ def _classify_status(
     events: _EventProcessor,
     final_message_present: bool,
     permission_evidence: bool,
+    confidentiality_violation_detected: bool,
 ) -> RunStatus:
     if not observation.launched or observation.launch_error is not None:
         return "launch_failed"
@@ -1159,6 +1317,8 @@ def _classify_status(
         return "timed_out"
     if observation.termination_reason == "output_limit":
         return "output_limit_exceeded"
+    if confidentiality_violation_detected:
+        return "process_failed"
     if permission_evidence:
         return "permission_blocked"
     if events.malformed_hashes:
@@ -1173,7 +1333,11 @@ def _classify_status(
 def _status_messages(
     status: RunStatus,
     observation: _ProcessObservation,
+    confidentiality_violation_detected: bool = False,
 ) -> tuple[str, str | None]:
+    if confidentiality_violation_detected:
+        message = "Codex emitted protected confidential content."
+        return message, message
     messages: Mapping[RunStatus, str] = {
         "succeeded": "Codex run succeeded.",
         "launch_failed": "Codex process could not be launched.",
@@ -1208,6 +1372,9 @@ def _sanitize_result(
         malformed_event_count=result.malformed_event_count,
         final_message_present=result.final_message_present,
         permission_evidence=result.permission_evidence,
+        confidentiality_violation_detected=(
+            result.confidentiality_violation_detected
+        ),
         summary=redact_text(result.summary, sensitive_values),
         error=redact_text(result.error, sensitive_values) if result.error is not None else None,
     )

@@ -132,6 +132,10 @@ class CodexMetadata(BaseModel):
     stderr_limit_bytes: Annotated[int, Field(ge=1)]
     final_message_present: bool
     permission_evidence: bool
+    confidentiality_violation_detected: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+    )
     output_limit_stream: Literal["stdout", "stderr"] | None
     thread_id: str | None
     session_id: str | None
@@ -691,6 +695,8 @@ def _verify_codex_process_result(
         or result.malformed_event_count != metadata.malformed_event_count
         or result.final_message_present != metadata.final_message_present
         or result.permission_evidence != metadata.permission_evidence
+        or result.confidentiality_violation_detected
+        != metadata.confidentiality_violation_detected
     ):
         raise WorkflowStateError("Codex normalized result contradicts metadata")
     output_breached = (
@@ -710,6 +716,7 @@ def _verify_codex_process_result(
             and not result.permission_evidence
             and result.error is None
             and not output_breached
+            and not result.confidentiality_violation_detected
         )
     elif result.status == "timed_out":
         valid = metadata.termination_reason == "timeout"
@@ -737,6 +744,7 @@ def _verify_codex_process_result(
             metadata.process_exit_code not in {None, 0}
             or metadata.terminating_signal is not None
             or metadata.stdin_error
+            or metadata.confidentiality_violation_detected
         )
     elif result.status == "launch_failed":
         valid = (

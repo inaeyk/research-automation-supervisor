@@ -23,6 +23,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 
+from research_automation_supervisor.auth_confidentiality import (
+    AuthenticationConfidentiality,
+    load_authentication_confidentiality,
+)
 from research_automation_supervisor.codex_adapter import (
     CodexProcessLaunch,
     build_subprocess_environment,
@@ -47,12 +51,15 @@ from research_automation_supervisor.errors import (
 )
 from research_automation_supervisor.git_evidence import GitBaseline
 from research_automation_supervisor.live_shadow_isolation import (
+    RECORDED_AUTH_SOURCE,
     BubblewrapBackendIdentity,
     BubblewrapCapability,
     IsolationPreflight,
     build_bubblewrap_process_launch,
     load_backend_identity,
     preflight_bubblewrap_isolation,
+    resolve_authentication_confidentiality,
+    scrub_runtime_home_contamination,
     validate_runtime_home_contents,
     verify_recorded_bubblewrap_command,
     write_backend_identity,
@@ -195,6 +202,8 @@ class _LiveContext:
     isolation_dependency_failure: str | None = None
     authoritative_process: subprocess.Popen[bytes] | None = None
     supervisor_task: _SupervisorTask | None = None
+    external_continuation_grace_deadline: float | None = None
+    external_authority_read_failures: int = 0
 
 
 @dataclass
@@ -295,7 +304,15 @@ def run_live_shadow(
         raise LiveShadowInputError("live-shadow run directory could not be created") from exc
 
     now = _utc_string(services.utc_now())
-    state = _initial_state(run_directory, prepared, token=token, timestamp=now)
+    state = _initial_state(
+        run_directory,
+        prepared,
+        token=token,
+        timestamp=now,
+        authentication_confidentiality=(
+            capability.authentication_confidentiality
+        ),
+    )
     _initialize_artifacts(run_directory, prepared, capability.identity)
     _persist_state(run_directory, state, prepared)
     state = _journal_event(
@@ -438,6 +455,40 @@ def resume_live_shadow(
         isolation_capability=capability,
         isolation_dependency_failure=isolation_failure,
     )
+    if context.isolation_capability is not None:
+        confidentiality = _refresh_authentication_confidentiality(
+            context
+        )
+        runtime_findings = scrub_runtime_home_contamination(
+            _codex_runtime_home(context.run_directory),
+            authentication_confidentiality=confidentiality,
+            forbidden_fragments=_runtime_forbidden_fragments(context),
+        )
+        if runtime_findings:
+            auth_violation = (
+                "auth_confidentiality_violation" in runtime_findings
+            )
+            if context.state.pending_action is not None:
+                _record_failed_proposal(
+                    context,
+                    context.state.pending_action,
+                    (
+                        "auth_confidentiality_violation"
+                        if auth_violation
+                        else "runtime_home_contamination"
+                    ),
+                    (
+                        "Recovery found and scrubbed persistent supervisor "
+                        "runtime-home contamination."
+                    ),
+                    session_unusable=True,
+                    auth_violation=auth_violation,
+                )
+            else:
+                context.state = _record_runtime_home_failure(
+                    context,
+                    auth_violation=auth_violation,
+                )
     if (
         isolation_failure is not None
         and not any(
@@ -455,14 +506,24 @@ def resume_live_shadow(
     return _drive(context)
 
 
-def live_shadow_status(run_directory: Path) -> LiveShadowResult:
+def live_shadow_status(
+    run_directory: Path,
+    *,
+    services: LiveShadowServices = DEFAULT_LIVE_SHADOW_SERVICES,
+) -> LiveShadowResult:
     """Read and integrity-check Stage 4 without writes or launches."""
-    sensitive_values = _sensitive_values(None)
+    sensitive_values = _sensitive_values(services.environ)
     raw_run = _preflight_locator(run_directory, sensitive_values, "live-shadow run")
     resolved = _resolve_run_directory(Path(raw_run))
     state, prepared = _load_stable_run(
         resolved,
-        DEFAULT_LIVE_SHADOW_SERVICES,
+        services,
+    )
+    _validate_runtime_home_for_read(
+        resolved,
+        state,
+        prepared,
+        services,
     )
     return _result_for_state(state, prepared)
 
@@ -534,14 +595,24 @@ def record_live_shadow_review(
     return _result_for_state(state, prepared)
 
 
-def live_shadow_report(run_directory: Path) -> dict[str, object]:
+def live_shadow_report(
+    run_directory: Path,
+    *,
+    services: LiveShadowServices = DEFAULT_LIVE_SHADOW_SERVICES,
+) -> dict[str, object]:
     """Build a deterministic report overlay without writing any artifact."""
-    sensitive_values = _sensitive_values(None)
+    sensitive_values = _sensitive_values(services.environ)
     raw_run = _preflight_locator(run_directory, sensitive_values, "live-shadow run")
     resolved = _resolve_run_directory(Path(raw_run))
     state, prepared = _load_stable_run(
         resolved,
-        DEFAULT_LIVE_SHADOW_SERVICES,
+        services,
+    )
+    _validate_runtime_home_for_read(
+        resolved,
+        state,
+        prepared,
+        services,
     )
     readiness = _readiness_for_state(state, prepared)
     assessments = {
@@ -563,6 +634,19 @@ def live_shadow_report(run_directory: Path) -> dict[str, object]:
             "pause_reason": state.authoritative_pause_reason,
             "result_sha256": state.authoritative_result_sha256,
             "process_exit_code": state.authoritative_process_exit_code,
+        },
+        "authentication_confidentiality": {
+            "enabled": state.auth_confidentiality_enabled,
+            "protected_logical_value_count": (
+                state.auth_protected_value_count
+            ),
+            "scan_completed": state.auth_scan_completed,
+            "violation_detected": (
+                state.auth_confidentiality_violation_detected
+            ),
+            "supervisor_session_usable": (
+                state.supervisor_session_usable
+            ),
         },
         "readiness": readiness.model_dump(mode="json"),
         "assessments": [
@@ -699,6 +783,7 @@ def _initial_state(
     *,
     token: str,
     timestamp: str,
+    authentication_confidentiality: AuthenticationConfidentiality,
 ) -> LiveShadowState:
     return LiveShadowState(
         live_shadow_id=prepared.specification.live_shadow_id,
@@ -723,6 +808,17 @@ def _initial_state(
             prepared.specification.supervisor_reasoning_effort
         ),
         supervisor_session_id=None,
+        supervisor_session_usable=True,
+        auth_confidentiality_enabled=(
+            authentication_confidentiality.enabled
+        ),
+        auth_protected_value_count=(
+            authentication_confidentiality.protected_logical_value_count
+        ),
+        auth_scan_completed=(
+            authentication_confidentiality.scan_completed
+        ),
+        auth_confidentiality_violation_detected=False,
         observed_decision_ids=(),
         proposal_ids=(),
         comparison_ids=(),
@@ -862,6 +958,9 @@ def _launch_authoritative(context: _LiveContext) -> None:
         },
         utc_now=context.services.utc_now,
     )
+    _snapshot_checkpoint(
+        "after_authoritative_launch_intent_before_child_launch"
+    )
     child_source = (
         "import sys\n"
         "from pathlib import Path\n"
@@ -899,6 +998,9 @@ def _launch_authoritative(context: _LiveContext) -> None:
             "authoritative Stage 2 child could not be launched"
         ) from exc
     context.authoritative_process = process
+    _snapshot_checkpoint(
+        "after_authoritative_child_launch_before_identity"
+    )
     start_ticks = _process_start_ticks(process.pid)
     if start_ticks is None:
         # The child is deliberately not signaled: authoritative independence wins
@@ -924,6 +1026,9 @@ def _launch_authoritative(context: _LiveContext) -> None:
     _write_immutable_json(
         launch_path,
         launched.model_dump(mode="json"),
+    )
+    _snapshot_checkpoint(
+        "after_authoritative_child_identity_before_journal"
     )
     context.state = _journal_event(
         context.run_directory,
@@ -1011,6 +1116,9 @@ def _discover_authoritative_run(context: _LiveContext) -> None:
         record = existing_record
     else:
         _write_json(record_path, record.model_dump(mode="json"))
+    _snapshot_checkpoint(
+        "after_authoritative_discovery_before_journal"
+    )
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1064,6 +1172,51 @@ def _drive(context: _LiveContext) -> LiveShadowResult:
                     )
                     continue
                 if context.state.authoritative_status is None:
+                    try:
+                        current_result, _, _ = read_stage2_source_for_shadow(
+                            Path(context.state.authoritative_run_directory)
+                        )
+                    except WorkflowStateError as exc:
+                        context.external_authority_read_failures += 1
+                        if context.external_authority_read_failures >= 100:
+                            raise LiveShadowIntegrityError(
+                                "authoritative Stage 2 status could not be verified"
+                            ) from exc
+                        context.services.sleep(
+                            min(poll_seconds, 0.05)
+                        )
+                        continue
+                    context.external_authority_read_failures = 0
+                    if current_result.status in {
+                        "human_paused",
+                        "repair_limit_paused",
+                    }:
+                        if (
+                            context.external_continuation_grace_deadline
+                            is None
+                        ):
+                            context.external_continuation_grace_deadline = (
+                                context.services.monotonic() + 0.5
+                            )
+                        if (
+                            context.services.monotonic()
+                            < context.external_continuation_grace_deadline
+                        ):
+                            context.services.sleep(
+                                min(poll_seconds, 0.05)
+                            )
+                            continue
+                    elif current_result.status not in {
+                        "checkpoint_paused",
+                        "completed",
+                        "failed",
+                        "aborted",
+                    }:
+                        context.external_continuation_grace_deadline = None
+                        context.services.sleep(
+                            min(poll_seconds, 0.05)
+                        )
+                        continue
                     _record_authoritative_terminal(context)
                     progressed = True
                 while _observe_next_authoritative_entry(context):
@@ -1159,7 +1312,7 @@ def _observe_next_authoritative_entry(context: _LiveContext) -> bool:
                 entries,
                 prefix,
                 live_shadow_run_id=context.state.run_token,
-                sensitive_values=_sensitive_values(context.services.environ),
+                sensitive_values=_context_sensitive_values(context),
             )
             decision_id = envelope.decision_id
             expected_ids = (*context.state.observed_decision_ids, decision_id)
@@ -1199,6 +1352,8 @@ def _observe_next_authoritative_entry(context: _LiveContext) -> bool:
                 temporal_or_integrity=True,
             )
             return True
+    if event_type == "decision":
+        _snapshot_checkpoint("before_decision_journal_append")
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1211,6 +1366,8 @@ def _observe_next_authoritative_entry(context: _LiveContext) -> bool:
         artifact_hashes=artifact_hashes,
         utc_now=context.services.utc_now,
     )
+    if event_type == "decision":
+        _snapshot_checkpoint("after_decision_journal_append")
     return True
 
 
@@ -1267,39 +1424,31 @@ def _freeze_decision_artifacts(
     envelope: LiveDecisionEnvelope,
 ) -> dict[str, str]:
     directory = context.run_directory / "decisions" / envelope.decision_id
-    envelope_path = directory / "envelope.json"
-    envelope_hash_path = directory / "envelope.sha256"
-    manifest_path = directory / "blind-input-manifest.json"
-    schema_path = directory / "output-schema.json"
     rendered = build_live_blind_supervisor_prompt(
         context.prepared,
         envelope,
-        sensitive_values=_sensitive_values(context.services.environ),
+        sensitive_values=_context_sensitive_values(context),
     )
-    expected: dict[Path, bytes] = {
-        envelope_path: _render_json_bytes(envelope.model_dump(mode="json")),
-        envelope_hash_path: f"{envelope.envelope_sha256}\n".encode("ascii"),
-        manifest_path: _render_json_bytes(rendered.manifest.model_dump(mode="json")),
-        schema_path: _canonical_json(rendered.output_schema),
+    expected = {
+        "envelope.json": _render_json_bytes(
+            envelope.model_dump(mode="json")
+        ),
+        "envelope.sha256": (
+            f"{envelope.envelope_sha256}\n".encode("ascii")
+        ),
+        "blind-input-manifest.json": _render_json_bytes(
+            rendered.manifest.model_dump(mode="json")
+        ),
+        "output-schema.json": _canonical_json(rendered.output_schema),
     }
-    if directory.exists():
-        for path, content in expected.items():
-            try:
-                if path.read_bytes() != content:
-                    raise LiveShadowIntegrityError(
-                        "existing immutable decision artifact contradicts recapture"
-                    )
-            except OSError as exc:
-                raise LiveShadowIntegrityError(
-                    "existing immutable decision artifact is unreadable"
-                ) from exc
-    else:
-        directory.mkdir(parents=True, exist_ok=False)
-        for path, content in expected.items():
-            _write_bytes(path, content)
+    paths = _prepare_artifact_set(
+        directory,
+        expected,
+        checkpoint_prefix="decision",
+    )
     return {
         str(path): sha256_regular_file(path)
-        for path in sorted(expected, key=str)
+        for path in paths
     }
 
 
@@ -1320,6 +1469,17 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
     if context.isolation_capability is None:
         return
     decision_id = remaining[0]
+    if not context.state.supervisor_session_usable:
+        _finalize_unlaunchable_decision(
+            context,
+            decision_id,
+            "auth_confidentiality_violation",
+            (
+                "The persistent supervisor session is unusable after a typed "
+                "authentication-confidentiality violation."
+            ),
+        )
+        return
     if (
         context.state.supervisor_session_id is None
         and context.state.proposal_ids
@@ -1332,12 +1492,33 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
         )
         return
     envelope = _load_envelope(context.run_directory, decision_id)
+    confidentiality = _refresh_authentication_confidentiality(context)
+    runtime_findings = scrub_runtime_home_contamination(
+        _codex_runtime_home(context.run_directory),
+        authentication_confidentiality=confidentiality,
+        forbidden_fragments=_runtime_forbidden_fragments(context),
+    )
+    if runtime_findings:
+        _finalize_unlaunchable_decision(
+            context,
+            decision_id,
+            (
+                "auth_confidentiality_violation"
+                if "auth_confidentiality_violation" in runtime_findings
+                else "runtime_home_contamination"
+            ),
+            (
+                "The persistent supervisor runtime home failed its clean "
+                "invariant and the session was not used."
+            ),
+        )
+        return
     quarantine_workspace = _quarantine_workspace(context.run_directory)
     _validate_quarantine_workspace(context.run_directory / "quarantine")
     rendered = build_live_blind_supervisor_prompt(
         context.prepared,
         envelope,
-        sensitive_values=_sensitive_values(context.services.environ),
+        sensitive_values=_context_sensitive_values(context),
     )
     proposal_directory = context.run_directory / "proposals" / decision_id
     proposal_directory.mkdir(parents=True, exist_ok=True)
@@ -1410,7 +1591,9 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
                     environ=context.services.environ,
                     output_schema=schema_path,
                     resume_thread_id=pending.resume_session_id,
-                    confidential_fragments=(),
+                    confidential_fragments=(
+                        confidentiality.text_fragments()
+                    ),
                 )
             else:
                 capability = context.isolation_capability
@@ -1449,12 +1632,23 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
                     environ=context.services.environ,
                     output_schema=schema_path,
                     resume_thread_id=pending.resume_session_id,
-                    confidential_fragments=(),
+                    confidential_fragments=(
+                        confidentiality.text_fragments()
+                    ),
+                    rejected_confidential_fragments=(
+                        confidentiality.text_fragments()
+                    ),
+                    durable_command_replacements={
+                        str(capability.authentication_file):
+                        RECORDED_AUTH_SOURCE,
+                    },
                     process_launch_builder=isolated_launch,
                     version_probe=lambda _executable, _environment, _workspace: None,
                 )
-        except BaseException as exc:
-            holder.error = exc
+        except BaseException:
+            holder.error = LiveShadowStateError(
+                "isolated supervisor execution failed"
+            )
 
     holder.thread = threading.Thread(
         target=invoke,
@@ -1513,6 +1707,39 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
             "The supervisor adapter failed; authoritative Stage 2 was unaffected.",
         )
         return
+    capability = context.isolation_capability
+    if capability is None:
+        raise LiveShadowIntegrityError(
+            "supervisor completion lacks authentication protection"
+        )
+    runtime_findings = scrub_runtime_home_contamination(
+        _codex_runtime_home(context.run_directory),
+        authentication_confidentiality=(
+            capability.authentication_confidentiality
+        ),
+        forbidden_fragments=_runtime_forbidden_fragments(context),
+    )
+    if runtime_findings:
+        context.supervisor_task = None
+        auth_violation = (
+            "auth_confidentiality_violation" in runtime_findings
+        )
+        _record_failed_proposal(
+            context,
+            pending,
+            (
+                "auth_confidentiality_violation"
+                if auth_violation
+                else "runtime_home_contamination"
+            ),
+            (
+                "The supervisor runtime home was contaminated and scrubbed; "
+                "the persistent session is unusable."
+            ),
+            session_unusable=True,
+            auth_violation=auth_violation,
+        )
+        return
     envelope = _load_envelope(context.run_directory, pending.proposal_id)
     decision = _proof_decision(envelope)
     try:
@@ -1558,6 +1785,20 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
         _source_session_uuids(context),
     )
     proposal_directory = context.run_directory / "proposals" / pending.proposal_id
+    if proof.adapter_result.confidentiality_violation_detected:
+        context.supervisor_task = None
+        _record_failed_proposal(
+            context,
+            pending,
+            "auth_confidentiality_violation",
+            (
+                "The supervisor emitted protected authentication content; "
+                "redacted transport artifacts were rejected."
+            ),
+            session_unusable=True,
+            auth_violation=True,
+        )
+        return
     result_path = proposal_directory / "supervisor-result.json"
     candidate_path = proposal_directory / "candidate-prompt.md"
     if proof.proposal is None:
@@ -1583,7 +1824,7 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
                 str(result_path),
                 str(candidate_path),
             ),
-            _sensitive_values(context.services.environ),
+            _context_sensitive_values(context),
             label="live supervisor proposal",
         )
     except ShadowInputError:
@@ -1598,8 +1839,7 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
             ),
         )
         return
-    _write_immutable_json(result_path, result_value)
-    _write_immutable_bytes(candidate_path, candidate)
+    result_bytes = _render_json_bytes(result_value)
     record = SupervisorActionRecord(
         action_id=pending.action_id,
         proposal_id=pending.proposal_id,
@@ -1611,13 +1851,25 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
         structured_result_valid=proof.proposal is not None,
         artifact_hashes={
             **proof.artifact_hashes,
-            str(result_path): sha256_regular_file(result_path),
-            str(candidate_path): sha256_regular_file(candidate_path),
+            str(result_path): hashlib.sha256(result_bytes).hexdigest(),
+            str(candidate_path): hashlib.sha256(candidate).hexdigest(),
         },
     )
     record_path = proposal_directory / "supervisor-action.json"
-    _write_immutable_json(record_path, record.model_dump(mode="json"))
+    _prepare_artifact_set(
+        proposal_directory,
+        {
+            result_path.name: result_bytes,
+            candidate_path.name: candidate,
+            record_path.name: _render_json_bytes(
+                record.model_dump(mode="json")
+            ),
+        },
+        checkpoint_prefix="proposal",
+        allowed_directories=("stage1-run",),
+    )
     proposals = (*context.state.proposal_ids, pending.proposal_id)
+    _snapshot_checkpoint("before_proposal_journal_append")
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1642,6 +1894,7 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
         },
         utc_now=context.services.utc_now,
     )
+    _snapshot_checkpoint("after_proposal_journal_append")
     context.supervisor_task = None
     if proof.adapter_result.status != "succeeded":
         context.state = _record_shadow_failure(
@@ -1674,6 +1927,9 @@ def _record_failed_proposal(
     pending: PendingSupervisorAction,
     reason: str,
     detail: str,
+    *,
+    session_unusable: bool = False,
+    auth_violation: bool = False,
 ) -> None:
     proposal_directory = context.run_directory / "proposals" / pending.proposal_id
     proposal_directory.mkdir(parents=True, exist_ok=True)
@@ -1686,14 +1942,28 @@ def _record_failed_proposal(
         "transport_status": "unprovable",
         "proposal": None,
     }
-    _write_immutable_json(result_path, result_value)
-    _write_immutable_bytes(candidate_path, b"")
-    failed_action_path = _write_failed_supervisor_action(
+    failed_action_path = (
+        proposal_directory / "failed-supervisor-action.json"
+    )
+    failed_action = _failed_supervisor_action_record(
         context,
         pending,
         reason,
         detail,
     )
+    _prepare_artifact_set(
+        proposal_directory,
+        {
+            result_path.name: _render_json_bytes(result_value),
+            candidate_path.name: b"",
+            failed_action_path.name: _render_json_bytes(
+                failed_action.model_dump(mode="json")
+            ),
+        },
+        checkpoint_prefix="proposal",
+        allowed_directories=("stage1-run",),
+    )
+    _snapshot_checkpoint("before_proposal_journal_append")
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1705,6 +1975,18 @@ def _record_failed_proposal(
         updates={
             "pending_action": None,
             "proposal_ids": (*context.state.proposal_ids, pending.proposal_id),
+            **(
+                {
+                    "supervisor_session_usable": False,
+                    "auth_confidentiality_violation_detected": True,
+                }
+                if auth_violation
+                else (
+                    {"supervisor_session_usable": False}
+                    if session_unusable
+                    else {}
+                )
+            ),
             "summary": f"Shadow supervisor failure recorded for {pending.proposal_id}.",
         },
         artifact_hashes={
@@ -1714,6 +1996,7 @@ def _record_failed_proposal(
         },
         utc_now=context.services.utc_now,
     )
+    _snapshot_checkpoint("after_proposal_journal_append")
     context.state = _record_shadow_failure(
         context,
         decision_id=pending.proposal_id,
@@ -1777,22 +2060,34 @@ def _finalize_unlaunchable_decision(
     Path(pending.stage1_artifact_directory).mkdir(parents=True, exist_ok=True)
     result_path = proposal_directory / "supervisor-result.json"
     candidate_path = proposal_directory / "candidate-prompt.md"
-    _write_immutable_json(
-        result_path,
-        {
-            "schema_version": 1,
-            "valid": False,
-            "transport_status": "not_launched",
-            "proposal": None,
-        },
+    result_value = {
+        "schema_version": 1,
+        "valid": False,
+        "transport_status": "not_launched",
+        "proposal": None,
+    }
+    failed_action_path = (
+        proposal_directory / "failed-supervisor-action.json"
     )
-    _write_immutable_bytes(candidate_path, b"")
-    failed_action_path = _write_failed_supervisor_action(
+    failed_action = _failed_supervisor_action_record(
         context,
         pending,
         reason,
         detail,
     )
+    _prepare_artifact_set(
+        proposal_directory,
+        {
+            result_path.name: _render_json_bytes(result_value),
+            candidate_path.name: b"",
+            failed_action_path.name: _render_json_bytes(
+                failed_action.model_dump(mode="json")
+            ),
+        },
+        checkpoint_prefix="proposal",
+        allowed_directories=("stage1-run",),
+    )
+    _snapshot_checkpoint("before_proposal_journal_append")
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -1803,6 +2098,18 @@ def _finalize_unlaunchable_decision(
         decision_id=decision_id,
         updates={
             "proposal_ids": (*context.state.proposal_ids, decision_id),
+            **(
+                {
+                    "supervisor_session_usable": False,
+                    "auth_confidentiality_violation_detected": True,
+                }
+                if reason == "auth_confidentiality_violation"
+                else (
+                    {"supervisor_session_usable": False}
+                    if reason == "runtime_home_contamination"
+                    else {}
+                )
+            ),
             "summary": f"Unlaunchable shadow proposal recorded for {decision_id}.",
         },
         artifact_hashes={
@@ -1812,6 +2119,7 @@ def _finalize_unlaunchable_decision(
         },
         utc_now=context.services.utc_now,
     )
+    _snapshot_checkpoint("after_proposal_journal_append")
     context.state = _record_shadow_failure(
         context,
         decision_id=decision_id,
@@ -1821,19 +2129,14 @@ def _finalize_unlaunchable_decision(
     )
 
 
-def _write_failed_supervisor_action(
+def _failed_supervisor_action_record(
     context: _LiveContext,
     pending: PendingSupervisorAction,
     reason: str,
     detail: str,
-) -> Path:
-    path = (
-        context.run_directory
-        / "proposals"
-        / pending.proposal_id
-        / "failed-supervisor-action.json"
-    )
-    candidate = FailedSupervisorActionRecord(
+) -> FailedSupervisorActionRecord:
+    del context
+    return FailedSupervisorActionRecord(
         action_id=pending.action_id,
         proposal_id=pending.proposal_id,
         proposal_kind=pending.proposal_kind,
@@ -1844,27 +2147,8 @@ def _write_failed_supervisor_action(
         output_schema_sha256=pending.output_schema_sha256,
         reason=reason,
         detail=detail,
-        finalized_at=_utc_string(context.services.utc_now()),
+        finalized_at=pending.started_at,
     )
-    if path.exists():
-        existing = _load_model(
-            path,
-            FailedSupervisorActionRecord,
-            "failed supervisor action",
-        )
-        if existing.model_dump(
-            mode="json",
-            exclude={"finalized_at"},
-        ) != candidate.model_dump(
-            mode="json",
-            exclude={"finalized_at"},
-        ):
-            raise LiveShadowStateError(
-                "failed supervisor action contradicts durable recovery"
-            )
-        return path
-    _write_immutable_json(path, candidate.model_dump(mode="json"))
-    return path
 
 
 def _finalize_ready_comparisons(context: _LiveContext) -> None:
@@ -1906,6 +2190,7 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
         )
     except (ValidationError, WorkflowStateError, StopIteration):
         reconstruction_error = True
+    _snapshot_checkpoint("after_authoritative_reconstruction")
     proposal_directory = context.run_directory / "proposals" / proposal_id
     result_value = _read_json(proposal_directory / "supervisor-result.json")
     proposal: NormalizedSupervisorProposal | None
@@ -1942,7 +2227,6 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
     candidate_path = proposal_directory / "candidate-prompt.md"
     candidate_bytes = candidate_path.read_bytes()
     comparison_directory = context.run_directory / "comparisons" / proposal_id
-    comparison_directory.mkdir(parents=True, exist_ok=True)
     comparison_path = comparison_directory / "comparison.json"
     assessment_path = proposal_directory / "assessment.json"
     source_path = comparison_directory / "authoritative-source.md"
@@ -2015,7 +2299,7 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
             ),
             max_proposal_bytes=context.state.max_proposal_bytes,
             session_integrity=session_ok,
-            sensitive_values=_sensitive_values(context.services.environ),
+            sensitive_values=_context_sensitive_values(context),
         )
     comparison_confidentiality_failure = False
     try:
@@ -2038,7 +2322,7 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
                     else b""
                 ),
             ),
-            _sensitive_values(context.services.environ),
+            _context_sensitive_values(context),
             label="live authoritative comparison",
         )
     except ShadowInputError:
@@ -2069,34 +2353,48 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
         )
         reconstruction = None
         comparison_confidentiality_failure = True
+    comparison_expected: dict[str, bytes] = {}
     if (
         comparison.comparison_available
         and reconstruction is not None
         and reconstruction.authoritative_source is not None
         and reconstruction.authoritative_rendered is not None
     ):
-        _write_immutable_bytes(
-            source_path,
-            reconstruction.authoritative_source.content,
+        comparison_expected[source_path.name] = (
+            reconstruction.authoritative_source.content
         )
-        _write_immutable_bytes(
-            rendered_path,
-            reconstruction.authoritative_rendered.content,
+        comparison_expected[rendered_path.name] = (
+            reconstruction.authoritative_rendered.content
         )
-    elif source_path.exists() or rendered_path.exists():
-        raise LiveShadowStateError(
-            "unavailable comparison has orphaned authoritative material"
-        )
-    _write_immutable_json(
-        comparison_path,
-        comparison.model_dump(mode="json"),
+    comparison_expected[comparison_path.name] = _render_json_bytes(
+        comparison.model_dump(mode="json")
     )
-    _write_immutable_json(
-        assessment_path,
-        assessment.model_dump(mode="json"),
+    comparison_paths = _prepare_artifact_set(
+        comparison_directory,
+        comparison_expected,
+        checkpoint_prefix="comparison",
+    )
+    proposal_allowed_files = [
+        "supervisor-result.json",
+        "candidate-prompt.md",
+    ]
+    if record_path.exists():
+        proposal_allowed_files.append("supervisor-action.json")
+    else:
+        proposal_allowed_files.append("failed-supervisor-action.json")
+    _prepare_artifact_set(
+        proposal_directory,
+        {
+            assessment_path.name: _render_json_bytes(
+                assessment.model_dump(mode="json")
+            )
+        },
+        checkpoint_prefix="comparison_assessment",
+        allowed_directories=("stage1-run",),
+        allowed_files=tuple(proposal_allowed_files),
     )
     paths = [comparison_path, assessment_path]
-    if source_path.exists():
+    if source_path in comparison_paths:
         paths.extend((source_path, rendered_path))
     updates: dict[str, object] = {
         "comparison_ids": (*context.state.comparison_ids, proposal_id),
@@ -2107,6 +2405,7 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
             *context.state.disqualified_proposal_ids,
             proposal_id,
         )
+    _snapshot_checkpoint("before_comparison_journal_append")
     context.state = _journal_event(
         context.run_directory,
         context.state,
@@ -2125,6 +2424,7 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
         },
         utc_now=context.services.utc_now,
     )
+    _snapshot_checkpoint("after_comparison_journal_append")
     if reconstruction_error:
         context.state = _record_shadow_failure(
             context,
@@ -2229,7 +2529,7 @@ def _finalize_unfinished_authoritative_comparison(
         "authoritative_journal_sequence": terminal.journal_sequence,
         "authoritative_journal_hash": terminal.journal_head,
         "reason": reason,
-        "recorded_at": _utc_string(context.services.utc_now()),
+        "recorded_at": terminal.observed_at,
     }
     record = LiveComparisonUnavailableRecord.model_validate(
         {
@@ -2240,40 +2540,44 @@ def _finalize_unfinished_authoritative_comparison(
         }
     )
     comparison_directory = context.run_directory / "comparisons" / proposal_id
-    comparison_directory.mkdir(parents=True, exist_ok=True)
     comparison_path = comparison_directory / "comparison.json"
     unavailable_path = comparison_directory / "comparison-unavailable.json"
     assessment_path = proposal_directory / "assessment.json"
-    source_path = comparison_directory / "authoritative-source.md"
-    rendered_path = comparison_directory / "authoritative-rendered.md"
-    if source_path.exists() or rendered_path.exists():
-        raise LiveShadowStateError(
-            "unfinished authoritative comparison contains source material"
-        )
-    if unavailable_path.exists():
-        existing = _load_unavailable_record(context.run_directory, proposal_id)
-        if existing.model_dump(
-            mode="json",
-            exclude={"recorded_at", "record_sha256"},
-        ) != record.model_dump(
-            mode="json",
-            exclude={"recorded_at", "record_sha256"},
-        ):
-            raise LiveShadowStateError(
-                "comparison-unavailable record contradicts durable recovery"
+    _prepare_artifact_set(
+        comparison_directory,
+        {
+            comparison_path.name: _render_json_bytes(
+                comparison.model_dump(mode="json")
+            ),
+            unavailable_path.name: _render_json_bytes(
+                record.model_dump(mode="json")
+            ),
+        },
+        checkpoint_prefix="unavailable_comparison",
+    )
+    proposal_allowed_files = [
+        "supervisor-result.json",
+        "candidate-prompt.md",
+    ]
+    if (
+        proposal_directory / "supervisor-action.json"
+    ).exists():
+        proposal_allowed_files.append("supervisor-action.json")
+    else:
+        proposal_allowed_files.append("failed-supervisor-action.json")
+    _prepare_artifact_set(
+        proposal_directory,
+        {
+            assessment_path.name: _render_json_bytes(
+                assessment.model_dump(mode="json")
             )
-        record = existing
-    _write_immutable_json(
-        comparison_path,
-        comparison.model_dump(mode="json"),
+        },
+        checkpoint_prefix="unavailable_comparison_assessment",
+        allowed_directories=("stage1-run",),
+        allowed_files=tuple(proposal_allowed_files),
     )
-    _write_immutable_json(
-        assessment_path,
-        assessment.model_dump(mode="json"),
-    )
-    _write_immutable_json(
-        unavailable_path,
-        record.model_dump(mode="json"),
+    _snapshot_checkpoint(
+        "before_unavailable_comparison_journal_append"
     )
     context.state = _journal_event(
         context.run_directory,
@@ -2299,6 +2603,9 @@ def _finalize_unfinished_authoritative_comparison(
             str(unavailable_path): sha256_regular_file(unavailable_path),
         },
         utc_now=context.services.utc_now,
+    )
+    _snapshot_checkpoint(
+        "after_unavailable_comparison_journal_append"
     )
     context.state = _record_shadow_failure(
         context,
@@ -2611,6 +2918,54 @@ def _record_shadow_failure(
     )
 
 
+def _record_runtime_home_failure(
+    context: _LiveContext,
+    *,
+    auth_violation: bool,
+) -> LiveShadowState:
+    reason = (
+        "auth_confidentiality_violation"
+        if auth_violation
+        else "runtime_home_contamination"
+    )
+    failure = LiveShadowFailure(
+        decision_id=None,
+        reason=reason,
+        detail=(
+            "Persistent supervisor runtime-home contamination was scrubbed; "
+            "the session is unusable."
+        ),
+        temporal_or_integrity=True,
+        recorded_at=_utc_string(context.services.utc_now()),
+    )
+    return _journal_event(
+        context.run_directory,
+        context.state,
+        context.prepared,
+        event_type="shadow_failure",
+        reason="shadow_failure_recorded",
+        action_id=None,
+        decision_id=None,
+        updates={
+            "shadow_failures": (
+                *context.state.shadow_failures,
+                failure,
+            ),
+            "supervisor_session_usable": False,
+            **(
+                {"auth_confidentiality_violation_detected": True}
+                if auth_violation
+                else {}
+            ),
+            "summary": (
+                "Runtime-home contamination was scrubbed; Stage 2 was not changed."
+            ),
+        },
+        artifact_hashes={},
+        utc_now=context.services.utc_now,
+    )
+
+
 def _unavailable_assessment(
     context: _LiveContext,
     envelope: LiveDecisionEnvelope,
@@ -2889,6 +3244,8 @@ def _validate_live_journal_replay(
         "authoritative_process_exit_code",
         "authoritative_terminal_at",
         "supervisor_session_id",
+        "supervisor_session_usable",
+        "auth_confidentiality_violation_detected",
         "observed_decision_ids",
         "proposal_ids",
         "comparison_ids",
@@ -2911,6 +3268,8 @@ def _validate_live_journal_replay(
         "authoritative_process_exit_code": None,
         "authoritative_terminal_at": None,
         "supervisor_session_id": None,
+        "supervisor_session_usable": True,
+        "auth_confidentiality_violation_detected": False,
         "observed_decision_ids": [],
         "proposal_ids": [],
         "comparison_ids": [],
@@ -2998,6 +3357,13 @@ def _result_for_state(
         supervisor_model=state.supervisor_model,
         supervisor_reasoning_effort=state.supervisor_reasoning_effort,
         supervisor_session_id=state.supervisor_session_id,
+        supervisor_session_usable=state.supervisor_session_usable,
+        auth_confidentiality_enabled=state.auth_confidentiality_enabled,
+        auth_protected_value_count=state.auth_protected_value_count,
+        auth_scan_completed=state.auth_scan_completed,
+        auth_confidentiality_violation_detected=(
+            state.auth_confidentiality_violation_detected
+        ),
         observed_decision_count=len(state.observed_decision_ids),
         proposal_count=len(state.proposal_ids),
         comparison_count=len(state.comparison_ids),
@@ -3202,6 +3568,15 @@ def _validate_run(
     for decision_id in state.observed_decision_ids:
         _load_envelope(run_directory, decision_id)
         decision_directory = run_directory / "decisions" / decision_id
+        _require_exact_artifact_entries(
+            decision_directory,
+            files=(
+                "envelope.json",
+                "envelope.sha256",
+                "blind-input-manifest.json",
+                "output-schema.json",
+            ),
+        )
         for name in (
             "envelope.sha256",
             "blind-input-manifest.json",
@@ -3218,6 +3593,28 @@ def _validate_run(
             raise LiveShadowStateError(
                 "supervisor action is both completed and failed"
             )
+        action_name = (
+            "failed-supervisor-action.json"
+            if failed_action_path.exists()
+            else "supervisor-action.json"
+        )
+        proposal_files = [
+            "supervisor-result.json",
+            "candidate-prompt.md",
+            action_name,
+        ]
+        if proposal_id in state.comparison_ids or (
+            (proposal_directory / "assessment.json").is_file()
+            and (
+                run_directory / "comparisons" / proposal_id
+            ).is_dir()
+        ):
+            proposal_files.append("assessment.json")
+        _require_exact_artifact_entries(
+            proposal_directory,
+            files=tuple(proposal_files),
+            directories=("stage1-run",),
+        )
         if failed_action_path.exists():
             failed = _load_model(
                 failed_action_path,
@@ -3321,6 +3718,20 @@ def _validate_run(
             raise LiveShadowStateError(
                 "comparison has an unexpected unavailable-record artifact"
             )
+        comparison_files = ["comparison.json"]
+        if comparison.comparison_available:
+            comparison_files.extend(
+                ("authoritative-source.md", "authoritative-rendered.md")
+            )
+        if (
+            comparison.comparison_unavailable_reason
+            == "authoritative_action_unfinished_after_terminal"
+        ):
+            comparison_files.append("comparison-unavailable.json")
+        _require_exact_artifact_entries(
+            comparison_directory,
+            files=tuple(comparison_files),
+        )
     for proposal_id in state.reviewed_proposal_ids:
         review = _load_review(run_directory, proposal_id)
         if review.proposal_id != proposal_id:
@@ -3690,6 +4101,163 @@ def _isolation_forbidden_roots(context: _LiveContext) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _refresh_authentication_confidentiality(
+    context: _LiveContext,
+) -> AuthenticationConfidentiality:
+    capability = context.isolation_capability
+    if capability is None:
+        raise LiveShadowDependencyError(
+            "Bubblewrap authentication protection is unavailable"
+        )
+    confidentiality = load_authentication_confidentiality(
+        capability.authentication_file,
+        forbidden_roots=_isolation_forbidden_roots(context),
+    )
+    context.isolation_capability = BubblewrapCapability(
+        identity=capability.identity,
+        authentication_file=capability.authentication_file,
+        authentication_confidentiality=confidentiality,
+    )
+    return confidentiality
+
+
+def _runtime_forbidden_fragments(
+    context: _LiveContext,
+) -> tuple[bytes, ...]:
+    """Build bounded non-auth fragments used only for runtime-home scanning."""
+    fragments: set[bytes] = {
+        str(root).encode("utf-8")
+        for root in _isolation_forbidden_roots(context)
+    }
+    fragments.update(
+        _bounded_forbidden_tree_fragments(
+            _isolation_forbidden_roots(context)
+        )
+    )
+    for directory_name in ("comparisons", "reviews"):
+        directory = context.run_directory / directory_name
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*")):
+            try:
+                status = path.lstat()
+            except OSError as exc:
+                raise LiveShadowIntegrityError(
+                    "runtime-home forbidden-content source is unavailable"
+                ) from exc
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or path.is_symlink()
+                or status.st_size < 8
+                or status.st_size > 2 * 1024 * 1024
+            ):
+                continue
+            try:
+                fragments.add(path.read_bytes())
+            except OSError as exc:
+                raise LiveShadowIntegrityError(
+                    "runtime-home forbidden-content source is unavailable"
+                ) from exc
+    return tuple(sorted(fragments, key=lambda item: (-len(item), item)))
+
+
+def _bounded_forbidden_tree_fragments(
+    roots: Sequence[Path],
+) -> tuple[bytes, ...]:
+    """Collect bounded exact content used only to reject runtime-home copies."""
+    fragments: set[bytes] = set()
+    file_count = 0
+    total_bytes = 0
+    for root in roots:
+        candidates = (root,) if root.is_file() else root.rglob("*")
+        for path in candidates:
+            try:
+                status = path.lstat()
+            except OSError as exc:
+                raise LiveShadowIntegrityError(
+                    "runtime-home forbidden source could not be checked"
+                ) from exc
+            if path.is_symlink() or not stat.S_ISREG(status.st_mode):
+                continue
+            file_count += 1
+            if file_count > 4096:
+                raise LiveShadowIntegrityError(
+                    "runtime-home forbidden source exceeds the file-count bound"
+                )
+            if not 32 <= status.st_size <= 256 * 1024:
+                continue
+            total_bytes += status.st_size
+            if total_bytes > 32 * 1024 * 1024:
+                raise LiveShadowIntegrityError(
+                    "runtime-home forbidden source exceeds the byte bound"
+                )
+            try:
+                fragments.add(path.read_bytes())
+            except OSError as exc:
+                raise LiveShadowIntegrityError(
+                    "runtime-home forbidden source could not be read"
+                ) from exc
+    return tuple(fragments)
+
+
+def _validate_runtime_home_for_read(
+    run_directory: Path,
+    state: LiveShadowState,
+    prepared: PreparedLiveShadowSpecification,
+    services: LiveShadowServices,
+) -> None:
+    launch_source = (
+        run_directory / "authoritative" / "launch.json"
+        if (run_directory / "authoritative" / "launch.json").is_file()
+        else run_directory / "authoritative" / "launch-intent.json"
+    )
+    launch = _load_model(
+        launch_source,
+        AuthoritativeLaunchRecord,
+        "authoritative launch evidence",
+    )
+    forbidden_roots = [
+        prepared.stage2.repository_root,
+        Path(launch.stage2_runs_directory),
+    ]
+    if state.authoritative_run_directory is not None:
+        forbidden_roots.append(Path(state.authoritative_run_directory))
+    confidentiality = resolve_authentication_confidentiality(
+        authentication_file=services.codex_authentication_file,
+        environ=services.environ,
+        forbidden_roots=tuple(forbidden_roots),
+    )
+    fragments = {
+        str(root).encode("utf-8")
+        for root in forbidden_roots
+    }
+    fragments.update(
+        _bounded_forbidden_tree_fragments(tuple(forbidden_roots))
+    )
+    for directory_name in ("comparisons", "reviews"):
+        directory = run_directory / directory_name
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*")):
+            try:
+                status = path.lstat()
+                if (
+                    stat.S_ISREG(status.st_mode)
+                    and not path.is_symlink()
+                    and 8 <= status.st_size <= 2 * 1024 * 1024
+                ):
+                    fragments.add(path.read_bytes())
+            except OSError as exc:
+                raise LiveShadowIntegrityError(
+                    "runtime-home read verification source is unavailable"
+                ) from exc
+    validate_runtime_home_contents(
+        _codex_runtime_home(run_directory),
+        authentication_confidentiality=confidentiality,
+        forbidden_fragments=tuple(fragments),
+    )
+
+
 def _verify_isolated_supervisor_command(
     context: _LiveContext,
     pending: PendingSupervisorAction,
@@ -3757,6 +4325,16 @@ def _preflight_locator(
 def _sensitive_values(environ: Mapping[str, str] | None) -> tuple[str, ...]:
     _, _, values = build_subprocess_environment(environ)
     return values
+
+
+def _context_sensitive_values(context: _LiveContext) -> tuple[str, ...]:
+    values = set(_sensitive_values(context.services.environ))
+    capability = context.isolation_capability
+    if capability is not None:
+        values.update(
+            capability.authentication_confidentiality.text_fragments()
+        )
+    return tuple(sorted(values, key=lambda item: (-len(item), item)))
 
 
 def _resolve_run_directory(path: Path) -> Path:
@@ -3857,6 +4435,252 @@ def _write_immutable_bytes(path: Path, value: bytes) -> None:
             )
         return
     _atomic_write(path, value)
+
+
+def _prepare_artifact_set(
+    directory: Path,
+    expected: Mapping[str, bytes],
+    *,
+    checkpoint_prefix: str,
+    allowed_directories: Sequence[str] = (),
+    allowed_files: Sequence[str] = (),
+) -> tuple[Path, ...]:
+    """Recover one deterministic pre-journal artifact set exactly."""
+    expected_names = set(expected)
+    allowed_directory_names = set(allowed_directories)
+    allowed_file_names = set(allowed_files)
+    if (
+        not expected_names
+        or expected_names & allowed_directory_names
+        or expected_names & allowed_file_names
+        or allowed_directory_names & allowed_file_names
+        or any(
+            not name
+            or name in {".", ".."}
+            or "/" in name
+            or "\\" in name
+            for name in (
+                *expected_names,
+                *allowed_directory_names,
+                *allowed_file_names,
+            )
+        )
+    ):
+        raise LiveShadowIntegrityError(
+            "pre-journal artifact set definition is invalid"
+        )
+    try:
+        try:
+            directory_status = directory.lstat()
+        except FileNotFoundError:
+            directory.mkdir(parents=True, exist_ok=False)
+            _fsync_directory(directory.parent)
+            _snapshot_checkpoint(
+                f"after_{checkpoint_prefix}_directory_creation"
+            )
+            directory_status = directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_status.st_mode)
+            or directory.is_symlink()
+            or os.path.ismount(directory)
+        ):
+            raise LiveShadowIntegrityError(
+                "pre-journal artifact directory is not exact"
+            )
+        with os.scandir(directory) as iterator:
+            entries = {entry.name: entry for entry in iterator}
+        allowed_names = (
+            expected_names
+            | allowed_directory_names
+            | allowed_file_names
+        )
+        if set(entries) - allowed_names:
+            raise LiveShadowIntegrityError(
+                "pre-journal artifact directory contains an unknown entry"
+            )
+        for name in allowed_directory_names:
+            entry = entries.get(name)
+            if entry is None:
+                raise LiveShadowIntegrityError(
+                    "pre-journal artifact directory is incomplete"
+                )
+            status = entry.stat(follow_symlinks=False)
+            if entry.is_symlink() or not stat.S_ISDIR(status.st_mode):
+                raise LiveShadowIntegrityError(
+                    "pre-journal allowed directory is not exact"
+                )
+        for name in allowed_file_names:
+            entry = entries.get(name)
+            if entry is None:
+                raise LiveShadowIntegrityError(
+                    "pre-journal artifact directory is incomplete"
+                )
+            status = entry.stat(follow_symlinks=False)
+            if (
+                entry.is_symlink()
+                or not stat.S_ISREG(status.st_mode)
+                or status.st_nlink != 1
+            ):
+                raise LiveShadowIntegrityError(
+                    "pre-journal allowed file is not exact"
+                )
+        for name, content in expected.items():
+            path = directory / name
+            entry = entries.get(name)
+            if entry is not None:
+                status = entry.stat(follow_symlinks=False)
+                if _read_exact_regular_file(path, status) != content:
+                    raise LiveShadowIntegrityError(
+                        "existing pre-journal artifact contradicts recovery"
+                    )
+                continue
+            _atomic_write(path, content)
+            _snapshot_checkpoint(
+                f"after_{checkpoint_prefix}_{name.replace('.', '_').replace('-', '_')}"
+            )
+        _fsync_directory(directory)
+        _snapshot_checkpoint(
+            f"after_{checkpoint_prefix}_directory_fsync"
+        )
+        with os.scandir(directory) as iterator:
+            complete = {entry.name: entry for entry in iterator}
+        if set(complete) != allowed_names:
+            raise LiveShadowIntegrityError(
+                "pre-journal artifact set is incomplete"
+            )
+        for name, content in expected.items():
+            entry = complete[name]
+            status = entry.stat(follow_symlinks=False)
+            if _read_exact_regular_file(directory / name, status) != content:
+                raise LiveShadowIntegrityError(
+                    "completed pre-journal artifact set changed"
+                )
+    except LiveShadowIntegrityError:
+        raise
+    except OSError as exc:
+        raise LiveShadowIntegrityError(
+            "pre-journal artifact set could not be prepared"
+        ) from exc
+    return tuple(directory / name for name in sorted(expected))
+
+
+def _require_exact_artifact_entries(
+    directory: Path,
+    *,
+    files: Sequence[str],
+    directories: Sequence[str] = (),
+) -> None:
+    try:
+        status = directory.lstat()
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or directory.is_symlink()
+            or os.path.ismount(directory)
+        ):
+            raise LiveShadowStateError(
+                "committed artifact directory is not exact"
+            )
+        with os.scandir(directory) as iterator:
+            entries = {entry.name: entry for entry in iterator}
+        if set(entries) != set(files) | set(directories):
+            raise LiveShadowStateError(
+                "committed artifact directory has an invalid entry set"
+            )
+        for name in files:
+            entry_status = entries[name].stat(follow_symlinks=False)
+            if (
+                entries[name].is_symlink()
+                or not stat.S_ISREG(entry_status.st_mode)
+                or entry_status.st_nlink != 1
+            ):
+                raise LiveShadowStateError(
+                    "committed artifact is not a private regular file"
+                )
+        for name in directories:
+            entry_status = entries[name].stat(follow_symlinks=False)
+            if (
+                entries[name].is_symlink()
+                or not stat.S_ISDIR(entry_status.st_mode)
+            ):
+                raise LiveShadowStateError(
+                    "committed artifact subdirectory is not exact"
+                )
+    except LiveShadowStateError:
+        raise
+    except OSError as exc:
+        raise LiveShadowStateError(
+            "committed artifact directory could not be verified"
+        ) from exc
+
+
+def _read_exact_regular_file(
+    path: Path,
+    expected_status: os.stat_result,
+) -> bytes:
+    if (
+        not stat.S_ISREG(expected_status.st_mode)
+        or expected_status.st_nlink != 1
+    ):
+        raise LiveShadowIntegrityError(
+            "pre-journal artifact is not a private regular file"
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            before = os.fstat(descriptor)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ) != (
+                expected_status.st_dev,
+                expected_status.st_ino,
+                expected_status.st_size,
+                expected_status.st_mtime_ns,
+            ):
+                raise LiveShadowIntegrityError(
+                    "pre-journal artifact identity changed"
+                )
+            content = bytearray()
+            while len(content) <= 4 * 1024 * 1024:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                content.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                len(content) > 4 * 1024 * 1024
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                )
+            ):
+                raise LiveShadowIntegrityError(
+                    "pre-journal artifact changed while being verified"
+                )
+            return bytes(content)
+        finally:
+            os.close(descriptor)
+    except LiveShadowIntegrityError:
+        raise
+    except OSError as exc:
+        raise LiveShadowIntegrityError(
+            "pre-journal artifact is unreadable"
+        ) from exc
 
 
 def _snapshot_checkpoint(name: str) -> None:

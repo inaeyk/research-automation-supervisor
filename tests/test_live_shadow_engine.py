@@ -18,6 +18,7 @@ import pytest
 from research_automation_supervisor.errors import (
     LiveShadowInputError,
     LiveShadowStateError,
+    WorkflowLockError,
 )
 from research_automation_supervisor.live_shadow_engine import (
     abort_live_shadow,
@@ -30,6 +31,7 @@ from research_automation_supervisor.live_shadow_engine import (
 )
 from research_automation_supervisor.workflow_engine import (
     WorkflowServices,
+    continue_substage,
     run_substage,
     substage_status,
 )
@@ -331,6 +333,298 @@ def test_live_run_preserves_authority_and_quarantines_two_proposals(
     assert report["automation_enabled"] is False
 
 
+@pytest.mark.parametrize(
+    ("scenario", "stage2_responses", "supervisor_kinds", "expected_ids"),
+    (
+        (
+            "scope",
+            [
+                codex_response(
+                    "worker",
+                    SOURCE_WORKER_UUID,
+                    worker_result(),
+                    write_files={"outside.txt": "outside\n"},
+                ),
+                codex_response(
+                    "worker",
+                    SOURCE_WORKER_UUID,
+                    worker_result(),
+                    expected_resume_thread_id=SOURCE_WORKER_UUID,
+                    delete_files=["outside.txt"],
+                    write_files={"src/output.txt": "fixed\n"},
+                ),
+                codex_response(
+                    "auditor",
+                    SOURCE_AUDITOR_UUID,
+                    auditor_result(),
+                ),
+            ],
+            ("worker_initial", "worker_scope_repair", "auditor"),
+            (
+                "worker_initial-r000-a001",
+                "worker_scope_repair-r001-a002",
+                "auditor-r001-a003",
+            ),
+        ),
+        (
+            "test",
+            [
+                codex_response(
+                    "worker",
+                    SOURCE_WORKER_UUID,
+                    worker_result(),
+                ),
+                codex_response(
+                    "worker",
+                    SOURCE_WORKER_UUID,
+                    worker_result(),
+                    expected_resume_thread_id=SOURCE_WORKER_UUID,
+                    write_files={"src/ready.txt": "ready\n"},
+                ),
+                codex_response(
+                    "auditor",
+                    SOURCE_AUDITOR_UUID,
+                    auditor_result(),
+                ),
+            ],
+            ("worker_initial", "worker_test_repair", "auditor"),
+            (
+                "worker_initial-r000-a001",
+                "worker_test_repair-r001-a002",
+                "auditor-r001-a003",
+            ),
+        ),
+        (
+            "audit",
+            [
+                codex_response(
+                    "worker",
+                    SOURCE_WORKER_UUID,
+                    worker_result(),
+                ),
+                codex_response(
+                    "auditor",
+                    SOURCE_AUDITOR_UUID,
+                    auditor_result("fail_repairable"),
+                ),
+                codex_response(
+                    "worker",
+                    SOURCE_WORKER_UUID,
+                    worker_result(),
+                    expected_resume_thread_id=SOURCE_WORKER_UUID,
+                    write_files={"src/output.txt": "repaired\n"},
+                ),
+                codex_response(
+                    "auditor",
+                    "33333333-3333-4333-8333-333333333333",
+                    auditor_result(),
+                ),
+            ],
+            (
+                "worker_initial",
+                "auditor",
+                "worker_audit_repair",
+                "auditor",
+            ),
+            (
+                "worker_initial-r000-a001",
+                "auditor-r000-a002",
+                "worker_audit_repair-r001-a003",
+                "auditor-r001-a004",
+            ),
+        ),
+    ),
+)
+def test_live_observer_captures_repair_decision_kinds_exactly_once(
+    tmp_path: Path,
+    scenario: str,
+    stage2_responses: list[dict[str, object]],
+    supervisor_kinds: tuple[str, ...],
+    expected_ids: tuple[str, ...],
+) -> None:
+    supervisor_responses = [
+        live_supervisor_response(kind, resume=index > 0)
+        for index, kind in enumerate(supervisor_kinds)
+    ]
+    spec, _, _, _, services = create_live_shadow_tree(
+        tmp_path,
+        stage2_responses=stage2_responses,
+        supervisor_responses=supervisor_responses,
+        test_requires_marker=scenario == "test",
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    assert result.status == "awaiting_reviews"
+    assert result.supervisor_session_id is not None
+    run_directory = Path(result.artifact_directory)
+    state = _read_json(run_directory / "state.json")
+    assert tuple(state["observed_decision_ids"]) == expected_ids
+    assert tuple(state["proposal_ids"]) == expected_ids
+    assert tuple(state["comparison_ids"]) == expected_ids
+    envelopes = [
+        _read_json(
+            run_directory / "decisions" / decision_id / "envelope.json"
+        )
+        for decision_id in expected_ids
+    ]
+    assert tuple(envelope["decision_id"] for envelope in envelopes) == expected_ids
+    assert tuple(envelope["ordinal"] for envelope in envelopes) == tuple(
+        range(1, len(expected_ids) + 1)
+    )
+    assert tuple(
+        envelope["source_action_id"] for envelope in envelopes
+    ) == tuple(
+        (
+            "auditor" if envelope["proposal_kind"] == "auditor" else "worker"
+        )
+        + f"-r{envelope['repair_round']:03d}"
+        for envelope in envelopes
+    )
+    assert (
+        tmp_path / "live-shadow-counter"
+    ).read_text(encoding="ascii") == str(len(expected_ids))
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(entry["event_type"] == "decision" for entry in entries) == len(
+        expected_ids
+    )
+    assert sum(
+        entry["event_type"] == "shadow_action_intent"
+        for entry in entries
+    ) == len(expected_ids)
+    assert sum(
+        entry["event_type"] == "shadow_action_completion"
+        for entry in entries
+    ) == len(expected_ids)
+
+
+def test_live_observer_captures_externally_authorized_human_continuation(
+    tmp_path: Path,
+) -> None:
+    instruction = tmp_path / "human-continuation.md"
+    instruction_bytes = b"Create the externally authorized marker exactly.\n"
+    instruction.write_bytes(instruction_bytes)
+    stage2_responses = [
+        codex_response(
+            "worker",
+            SOURCE_WORKER_UUID,
+            worker_result(),
+        ),
+        codex_response(
+            "worker",
+            SOURCE_WORKER_UUID,
+            worker_result(),
+            expected_resume_thread_id=SOURCE_WORKER_UUID,
+            write_files={"src/ready.txt": "ready\n"},
+        ),
+        codex_response(
+            "auditor",
+            SOURCE_AUDITOR_UUID,
+            auditor_result(),
+        ),
+    ]
+    supervisor_responses = [
+        {
+            **live_supervisor_response(
+                "worker_initial",
+                sleep_seconds=1.0,
+            ),
+            "observation_path": str(
+                tmp_path / "initial-shadow-observation.json"
+            ),
+        },
+        {
+            **live_supervisor_response(
+                "worker_human_continuation",
+                resume=True,
+            ),
+            "observation_path": str(
+                tmp_path / "continuation-shadow-observation.json"
+            ),
+        },
+        live_supervisor_response("auditor", resume=True),
+    ]
+    spec, _, _, fake, services = create_live_shadow_tree(
+        tmp_path,
+        stage2_responses=stage2_responses,
+        supervisor_responses=supervisor_responses,
+        max_repair_rounds=0,
+        test_requires_marker=True,
+    )
+    holder: dict[str, object] = {}
+
+    def observe() -> None:
+        holder["result"] = run_live_shadow(
+            spec,
+            runs_dir=tmp_path / "live-runs",
+            stage2_runs_dir=tmp_path / "stage2-runs",
+            services=services,
+        )
+
+    observer = threading.Thread(target=observe, daemon=True)
+    observer.start()
+    deadline = time.monotonic() + 10
+    authoritative_run: Path | None = None
+    while time.monotonic() < deadline:
+        candidates = tuple((tmp_path / "stage2-runs").glob("*"))
+        if candidates:
+            candidate = candidates[0]
+            if (candidate / "result.json").is_file() and _read_json(
+                candidate / "result.json"
+            )["status"] == "repair_limit_paused":
+                authoritative_run = candidate
+                break
+        time.sleep(0.005)
+    assert authoritative_run is not None
+    continued = None
+    deadline = time.monotonic() + 2
+    while continued is None and time.monotonic() < deadline:
+        try:
+            continued = continue_substage(
+                authoritative_run,
+                instruction,
+                services=WorkflowServices(codex_executable=str(fake)),
+            )
+        except WorkflowLockError:
+            time.sleep(0.005)
+    assert continued is not None
+    assert continued.status == "completed"
+    observer.join(timeout=10)
+    assert not observer.is_alive()
+    result = holder["result"]
+    assert hasattr(result, "status")
+    assert result.status == "awaiting_reviews"  # type: ignore[union-attr]
+    run_directory = Path(result.artifact_directory)  # type: ignore[union-attr]
+    state = _read_json(run_directory / "state.json")
+    expected_ids = (
+        "worker_initial-r000-a001",
+        "worker_human_continuation-r001-a002",
+        "auditor-r001-a003",
+    )
+    assert tuple(state["observed_decision_ids"]) == expected_ids
+    assert tuple(state["proposal_ids"]) == expected_ids
+    assert tuple(state["comparison_ids"]) == expected_ids
+    assert state["authoritative_status"] == "completed"
+    continuation_observation = _read_json(
+        tmp_path / "continuation-shadow-observation.json"
+    )
+    continuation_stdin = base64.b64decode(
+        continuation_observation["prompt_base64"]
+    )
+    assert instruction_bytes not in continuation_stdin
+    assert (
+        tmp_path / "live-shadow-counter"
+    ).read_text(encoding="ascii") == "3"
+
+
 def test_shadow_delay_does_not_prevent_authoritative_completion(
     tmp_path: Path,
 ) -> None:
@@ -452,9 +746,22 @@ def test_supervisor_session_failure_is_isolated_from_authoritative_stage2(
             ), artifact
 
 
+@pytest.mark.parametrize(
+    "unavailable_crash_point",
+    (
+        "after_unavailable_comparison_directory_creation",
+        "after_unavailable_comparison_comparison_json",
+        "after_unavailable_comparison_comparison_unavailable_json",
+        "after_unavailable_comparison_directory_fsync",
+        "after_unavailable_comparison_assessment_assessment_json",
+        "before_unavailable_comparison_journal_append",
+        "after_unavailable_comparison_journal_append",
+    ),
+)
 def test_terminal_unfinished_authoritative_action_is_boundedly_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    unavailable_crash_point: str,
 ) -> None:
     import research_automation_supervisor.live_shadow_engine as engine
 
@@ -526,8 +833,22 @@ def test_terminal_unfinished_authoritative_action_is_boundedly_unavailable(
         if path.is_file()
     }
 
-    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    unavailable_crashed = False
+
+    def crash_unavailable(point: str) -> None:
+        nonlocal unavailable_crashed
+        if not unavailable_crashed and point == unavailable_crash_point:
+            unavailable_crashed = True
+            raise RuntimeError(
+                f"simulated unavailable crash at {point}"
+            )
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", crash_unavailable)
     clock[0] += timedelta(seconds=31)
+    with pytest.raises(RuntimeError, match="unavailable crash"):
+        resume_live_shadow(run_directory, services=services)
+    assert unavailable_crashed
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
     recovered = resume_live_shadow(run_directory, services=services)
     assert recovered.status == "shadow_degraded"
     assert live_shadow_exit_code(recovered.status) == 5
@@ -1065,6 +1386,384 @@ def test_every_snapshot_midpoint_recovers_without_duplicate_semantics(
         if path.is_file()
     }
     assert authoritative_hashes_after == authoritative_hashes_before
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    (
+        "after_decision_directory_creation",
+        "after_decision_envelope_json",
+        "after_decision_envelope_sha256",
+        "after_decision_blind_input_manifest_json",
+        "after_decision_output_schema_json",
+        "after_decision_directory_fsync",
+        "before_decision_journal_append",
+        "after_decision_journal_append",
+    ),
+)
+def test_decision_prejournal_artifact_boundaries_recover_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    crashed = False
+
+    def inject(point: str) -> None:
+        nonlocal crashed
+        if not crashed and point == crash_point:
+            crashed = True
+            raise RuntimeError(f"simulated crash at {point}")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", inject)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_live_shadow(
+            spec,
+            runs_dir=tmp_path / "live-runs",
+            stage2_runs_dir=tmp_path / "stage2-runs",
+            services=services,
+        )
+    assert crashed
+    run_directory = next((tmp_path / "live-runs").iterdir())
+    decision_directory = (
+        run_directory / "decisions/worker_initial-r000-a001"
+    )
+    before = {
+        path.name: (
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+        )
+        for path in decision_directory.iterdir()
+        if path.is_file()
+    }
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    recovered = resume_live_shadow(
+        run_directory,
+        services=services,
+    )
+    assert recovered.status == "awaiting_reviews"
+    assert set(path.name for path in decision_directory.iterdir()) == {
+        "envelope.json",
+        "envelope.sha256",
+        "blind-input-manifest.json",
+        "output-schema.json",
+    }
+    for name, (content, inode, mtime_ns) in before.items():
+        path = decision_directory / name
+        assert path.read_bytes() == content
+        assert path.stat().st_ino == inode
+        assert path.stat().st_mtime_ns == mtime_ns
+    envelope = _read_json(decision_directory / "envelope.json")
+    assert (
+        decision_directory / "envelope.sha256"
+    ).read_text(encoding="ascii") == f"{envelope['envelope_sha256']}\n"
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(entry["event_type"] == "decision" for entry in entries) == 2
+    assert sum(
+        entry["decision_id"] == "worker_initial-r000-a001"
+        and entry["event_type"] == "decision"
+        for entry in entries
+    ) == 1
+    assert sum(
+        entry["reason"] == "authoritative_stage2_launched"
+        for entry in entries
+    ) == 1
+    assert sum(
+        entry["event_type"] == "shadow_action_intent"
+        for entry in entries
+    ) == 2
+    assert sum(
+        entry["event_type"] == "shadow_action_completion"
+        for entry in entries
+    ) == 2
+    assert sum(entry["event_type"] == "comparison" for entry in entries) == 2
+    assert (
+        tmp_path / "live-shadow-counter"
+    ).read_text(encoding="ascii") == "2"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "contradictory_file",
+        "extra_file",
+        "symlink",
+        "nonregular",
+        "envelope_hash_mismatch",
+    ),
+)
+def test_decision_prejournal_contradictions_remain_integrity_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+
+    def crash(point: str) -> None:
+        if point == "after_decision_directory_fsync":
+            raise RuntimeError("decision prepared")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="decision prepared"):
+        run_live_shadow(
+            spec,
+            runs_dir=tmp_path / "live-runs",
+            stage2_runs_dir=tmp_path / "stage2-runs",
+            services=services,
+        )
+    run_directory = next((tmp_path / "live-runs").iterdir())
+    directory = run_directory / "decisions/worker_initial-r000-a001"
+    if mutation == "contradictory_file":
+        (directory / "output-schema.json").write_bytes(b"{}\n")
+    elif mutation == "extra_file":
+        (directory / "extra.txt").write_text("unexpected", encoding="utf-8")
+    elif mutation == "symlink":
+        (directory / "envelope.json").unlink()
+        (directory / "envelope.json").symlink_to(
+            directory / "output-schema.json"
+        )
+    elif mutation == "nonregular":
+        (directory / "envelope.json").unlink()
+        os.mkfifo(directory / "envelope.json")
+    else:
+        (directory / "envelope.sha256").write_text(
+            f"{'f' * 64}\n",
+            encoding="ascii",
+        )
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    with pytest.raises(
+        LiveShadowStateError,
+        match="pre-journal|artifact",
+    ):
+        resume_live_shadow(run_directory, services=services)
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    (
+        "after_proposal_supervisor_result_json",
+        "after_proposal_candidate_prompt_md",
+        "after_proposal_supervisor_action_json",
+        "after_proposal_directory_fsync",
+        "before_proposal_journal_append",
+        "after_proposal_journal_append",
+        "after_authoritative_reconstruction",
+        "after_comparison_authoritative_source_md",
+        "after_comparison_authoritative_rendered_md",
+        "after_comparison_comparison_json",
+        "after_comparison_assessment_assessment_json",
+        "before_comparison_journal_append",
+        "after_comparison_journal_append",
+    ),
+)
+def test_proposal_and_comparison_prejournal_boundaries_recover_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    crashed = False
+
+    def inject(point: str) -> None:
+        nonlocal crashed
+        if not crashed and point == crash_point:
+            crashed = True
+            raise RuntimeError(f"simulated crash at {point}")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", inject)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_live_shadow(
+            spec,
+            runs_dir=tmp_path / "live-runs",
+            stage2_runs_dir=tmp_path / "stage2-runs",
+            services=services,
+        )
+    assert crashed
+    run_directory = next((tmp_path / "live-runs").iterdir())
+    authoritative_run_record = _read_json(
+        run_directory / "authoritative/stage2-run.json"
+    )
+    authoritative_run = Path(authoritative_run_record["run_directory"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if (
+            authoritative_run / "result.json"
+        ).is_file() and _read_json(
+            authoritative_run / "result.json"
+        )["status"] == "completed":
+            break
+        time.sleep(0.01)
+    assert _read_json(authoritative_run / "result.json")["status"] == "completed"
+    authoritative_before = {
+        str(path.relative_to(authoritative_run)): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in authoritative_run.rglob("*")
+        if path.is_file()
+    }
+    partial_files = {
+        path: (
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+        )
+        for root in (
+            run_directory / "proposals/worker_initial-r000-a001",
+            run_directory / "comparisons/worker_initial-r000-a001",
+        )
+        if root.exists()
+        for path in root.iterdir()
+        if path.is_file()
+    }
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    recovered = resume_live_shadow(run_directory, services=services)
+    assert recovered.status == "awaiting_reviews"
+    for path, (content, inode, mtime_ns) in partial_files.items():
+        assert path.read_bytes() == content
+        assert path.stat().st_ino == inode
+        assert path.stat().st_mtime_ns == mtime_ns
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["reason"] == "authoritative_stage2_launched"
+        for entry in entries
+    ) == 1
+    assert sum(entry["event_type"] == "decision" for entry in entries) == 2
+    assert sum(
+        entry["event_type"] == "shadow_action_intent"
+        for entry in entries
+    ) == 2
+    assert sum(
+        entry["event_type"] == "shadow_action_completion"
+        for entry in entries
+    ) == 2
+    assert sum(entry["event_type"] == "comparison" for entry in entries) == 2
+    assert (
+        tmp_path / "live-shadow-counter"
+    ).read_text(encoding="ascii") == "2"
+    authoritative_after = {
+        str(path.relative_to(authoritative_run)): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in authoritative_run.rglob("*")
+        if path.is_file()
+    }
+    assert authoritative_after == authoritative_before
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "expected_status", "expected_stage2_runs"),
+    (
+        (
+            "after_authoritative_launch_intent_before_child_launch",
+            "human_paused",
+            0,
+        ),
+        (
+            "after_authoritative_child_launch_before_identity",
+            "human_paused",
+            1,
+        ),
+        (
+            "after_authoritative_child_identity_before_journal",
+            "awaiting_reviews",
+            1,
+        ),
+        (
+            "after_authoritative_discovery_before_journal",
+            "awaiting_reviews",
+            1,
+        ),
+    ),
+)
+def test_authoritative_launch_and_discovery_crash_boundaries_never_relaunch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+    expected_status: str,
+    expected_stage2_runs: int,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    crashed = False
+
+    def inject(point: str) -> None:
+        nonlocal crashed
+        if not crashed and point == crash_point:
+            crashed = True
+            raise RuntimeError(f"simulated crash at {point}")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", inject)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_live_shadow(
+            spec,
+            runs_dir=tmp_path / "live-runs",
+            stage2_runs_dir=tmp_path / "stage2-runs",
+            services=services,
+        )
+    assert crashed
+    run_directory = next((tmp_path / "live-runs").iterdir())
+    if expected_stage2_runs:
+        deadline = time.monotonic() + 10
+        while (
+            not tuple((tmp_path / "stage2-runs").glob("*/state.json"))
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    recovered = resume_live_shadow(run_directory, services=services)
+    assert recovered.status == expected_status
+    stage2_runs = tuple(
+        path.parent
+        for path in (tmp_path / "stage2-runs").glob("*/state.json")
+    )
+    assert len(stage2_runs) == expected_stage2_runs
+    if expected_stage2_runs:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if (
+                stage2_runs[0] / "result.json"
+            ).is_file() and _read_json(
+                stage2_runs[0] / "result.json"
+            )["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert _read_json(stage2_runs[0] / "result.json")["status"] == "completed"
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["reason"] in {
+            "authoritative_stage2_launched",
+            "authoritative_stage2_launch_recovered",
+        }
+        for entry in entries
+    ) <= 1
+    if expected_status == "awaiting_reviews":
+        assert sum(
+            entry["reason"] == "authoritative_run_discovered"
+            for entry in entries
+        ) == 1
 
 
 def test_journal_ahead_recovery_rejects_a_contradictory_result_snapshot(

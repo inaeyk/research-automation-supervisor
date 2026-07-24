@@ -99,6 +99,10 @@ class CodexRunResult(BaseModel):
     malformed_event_count: Annotated[int, Field(ge=0)]
     final_message_present: bool
     permission_evidence: bool
+    confidentiality_violation_detected: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+    )
     summary: RequiredString
     error: str | None
 
