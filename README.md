@@ -11,6 +11,10 @@ human pauses. Stage 3 adds retrospective blind calibration with one persistent
 canonical-UUID, read-only supervisor, complete confidentiality preflight,
 post-finalization authoritative comparisons, structured human reviews, and
 informational-only readiness.
+Stage 4 adds live journal observation around one unchanged authoritative Stage
+2 run, point-in-time evidence envelopes, one persistent read-only supervisor
+queue in a repository-free quarantine, post-finalization comparisons, immutable
+reviews, and informational readiness while keeping automation disabled.
 
 See:
 
@@ -18,7 +22,9 @@ See:
 - `STAGE_1_CONTRACT.md`
 - `STAGE_2_CONTRACT.md`
 - `STAGE_3_CONTRACT.md`
+- `STAGE_4_CONTRACT.md`
 - `CODEX_STAGE_0_PROMPT.md`
 - `docs/codex_adapter.md`
 - `docs/workflow_engine.md`
 - `docs/shadow_calibration.md`
+- `docs/live_shadow.md`

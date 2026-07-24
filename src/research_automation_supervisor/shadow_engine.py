@@ -59,6 +59,7 @@ from research_automation_supervisor.shadow_models import (
     PathScopeFinding,
     PendingSupervisorAction,
     ProposalComparison,
+    ProposalKind,
     RequiredCheckCoverage,
     ShadowJournalEntry,
     ShadowResult,
@@ -92,6 +93,7 @@ from research_automation_supervisor.workflow_integrity import (
     verify_hash_mapping,
 )
 from research_automation_supervisor.workflow_models import (
+    SubstageSpecification,
     path_matches_any,
 )
 
@@ -1298,6 +1300,9 @@ def _verify_supervisor_artifacts(
     pending: PendingSupervisorAction,
     decision: DecisionReconstruction,
     all_decisions: Sequence[DecisionReconstruction],
+    *,
+    prompt_source_path: str | None = None,
+    proposal_workspace: Path | None = None,
 ) -> _SupervisorProof:
     directory = Path(pending.stage1_artifact_directory)
     _require_exact_directory(directory, STAGE2_STAGE1_ARTIFACT_NAMES)
@@ -1343,7 +1348,12 @@ def _verify_supervisor_artifacts(
         request.run_id != "stage1-run"
         or request.role != "supervisor"
         or request.workspace != pending.workspace
-        or request.prompt_path != manifest_path_source(pending)
+        or request.prompt_path
+        != (
+            prompt_source_path
+            if prompt_source_path is not None
+            else manifest_path_source(pending)
+        )
         or request.model != pending.model
         or request.reasoning_effort != pending.reasoning_effort
         or request.timeout_seconds != pending.timeout_seconds
@@ -1512,7 +1522,11 @@ def _verify_supervisor_artifacts(
     proposal = (
         _normalize_supervisor_proposal(
             transport_proposal,
-            Path(pending.workspace),
+            (
+                proposal_workspace
+                if proposal_workspace is not None
+                else Path(pending.workspace)
+            ),
         )
         if transport_proposal is not None
         and transport_proposal.proposal_kind
@@ -2013,6 +2027,38 @@ def _assess_proposal(
     *,
     session_integrity: bool,
 ) -> DeterministicAssessment:
+    del decision
+    return assess_normalized_supervisor_proposal(
+        proposal_id=pending.proposal_id,
+        proposal_kind=pending.proposal_kind,
+        proposal=proposal,
+        final_bytes=proof.final_bytes,
+        comparison=comparison,
+        specification=context.prepared.source.prepared.specification,
+        test_ids=tuple(
+            test.specification.id
+            for test in context.prepared.source.prepared.acceptance_tests
+        ),
+        max_proposal_bytes=context.state.max_proposal_bytes,
+        session_integrity=session_integrity,
+        sensitive_values=_sensitive_values(context.services.environ),
+    )
+
+
+def assess_normalized_supervisor_proposal(
+    *,
+    proposal_id: str,
+    proposal_kind: ProposalKind,
+    proposal: NormalizedSupervisorProposal,
+    final_bytes: bytes,
+    comparison: ProposalComparison,
+    specification: SubstageSpecification,
+    test_ids: tuple[str, ...],
+    max_proposal_bytes: int,
+    session_integrity: bool,
+    sensitive_values: Sequence[str],
+) -> DeterministicAssessment:
+    """Apply the shared Stage 3 deterministic proposal-quality semantics."""
     change_flags = {
         "contract_change_requested": proposal.contract_change_requested,
         "scope_expansion_requested": proposal.scope_expansion_requested,
@@ -2027,7 +2073,6 @@ def _assess_proposal(
         ),
     }
     findings: list[PathScopeFinding] = []
-    specification = context.prepared.source.prepared.specification
     seen_paths: set[str] = set()
     for path in proposal.referenced_paths:
         if path in seen_paths:
@@ -2067,10 +2112,6 @@ def _assess_proposal(
                     path=path, reason="outside_allowed_paths"
                 )
             )
-    test_ids = tuple(
-        test.specification.id
-        for test in context.prepared.source.prepared.acceptance_tests
-    )
     covered = tuple(
         test_id
         for test_id in test_ids
@@ -2092,16 +2133,13 @@ def _assess_proposal(
         missing_test_ids=missing,
         unknown_check_ids=unknown,
     )
-    _, _, sensitive_values = build_subprocess_environment(
-        context.services.environ
-    )
     structural_collision = any(
         would_redact_text(value, sensitive_values)
         or "<REDACTED>" in value
         for value in _proposal_strings(proposal)
     )
-    byte_count = len(proof.final_bytes)
-    size_compliant = byte_count <= context.state.max_proposal_bytes
+    byte_count = len(final_bytes)
+    size_compliant = byte_count <= max_proposal_bytes
     reasons: list[str] = []
     if not session_integrity:
         reasons.append("session_integrity_failed")
@@ -2124,8 +2162,8 @@ def _assess_proposal(
         reasons.append("structural_redaction_collision")
     candidate_sha = comparison.candidate_sha256
     return DeterministicAssessment(
-        proposal_id=pending.proposal_id,
-        proposal_kind=pending.proposal_kind,
+        proposal_id=proposal_id,
+        proposal_kind=proposal_kind,
         schema_integrity=True,
         blind_input_integrity=True,
         session_integrity=session_integrity,

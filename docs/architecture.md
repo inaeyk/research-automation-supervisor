@@ -45,3 +45,16 @@ ordering, exact state/result agreement, durable state, and exact-once recovery.
 `shadow_review.py` is the only semantic
 quality boundary: immutable human reviews feed an informational readiness
 calculation that cannot enable automation.
+
+Stage 4 is the live, still observation-only layer described in
+`live_shadow.md`. `live_shadow_sources.py` validates the immutable live
+specification and creates hash-bound envelopes from verified Stage 2 journal
+prefixes. `live_shadow_prompts.py` assembles the non-persisted live blind input.
+`live_shadow_engine.py` launches one unchanged Stage 2 child independently,
+tails only durable action intents, serializes one persistent supervisor queue
+in an empty read-only quarantine, and waits until both proposal and
+authoritative action finalize before reusing Stage 3 comparison and assessment
+semantics. `live_shadow_review.py` reuses immutable Stage 3 reviews to compute
+informational readiness. Supervisor failures can degrade Stage 4 but cannot
+signal, modify, delay, retry, or reinterpret the authoritative Stage 2 run;
+automation remains disabled.

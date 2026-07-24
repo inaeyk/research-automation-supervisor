@@ -27,6 +27,10 @@ from research_automation_supervisor.errors import (
     CodexDependencyError,
     CodexRequestError,
     ContractError,
+    LiveShadowDependencyError,
+    LiveShadowInputError,
+    LiveShadowLockError,
+    LiveShadowStateError,
     ShadowDependencyError,
     ShadowInputError,
     ShadowLockError,
@@ -36,6 +40,18 @@ from research_automation_supervisor.errors import (
     WorkflowLockError,
     WorkflowStateError,
 )
+from research_automation_supervisor.live_shadow_engine import (
+    DEFAULT_LIVE_SHADOW_RUNS_DIRECTORY,
+    abort_live_shadow,
+    live_shadow_exit_code,
+    live_shadow_report,
+    live_shadow_status,
+    record_live_shadow_review,
+    resume_live_shadow,
+    run_live_shadow,
+    validate_live_shadow_spec,
+)
+from research_automation_supervisor.live_shadow_models import LiveShadowResult
 from research_automation_supervisor.redaction import redact_text
 from research_automation_supervisor.shadow_confidentiality import (
     preflight_shadow_confidentiality,
@@ -604,6 +620,229 @@ def abort_shadow_calibration_command(
     _render_shadow_result_and_exit(result, as_json)
 
 
+@app.command("validate-live-shadow-spec")
+def validate_live_shadow_spec_command(
+    path: Annotated[
+        Path, typer.Argument(help="YAML live-shadow specification.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate frozen Stage 4 inputs without writes or launches."""
+    try:
+        prepared = validate_live_shadow_spec(path)
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    value = {
+        "ok": True,
+        "path": str(path),
+        "live_shadow_id": prepared.specification.live_shadow_id,
+        "stage2_specification": str(prepared.stage2.specification_path),
+        "substage_id": prepared.stage2.specification.substage_id,
+    }
+    rendered = _stable_json(value) if as_json else "\n".join(
+        (
+            f"Valid live shadow {prepared.specification.live_shadow_id}: {path}",
+            f"Stage 2 specification: {prepared.stage2.specification_path}",
+            f"Substage: {prepared.stage2.specification.substage_id}",
+        )
+    )
+    _emit_live_shadow_payload(value, rendered, as_json)
+
+
+@app.command("run-live-shadow")
+def run_live_shadow_command(
+    path: Annotated[
+        Path, typer.Argument(help="YAML live-shadow specification.")
+    ],
+    runs_dir: Annotated[
+        Path,
+        typer.Option(
+            "--runs-dir",
+            help="Directory under which the exclusive Stage 4 run is created.",
+        ),
+    ] = DEFAULT_LIVE_SHADOW_RUNS_DIRECTORY,
+    stage2_runs_dir: Annotated[
+        Path,
+        typer.Option(
+            "--stage2-runs-dir",
+            help="Directory under which the authoritative Stage 2 run is created.",
+        ),
+    ] = Path("runs/workflows"),
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Run one independent Stage 2 child plus quarantined observer."""
+    try:
+        result = run_live_shadow(
+            path,
+            runs_dir=runs_dir,
+            stage2_runs_dir=stage2_runs_dir,
+        )
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    _render_live_shadow_result_and_exit(result, as_json)
+
+
+@app.command("resume-live-shadow")
+def resume_live_shadow_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Existing live-shadow run.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Reattach observation without relaunching Stage 2."""
+    try:
+        result = resume_live_shadow(run_directory)
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    _render_live_shadow_result_and_exit(result, as_json)
+
+
+@app.command("live-shadow-status")
+def live_shadow_status_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Live-shadow run to inspect.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Read Stage 4 status without writes or launches."""
+    try:
+        result = live_shadow_status(run_directory)
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    value = result.to_dict()
+    _emit_live_shadow_payload(
+        value,
+        _stable_json(value) if as_json else _format_live_shadow_result(result),
+        as_json,
+    )
+
+
+@app.command("record-live-shadow-review")
+def record_live_shadow_review_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Live-shadow run.")
+    ],
+    proposal_id: Annotated[
+        str, typer.Argument(help="Exact proposal ID to review.")
+    ],
+    review_path: Annotated[
+        Path, typer.Argument(help="Strict human-review YAML file.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Record one immutable live-shadow human review."""
+    try:
+        result = record_live_shadow_review(
+            run_directory,
+            proposal_id,
+            review_path,
+        )
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    _render_live_shadow_result_and_exit(result, as_json)
+
+
+@app.command("live-shadow-report")
+def live_shadow_report_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Live-shadow run to report.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Build a read-only live comparison/readiness report."""
+    try:
+        report = live_shadow_report(run_directory)
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    if as_json:
+        rendered = _stable_json(report)
+    else:
+        readiness = cast(dict[str, object], report["readiness"])
+        rendered = "\n".join(
+            (
+                f"Live shadow: {report['live_shadow_id']}",
+                f"Status: {report['status']}",
+                f"Readiness: {readiness['status']}",
+                "Readiness is informational only; automation remains disabled.",
+            )
+        )
+    _emit_live_shadow_payload(report, rendered, as_json)
+
+
+@app.command("abort-live-shadow")
+def abort_live_shadow_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Live-shadow run to abort.")
+    ],
+    reason: Annotated[
+        str, typer.Option("--reason", help="Human abort reason.")
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Abort only Stage 4 observation; never signal Stage 2."""
+    try:
+        result = abort_live_shadow(run_directory, reason)
+    except LiveShadowInputError as exc:
+        _render_live_shadow_error(str(exc), as_json, 2)
+    except LiveShadowDependencyError as exc:
+        _render_live_shadow_error(str(exc), as_json, 3)
+    except (LiveShadowLockError, LiveShadowStateError) as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_live_shadow_internal_error(as_json)
+    _render_live_shadow_result_and_exit(result, as_json)
+
+
 def _stable_json(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True)
 
@@ -631,6 +870,80 @@ def _render_shadow_result_and_exit(
     exit_code = shadow_calibration_exit_code(result.status)
     if exit_code:
         raise typer.Exit(code=exit_code)
+
+
+def _render_live_shadow_result_and_exit(
+    result: LiveShadowResult,
+    as_json: bool,
+) -> None:
+    value = result.to_dict()
+    rendered = (
+        _stable_json(result.to_dict())
+        if as_json
+        else _format_live_shadow_result(result)
+    )
+    _emit_live_shadow_payload(value, rendered, as_json)
+    exit_code = live_shadow_exit_code(result.status)
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
+def _format_live_shadow_result(result: LiveShadowResult) -> str:
+    return "\n".join(
+        (
+            f"Live shadow: {result.live_shadow_id}",
+            f"Status: {result.status}",
+            f"Authoritative Stage 2: {result.authoritative_stage2_status}",
+            f"Summary: {result.summary}",
+            f"Observed decisions: {result.observed_decision_count}",
+            f"Proposals/comparisons/reviews: "
+            f"{result.proposal_count}/{result.comparison_count}/{result.review_count}",
+            f"Readiness: {result.readiness}",
+            "Automation enabled: no",
+            f"Artifacts: {result.artifact_directory}",
+        )
+    )
+
+
+def _render_live_shadow_error(
+    error: str,
+    as_json: bool,
+    exit_code: int,
+) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized = redact_text(error, sensitive_values)
+    if as_json:
+        typer.echo(_stable_json({"error": sanitized, "ok": False}))
+    else:
+        typer.echo(f"Live-shadow error: {sanitized}", err=True)
+    raise typer.Exit(code=exit_code)
+
+
+def _render_live_shadow_internal_error(as_json: bool) -> Never:
+    message = "unexpected internal live-shadow failure"
+    if as_json:
+        typer.echo(_stable_json({"error": message, "ok": False}))
+    else:
+        typer.echo(f"Live-shadow error: {message}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _emit_live_shadow_payload(
+    value: object,
+    rendered: str,
+    as_json: bool,
+) -> None:
+    _, _, sensitive_values = build_subprocess_environment()
+    try:
+        preflight_shadow_confidentiality(
+            value,
+            sensitive_values,
+            label="live-shadow CLI payload",
+            integrity=True,
+        )
+    except ShadowStateError as exc:
+        _render_live_shadow_error(str(exc), as_json, 4)
+    typer.echo(rendered)
 
 
 def _emit_shadow_payload(

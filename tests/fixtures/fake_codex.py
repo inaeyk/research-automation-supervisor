@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline fake for exercising the Stage 1/2/3 Codex process boundary."""
+"""Offline fake for exercising the Stage 1/2/3/4 Codex process boundary."""
 
 from __future__ import annotations
 
@@ -79,6 +79,7 @@ def _validate_stage2_policy(arguments: list[str], configuration: dict[str, objec
     if not (
         configuration.get("require_stage2_policy")
         or configuration.get("require_stage3_policy")
+        or configuration.get("require_stage4_policy")
     ):
         return None
     required_pairs = (
@@ -114,7 +115,12 @@ def main() -> int:
         return 0
 
     workspace = Path.cwd()
-    configuration_path = workspace / ".fake-codex.json"
+    configured_path = os.environ.get("FAKE_CODEX_CONFIG")
+    configuration_path = (
+        Path(configured_path)
+        if configured_path is not None
+        else workspace / ".fake-codex.json"
+    )
     base_configuration = (
         json.loads(configuration_path.read_text(encoding="utf-8"))
         if configuration_path.exists()
@@ -125,6 +131,7 @@ def main() -> int:
         sys.argv[1:],
         uuid_resume_required=bool(
             configuration.get("require_stage3_policy")
+            or configuration.get("require_stage4_policy")
         ),
     )
     if parser_error is not None:

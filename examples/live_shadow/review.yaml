@@ -1,0 +1,12 @@
+schema_version: 1
+proposal_id: worker_initial-r000-a001
+verdict: equivalent
+objective_fidelity: 5
+scope_discipline: 5
+technical_completeness: 4
+evidence_use: 4
+actionability: 5
+concision: 4
+unsupported_assumptions: []
+blocking_issues: []
+notes: The quarantined candidate is semantically equivalent to the authoritative prompt.

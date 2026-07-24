@@ -79,3 +79,27 @@ class ShadowConfidentialityError(ShadowInputError):
 
 class ShadowLockError(ShadowError):
     """A shadow-calibration run cannot be locked safely."""
+
+
+class LiveShadowError(SupervisorError):
+    """Base class for expected Stage 4 live-shadow errors."""
+
+
+class LiveShadowInputError(LiveShadowError):
+    """A Stage 4 specification, review, path, or command is invalid."""
+
+
+class LiveShadowDependencyError(LiveShadowError):
+    """A required local Stage 4 dependency is unavailable."""
+
+
+class LiveShadowStateError(LiveShadowError):
+    """Durable Stage 4 evidence violates an invariant."""
+
+
+class LiveShadowIntegrityError(LiveShadowStateError):
+    """Trusted Stage 4 or authoritative Stage 2 evidence failed integrity checks."""
+
+
+class LiveShadowLockError(LiveShadowError):
+    """A live-shadow run cannot be locked safely."""
