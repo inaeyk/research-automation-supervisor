@@ -257,6 +257,47 @@ def test_production_output_limit_defaults_are_exact() -> None:
     assert DEFAULT_LIMITS.stderr_bytes == 10 * 1024 * 1024
 
 
+@pytest.mark.parametrize(
+    "literal_schema",
+    [
+        {"const": 1},
+        {"enum": ["a", "b"]},
+    ],
+)
+def test_invalid_literal_schema_is_rejected_locally_before_codex_launch(
+    tmp_path: Path,
+    literal_schema: dict[str, object],
+) -> None:
+    prepared = prepared_request(tmp_path)
+    schema_path = tmp_path / "output-schema.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["value"],
+                "properties": {"value": literal_schema},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CodexRequestError,
+        match=r"output schema is not production-compatible: .*requires an explicit",
+    ):
+        run_prepared_codex(
+            prepared,
+            runs_dir=tmp_path / "runs",
+            codex_executable=str(FAKE_CODEX),
+            environ=fake_environment(),
+            output_schema=schema_path,
+        )
+
+    assert not (tmp_path / "runs").exists()
+    assert not (prepared.workspace / ".fake-codex-observation.json").exists()
+
+
 def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path) -> None:
     prepared = prepared_request(tmp_path)
     configure(

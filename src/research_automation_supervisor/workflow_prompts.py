@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Literal
 
 from research_automation_supervisor.git_evidence import GitBaseline, GitEvidence
+from research_automation_supervisor.structured_outputs import (
+    normalize_production_schema,
+)
 from research_automation_supervisor.test_runner import TestAttemptResult
 from research_automation_supervisor.workflow_models import (
     AuditorModelResult,
@@ -25,7 +28,7 @@ EVIDENCE_FOOTER = b"[END DETERMINISTIC EVIDENCE]\n"
 SCHEMA_HEADER = b"\n[BEGIN ENGINE-OWNED OUTPUT SCHEMA]\n"
 SCHEMA_FOOTER = b"[END ENGINE-OWNED OUTPUT SCHEMA]\n"
 
-WORKER_OUTPUT_SCHEMA: dict[str, object] = {
+WORKER_OUTPUT_SCHEMA: dict[str, object] = normalize_production_schema({
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
@@ -57,9 +60,9 @@ WORKER_OUTPUT_SCHEMA: dict[str, object] = {
             "items": {"type": "string", "maxLength": 16384},
         },
     },
-}
+})
 
-AUDITOR_OUTPUT_SCHEMA: dict[str, object] = {
+AUDITOR_OUTPUT_SCHEMA: dict[str, object] = normalize_production_schema({
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
@@ -110,7 +113,7 @@ AUDITOR_OUTPUT_SCHEMA: dict[str, object] = {
             "items": {"type": "string", "maxLength": 16384},
         },
     },
-}
+})
 
 
 @dataclass(frozen=True)

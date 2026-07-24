@@ -20,6 +20,9 @@ from research_automation_supervisor.shadow_sources import (
     DecisionReconstruction,
     PreparedShadowSpecification,
 )
+from research_automation_supervisor.structured_outputs import (
+    normalize_production_schema,
+)
 
 POLICY_LABEL = b"\n\n[END FROZEN HUMAN SUPERVISOR POLICY]\n"
 CONTEXT_HEADER = b"\n[BEGIN FROZEN HUMAN PROJECT CONTEXT]\n"
@@ -42,7 +45,7 @@ SHADOW_INSTRUCTION = (
     b"required by the engine-owned schema.\n"
 )
 
-SUPERVISOR_OUTPUT_SCHEMA: dict[str, object] = {
+SUPERVISOR_OUTPUT_SCHEMA: dict[str, object] = normalize_production_schema({
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
@@ -108,7 +111,7 @@ SUPERVISOR_OUTPUT_SCHEMA: dict[str, object] = {
         "acceptance_change_requested": {"type": "boolean"},
         "convention_change_requested": {"type": "boolean"},
     },
-}
+})
 
 
 @dataclass(frozen=True)
@@ -132,7 +135,7 @@ def build_supervisor_output_schema(
     prompt = properties["prompt"]
     assert isinstance(prompt, dict)
     prompt["maxLength"] = max_proposal_bytes
-    return schema
+    return normalize_production_schema(schema)
 
 
 def build_blind_supervisor_prompt(

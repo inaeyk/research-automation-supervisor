@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from research_automation_supervisor.shadow_prompts import (
     SHADOW_INSTRUCTION,
     build_blind_supervisor_prompt,
+    build_supervisor_output_schema,
 )
 from research_automation_supervisor.shadow_sources import (
     load_shadow_specification,
@@ -85,3 +88,46 @@ def test_prior_comparison_and_review_sentinels_are_not_prompt_inputs(
 
     assert comparison_sentinel not in later.content
     assert review_sentinel not in later.content
+
+
+@pytest.mark.parametrize(
+    "proposal_kind",
+    [
+        "worker_initial",
+        "worker_scope_repair",
+        "worker_test_repair",
+        "worker_audit_repair",
+        "worker_human_continuation",
+        "auditor",
+    ],
+)
+def test_every_supervisor_literal_schema_node_has_its_exact_type(
+    proposal_kind: str,
+) -> None:
+    schema = build_supervisor_output_schema(proposal_kind, 4096)
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+
+    literal_nodes = {
+        name: value
+        for name, value in properties.items()
+        if isinstance(value, dict) and ({"const", "enum"} & value.keys())
+    }
+    assert literal_nodes == {
+        "schema_version": {
+            "type": "integer",
+            "const": 1,
+        },
+        "proposal_kind": {
+            "type": "string",
+            "const": proposal_kind,
+        },
+        "disposition": {
+            "type": "string",
+            "enum": ["propose", "recommend_human_pause"],
+        },
+    }
+    assert properties["prompt"] == {
+        "type": ["string", "null"],
+        "maxLength": 4096,
+    }

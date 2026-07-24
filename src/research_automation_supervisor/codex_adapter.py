@@ -40,6 +40,10 @@ from research_automation_supervisor.redaction import (
     redact_text,
     would_redact_text,
 )
+from research_automation_supervisor.structured_outputs import (
+    ProductionSchemaError,
+    validate_production_schema,
+)
 
 STDOUT_LIMIT_BYTES = 100 * 1024 * 1024
 STDERR_LIMIT_BYTES = 10 * 1024 * 1024
@@ -516,6 +520,12 @@ def _validate_output_schema(
         raise CodexRequestError("output schema is not valid JSON") from exc
     if not isinstance(parsed, dict):
         raise CodexRequestError("output schema root must be a JSON object")
+    try:
+        validate_production_schema(parsed)
+    except ProductionSchemaError as exc:
+        raise CodexRequestError(
+            f"output schema is not production-compatible: {exc}"
+        ) from exc
     validate_locator_confidentiality(
         (resolved, hashlib.sha256(content).hexdigest()), sensitive_values
     )
