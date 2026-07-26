@@ -101,5 +101,9 @@ class LiveShadowIntegrityError(LiveShadowStateError):
     """Trusted Stage 4 or authoritative Stage 2 evidence failed integrity checks."""
 
 
+class LiveShadowRuntimeHomeInstabilityError(LiveShadowIntegrityError):
+    """The persistent runtime-home namespace did not stabilize after retries."""
+
+
 class LiveShadowLockError(LiveShadowError):
     """A live-shadow run cannot be locked safely."""

@@ -8,11 +8,11 @@ import os
 import stat
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol
+from typing import Literal, NoReturn, Protocol
 
 from research_automation_supervisor.auth_confidentiality import (
     AuthenticationConfidentiality,
@@ -23,6 +23,7 @@ from research_automation_supervisor.codex_models import PreparedCodexRequest
 from research_automation_supervisor.errors import (
     LiveShadowDependencyError,
     LiveShadowIntegrityError,
+    LiveShadowRuntimeHomeInstabilityError,
 )
 from research_automation_supervisor.shadow_models import PendingSupervisorAction
 from research_automation_supervisor.workflow_integrity import CodexMetadata
@@ -972,19 +973,229 @@ def validate_runtime_home_contents(
         )
 
 
+def inspect_runtime_home_contents(
+    runtime_home: Path,
+    *,
+    authentication_confidentiality: AuthenticationConfidentiality | None = None,
+    forbidden_fragments: Sequence[bytes] = (),
+) -> tuple[str, ...]:
+    """Return safe finding categories from one complete stable validation."""
+    return _scan_runtime_home(
+        runtime_home,
+        authentication_confidentiality=authentication_confidentiality,
+        forbidden_fragments=forbidden_fragments,
+        scrub=False,
+    )
+
+
 def scrub_runtime_home_contamination(
     runtime_home: Path,
     *,
     authentication_confidentiality: AuthenticationConfidentiality,
     forbidden_fragments: Sequence[bytes] = (),
 ) -> tuple[str, ...]:
-    """Remove contaminated engine-owned entries and return only safe categories."""
+    """Remove every runtime-home entry after any contamination is detected."""
     return _scan_runtime_home(
         runtime_home,
         authentication_confidentiality=authentication_confidentiality,
         forbidden_fragments=forbidden_fragments,
         scrub=True,
     )
+
+
+def reset_runtime_home_contents(
+    runtime_home: Path,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
+) -> None:
+    """Remove all entries from the currently named, stably anchored runtime home."""
+    parent_path = runtime_home.parent
+    name = os.fsencode(runtime_home.name)
+    if not name or name in {b".", b".."} or b"/" in name:
+        raise OSError(errno.EINVAL, "runtime-home entry is invalid")
+    parent_entry = parent_path.lstat()
+    _require_trusted_runtime_directory(parent_entry)
+    parent_descriptor = _open_runtime_directory(parent_path)
+    try:
+        opened_parent = os.fstat(parent_descriptor)
+        if _directory_identity(opened_parent) != _directory_identity(parent_entry):
+            raise _RuntimeHomeConsistencyError
+        root_entry = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _require_trusted_runtime_directory(root_entry)
+        root_descriptor = _open_runtime_directory_at(
+            parent_descriptor,
+            name,
+            root_entry,
+        )
+        try:
+            opened_root = os.fstat(root_descriptor)
+            _scrub_runtime_descriptor(
+                root_descriptor,
+                checkpoint=checkpoint,
+            )
+            remaining, over_bound = _enumerate_runtime_directory(
+                root_descriptor,
+                remaining=1,
+            )
+            current_root = os.fstat(root_descriptor)
+            if (
+                remaining
+                or over_bound
+                or _directory_binding_identity(current_root)
+                != _directory_binding_identity(opened_root)
+            ):
+                raise _RuntimeHomeConsistencyError
+            current_entry = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                _directory_binding_identity(current_entry)
+                != _directory_binding_identity(current_root)
+            ):
+                raise _RuntimeHomeConsistencyError
+        finally:
+            os.close(root_descriptor)
+        if (
+            _directory_identity(os.fstat(parent_descriptor))
+            != _directory_identity(opened_parent)
+            or _directory_identity(parent_path.lstat())
+            != _directory_identity(opened_parent)
+        ):
+            raise _RuntimeHomeConsistencyError
+    finally:
+        os.close(parent_descriptor)
+
+
+def recreate_engine_runtime_home(
+    runtime_home: Path,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
+) -> None:
+    """Normalize the engine-owned quarantine and recreate one empty runtime home."""
+    quarantine = runtime_home.parent
+    quarantine_parent = quarantine.parent
+    quarantine_name = os.fsencode(quarantine.name)
+    runtime_name = os.fsencode(runtime_home.name)
+    if (
+        not quarantine_name
+        or quarantine_name in {b".", b".."}
+        or not runtime_name
+        or runtime_name in {b".", b".."}
+    ):
+        raise OSError(errno.EINVAL, "runtime-home boundary is invalid")
+    parent_entry = quarantine_parent.lstat()
+    _require_trusted_runtime_directory(parent_entry)
+    parent_descriptor = _open_runtime_directory(quarantine_parent)
+    try:
+        opened_parent = os.fstat(parent_descriptor)
+        if _directory_identity(opened_parent) != _directory_identity(parent_entry):
+            raise _RuntimeHomeConsistencyError
+        quarantine_entry = os.stat(
+            quarantine_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _require_trusted_runtime_directory(quarantine_entry)
+        quarantine_descriptor = _open_runtime_directory_at(
+            parent_descriptor,
+            quarantine_name,
+            quarantine_entry,
+        )
+        try:
+            opened_quarantine = os.fstat(quarantine_descriptor)
+            entries, over_bound = _enumerate_runtime_directory(
+                quarantine_descriptor,
+                remaining=MAX_RUNTIME_HOME_FILES,
+            )
+            if over_bound:
+                raise OSError(errno.EFBIG, "quarantine entry bound exceeded")
+            workspace_seen = False
+            for name, entry_status in entries:
+                if name == b"workspace":
+                    _require_trusted_runtime_directory(entry_status)
+                    workspace_descriptor = _open_runtime_directory_at(
+                        quarantine_descriptor,
+                        name,
+                        entry_status,
+                    )
+                    try:
+                        workspace_entries, workspace_over_bound = (
+                            _enumerate_runtime_directory(
+                                workspace_descriptor,
+                                remaining=1,
+                            )
+                        )
+                        if workspace_entries or workspace_over_bound:
+                            raise OSError(
+                                errno.ENOTEMPTY,
+                                "quarantine workspace is not empty",
+                            )
+                    finally:
+                        os.close(workspace_descriptor)
+                    workspace_seen = True
+                    continue
+                _remove_runtime_entry_at(
+                    quarantine_descriptor,
+                    name,
+                    entry_status,
+                    checkpoint=checkpoint,
+                )
+            if not workspace_seen:
+                raise OSError(errno.ENOENT, "quarantine workspace is absent")
+            os.mkdir(
+                runtime_name,
+                mode=0o700,
+                dir_fd=quarantine_descriptor,
+            )
+            _fsync_descriptor(quarantine_descriptor)
+            recreated = os.stat(
+                runtime_name,
+                dir_fd=quarantine_descriptor,
+                follow_symlinks=False,
+            )
+            _require_trusted_runtime_directory(recreated)
+            final_entries, final_over_bound = _enumerate_runtime_directory(
+                quarantine_descriptor,
+                remaining=3,
+            )
+            if (
+                final_over_bound
+                or tuple(name for name, _ in final_entries)
+                != (runtime_name, b"workspace")
+                or _directory_binding_identity(os.fstat(quarantine_descriptor))
+                != _directory_binding_identity(opened_quarantine)
+            ):
+                raise _RuntimeHomeConsistencyError
+            current_quarantine = os.stat(
+                quarantine_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                _directory_binding_identity(current_quarantine)
+                != _directory_binding_identity(
+                    os.fstat(quarantine_descriptor)
+                )
+            ):
+                raise _RuntimeHomeConsistencyError
+        finally:
+            os.close(quarantine_descriptor)
+        if (
+            _directory_identity(os.fstat(parent_descriptor))
+            != _directory_identity(opened_parent)
+            or _directory_identity(quarantine_parent.lstat())
+            != _directory_identity(opened_parent)
+        ):
+            raise _RuntimeHomeConsistencyError
+    finally:
+        os.close(parent_descriptor)
+    validate_runtime_home_contents(runtime_home)
 
 
 def _scan_runtime_home(
@@ -994,21 +1205,7 @@ def _scan_runtime_home(
     forbidden_fragments: Sequence[bytes],
     scrub: bool,
 ) -> tuple[str, ...]:
-    """Inspect an inactive runtime home through no-follow directory descriptors."""
-    try:
-        root_status = runtime_home.lstat()
-    except OSError as exc:
-        raise LiveShadowIntegrityError(
-            "Codex runtime home could not be checked"
-        ) from exc
-    if (
-        not stat.S_ISDIR(root_status.st_mode)
-        or runtime_home.is_symlink()
-        or os.path.ismount(runtime_home)
-    ):
-        raise LiveShadowIntegrityError(
-            "Codex runtime home is not an exact engine-owned directory"
-        )
+    """Inspect an inactive runtime home through a stably anchored parent."""
     forbidden = tuple(
         sorted(
             {fragment for fragment in forbidden_fragments if len(fragment) >= 8},
@@ -1022,31 +1219,27 @@ def _scan_runtime_home(
                 runtime_home,
                 authentication_confidentiality=authentication_confidentiality,
                 forbidden_fragments=forbidden,
-                scrub=scrub,
+                scrub=False,
                 findings=findings,
             )
             break
-        except _RuntimeHomeDisappearanceError as exc:
-            if attempt == MAX_RUNTIME_HOME_SCAN_ATTEMPTS - 1:
-                raise LiveShadowIntegrityError(
-                    "Codex runtime home did not remain stable while checked"
-                ) from exc
         except _RuntimeHomeConsistencyError as exc:
-            raise LiveShadowIntegrityError(
-                "Codex runtime-home entry identity changed while checked"
-            ) from exc
+            if attempt == MAX_RUNTIME_HOME_SCAN_ATTEMPTS - 1:
+                raise LiveShadowRuntimeHomeInstabilityError(
+                    "Codex runtime-home identity changed or did not remain "
+                    "stable while checked"
+                ) from exc
         except OSError as exc:
-            if scrub:
-                try:
-                    _scrub_runtime_home(runtime_home)
-                except OSError as scrub_exc:
-                    raise LiveShadowIntegrityError(
-                        "Codex runtime-home contamination could not be scrubbed"
-                    ) from scrub_exc
             raise LiveShadowIntegrityError(
                 "Codex runtime home could not be checked"
             ) from exc
     if scrub and findings:
+        try:
+            reset_runtime_home_contents(runtime_home)
+        except OSError as exc:
+            raise LiveShadowIntegrityError(
+                "Codex runtime-home contamination could not be scrubbed"
+            ) from exc
         validate_runtime_home_contents(
             runtime_home,
             authentication_confidentiality=authentication_confidentiality,
@@ -1078,28 +1271,74 @@ def _scan_runtime_home_once(
     scrub: bool,
     findings: set[str],
 ) -> None:
-    root_descriptor = _open_runtime_directory(runtime_home)
+    parent_path = runtime_home.parent
+    name = os.fsencode(runtime_home.name)
+    if not name or name in {b".", b".."} or b"/" in name:
+        raise _RuntimeHomeConsistencyError
     try:
-        root_identity = _directory_identity(os.fstat(root_descriptor))
-        walk = _RuntimeHomeWalk()
-        _walk_runtime_directory(
-            root_descriptor,
-            components=(),
-            authentication_confidentiality=authentication_confidentiality,
-            forbidden_fragments=forbidden_fragments,
-            scrub=scrub,
-            findings=findings,
-            walk=walk,
-        )
-        if _directory_identity(os.fstat(root_descriptor)) != root_identity:
+        parent_entry = parent_path.lstat()
+    except OSError as exc:
+        _raise_runtime_namespace_error(exc)
+    _require_trusted_runtime_directory(parent_entry)
+    try:
+        parent_descriptor = _open_runtime_directory(parent_path)
+    except OSError as exc:
+        _raise_runtime_namespace_error(exc)
+    try:
+        opened_parent = os.fstat(parent_descriptor)
+        if _directory_identity(opened_parent) != _directory_identity(parent_entry):
             raise _RuntimeHomeConsistencyError
-        if scrub:
-            _remove_empty_contaminated_parents(
-                root_descriptor,
-                walk.contaminated_parents,
+        try:
+            root_entry = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
             )
+        except OSError as exc:
+            _raise_runtime_namespace_error(exc)
+        _require_trusted_runtime_directory(root_entry)
+        root_descriptor = _open_runtime_directory_at(
+            parent_descriptor,
+            name,
+            root_entry,
+        )
+        try:
+            root_identity = _directory_identity(os.fstat(root_descriptor))
+            _runtime_scan_checkpoint("runtime_root_opened")
+            walk = _RuntimeHomeWalk()
+            _walk_runtime_directory(
+                root_descriptor,
+                components=(),
+                authentication_confidentiality=authentication_confidentiality,
+                forbidden_fragments=forbidden_fragments,
+                scrub=scrub,
+                findings=findings,
+                walk=walk,
+            )
+            if _directory_identity(os.fstat(root_descriptor)) != root_identity:
+                raise _RuntimeHomeConsistencyError
+            _verify_runtime_entry_identity(
+                parent_descriptor,
+                name,
+                root_entry,
+                allow_missing=False,
+            )
+            _runtime_scan_checkpoint("runtime_root_rebound")
+        finally:
+            os.close(root_descriptor)
+        try:
+            current_parent = parent_path.lstat()
+        except OSError as exc:
+            _raise_runtime_namespace_error(exc)
+        if (
+            _directory_identity(os.fstat(parent_descriptor))
+            != _directory_identity(opened_parent)
+            or _directory_identity(current_parent)
+            != _directory_identity(opened_parent)
+        ):
+            raise _RuntimeHomeConsistencyError
     finally:
-        os.close(root_descriptor)
+        os.close(parent_descriptor)
 
 
 def _walk_runtime_directory(
@@ -1112,19 +1351,12 @@ def _walk_runtime_directory(
     findings: set[str],
     walk: _RuntimeHomeWalk,
 ) -> None:
-    over_entry_bound = False
-    try:
-        with os.scandir(directory_descriptor) as iterator:
-            names: list[bytes] = []
-            remaining = MAX_RUNTIME_HOME_FILES - walk.entry_count
-            for entry in iterator:
-                if len(names) >= remaining:
-                    over_entry_bound = True
-                    break
-                names.append(os.fsencode(entry.name))
-            names.sort()
-    except FileNotFoundError as exc:
-        raise _RuntimeHomeDisappearanceError from exc
+    directory_before = os.fstat(directory_descriptor)
+    _require_trusted_runtime_directory(directory_before)
+    entries_before, over_entry_bound = _enumerate_runtime_directory(
+        directory_descriptor,
+        remaining=MAX_RUNTIME_HOME_FILES - walk.entry_count,
+    )
     if over_entry_bound:
         findings.add("runtime_home_bound_violation")
         if scrub:
@@ -1134,19 +1366,10 @@ def _walk_runtime_directory(
                 for index in range(1, len(components) + 1)
             )
         return
-    for name in names:
+    for name, status in entries_before:
         walk.entry_count += 1
         entry_components = (*components, name)
         relative_path = b"/".join(entry_components)
-        try:
-            status = os.stat(
-                name,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError as exc:
-            raise _RuntimeHomeDisappearanceError from exc
-
         auth_path_match = (
             authentication_confidentiality is not None
             and (
@@ -1163,13 +1386,24 @@ def _walk_runtime_directory(
             for fragment in forbidden_fragments
         )
         repository_path_match = name == b".git"
+        permission_violation = (
+            status.st_uid != os.geteuid()
+            or bool(status.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        )
         if auth_path_match:
             findings.add("auth_confidentiality_violation")
         if forbidden_path_match:
             findings.add("runtime_home_forbidden_content")
         if repository_path_match:
             findings.add("runtime_home_repository_material")
-        if auth_path_match or forbidden_path_match or repository_path_match:
+        if permission_violation:
+            findings.add("runtime_home_permission_violation")
+        if (
+            auth_path_match
+            or forbidden_path_match
+            or repository_path_match
+            or permission_violation
+        ):
             if scrub:
                 _remove_runtime_entry_at(
                     directory_descriptor,
@@ -1203,6 +1437,7 @@ def _walk_runtime_directory(
                 status,
             )
             try:
+                _runtime_scan_checkpoint("runtime_directory_opened")
                 _walk_runtime_directory(
                     child_descriptor,
                     components=entry_components,
@@ -1250,6 +1485,13 @@ def _walk_runtime_directory(
             name,
             status,
         )
+        _runtime_scan_checkpoint("runtime_regular_file_read")
+        _verify_runtime_entry_identity(
+            directory_descriptor,
+            name,
+            status,
+            allow_missing=False,
+        )
         auth_content_match = (
             authentication_confidentiality is not None
             and authentication_confidentiality.contains_bytes(content)
@@ -1276,6 +1518,18 @@ def _walk_runtime_directory(
                 entry_components[:index]
                 for index in range(1, len(entry_components))
             )
+    entries_after, over_entry_bound_after = _enumerate_runtime_directory(
+        directory_descriptor,
+        remaining=MAX_RUNTIME_HOME_FILES,
+    )
+    if (
+        over_entry_bound_after
+        or _runtime_entry_set_identity(entries_after)
+        != _runtime_entry_set_identity(entries_before)
+        or _directory_identity(os.fstat(directory_descriptor))
+        != _directory_identity(directory_before)
+    ):
+        raise _RuntimeHomeConsistencyError
 
 
 def _read_runtime_regular_file_at(
@@ -1290,14 +1544,14 @@ def _read_runtime_regular_file_at(
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(name, flags, dir_fd=directory_descriptor)
-    except FileNotFoundError as exc:
-        raise _RuntimeHomeDisappearanceError from exc
+    except OSError as exc:
+        _raise_runtime_namespace_error(exc)
     try:
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or (before.st_dev, before.st_ino, before.st_size)
-            != (expected.st_dev, expected.st_ino, expected.st_size)
+            or _regular_file_identity(before)
+            != _regular_file_identity(expected)
         ):
             raise _RuntimeHomeConsistencyError
         content = bytearray()
@@ -1315,8 +1569,8 @@ def _read_runtime_regular_file_at(
         after = os.fstat(descriptor)
         if (
             len(content) > MAX_RUNTIME_HOME_FILE_BYTES
-            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or _regular_file_identity(before)
+            != _regular_file_identity(after)
         ):
             raise _RuntimeHomeConsistencyError
         return bytes(content)
@@ -1349,16 +1603,126 @@ def _open_runtime_directory_at(
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-    except FileNotFoundError as exc:
-        raise _RuntimeHomeDisappearanceError from exc
-    if _directory_identity(os.fstat(descriptor)) != _directory_identity(expected):
+    except OSError as exc:
+        _raise_runtime_namespace_error(exc)
+    opened = os.fstat(descriptor)
+    if _directory_identity(opened) != _directory_identity(expected):
         os.close(descriptor)
         raise _RuntimeHomeConsistencyError
+    _require_trusted_runtime_directory(opened)
     return descriptor
 
 
-def _directory_identity(status: os.stat_result) -> tuple[int, int, int]:
-    return (status.st_dev, status.st_ino, status.st_mode)
+def _directory_identity(
+    status: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_nlink,
+        status.st_uid,
+        status.st_gid,
+        status.st_ctime_ns,
+        status.st_mtime_ns,
+    )
+
+
+def _directory_binding_identity(
+    status: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        stat.S_IFMT(status.st_mode),
+        status.st_uid,
+        status.st_gid,
+        status.st_mode & 0o7777,
+    )
+
+
+def _regular_file_identity(
+    status: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_nlink,
+        status.st_uid,
+        status.st_gid,
+        status.st_size,
+        status.st_ctime_ns,
+        status.st_mtime_ns,
+    )
+
+
+def _entry_identity(
+    status: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return _regular_file_identity(status)
+
+
+def _require_trusted_runtime_directory(status: os.stat_result) -> None:
+    if (
+        not stat.S_ISDIR(status.st_mode)
+        or status.st_uid != os.geteuid()
+        or status.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise _RuntimeHomeConsistencyError
+
+
+def _raise_runtime_namespace_error(exc: OSError) -> NoReturn:
+    """Classify pathname lookup failures caused by a concurrent replacement."""
+    consistency_errnos = {
+        errno.ENOENT,
+        errno.ENOTDIR,
+        errno.ELOOP,
+    }
+    stale = getattr(errno, "ESTALE", None)
+    if stale is not None:
+        consistency_errnos.add(stale)
+    if exc.errno in consistency_errnos:
+        if exc.errno == errno.ENOENT:
+            raise _RuntimeHomeDisappearanceError from exc
+        raise _RuntimeHomeConsistencyError from exc
+    raise exc
+
+
+def _enumerate_runtime_directory(
+    directory_descriptor: int,
+    *,
+    remaining: int,
+) -> tuple[tuple[tuple[bytes, os.stat_result], ...], bool]:
+    entries: list[tuple[bytes, os.stat_result]] = []
+    over_bound = False
+    try:
+        os.lseek(directory_descriptor, 0, os.SEEK_SET)
+        with os.scandir(directory_descriptor) as iterator:
+            for entry in iterator:
+                if len(entries) >= remaining:
+                    over_bound = True
+                    break
+                name = os.fsencode(entry.name)
+                try:
+                    status = os.stat(
+                        name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    _raise_runtime_namespace_error(exc)
+                entries.append((name, status))
+    except OSError as exc:
+        _raise_runtime_namespace_error(exc)
+    entries.sort(key=lambda item: item[0])
+    return tuple(entries), over_bound
+
+
+def _runtime_entry_set_identity(
+    entries: Sequence[tuple[bytes, os.stat_result]],
+) -> tuple[tuple[bytes, tuple[int, int, int, int, int, int, int, int, int]], ...]:
+    return tuple((name, _entry_identity(status)) for name, status in entries)
 
 
 def _verify_runtime_entry_identity(
@@ -1374,19 +1738,11 @@ def _verify_runtime_entry_identity(
             dir_fd=directory_descriptor,
             follow_symlinks=False,
         )
-    except FileNotFoundError:
-        if allow_missing:
+    except OSError as exc:
+        if allow_missing and exc.errno == errno.ENOENT:
             return
-        raise _RuntimeHomeDisappearanceError from None
-    if (
-        current.st_dev,
-        current.st_ino,
-        current.st_mode,
-    ) != (
-        expected.st_dev,
-        expected.st_ino,
-        expected.st_mode,
-    ):
+        _raise_runtime_namespace_error(exc)
+    if _entry_identity(current) != _entry_identity(expected):
         raise _RuntimeHomeConsistencyError
 
 
@@ -1394,6 +1750,8 @@ def _remove_runtime_entry_at(
     directory_descriptor: int,
     name: bytes,
     expected: os.stat_result,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> None:
     if stat.S_ISDIR(expected.st_mode):
         child_descriptor = _open_runtime_directory_at(
@@ -1402,14 +1760,16 @@ def _remove_runtime_entry_at(
             expected,
         )
         try:
-            _scrub_runtime_descriptor(child_descriptor)
+            _scrub_runtime_descriptor(
+                child_descriptor,
+                checkpoint=checkpoint,
+            )
         finally:
             os.close(child_descriptor)
-        _verify_runtime_entry_identity(
+        _verify_runtime_entry_binding(
             directory_descriptor,
             name,
             expected,
-            allow_missing=False,
         )
         os.rmdir(name, dir_fd=directory_descriptor)
     else:
@@ -1424,11 +1784,37 @@ def _remove_runtime_entry_at(
         os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
     except FileNotFoundError:
         _fsync_descriptor(directory_descriptor)
+        if checkpoint is not None:
+            checkpoint("during_runtime_home_scrub")
         return
     raise OSError(errno.EBUSY, "runtime entry removal was not durable")
 
 
-def _scrub_runtime_descriptor(directory_descriptor: int) -> None:
+def _verify_runtime_entry_binding(
+    directory_descriptor: int,
+    name: bytes,
+    expected: os.stat_result,
+) -> None:
+    try:
+        current = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        _raise_runtime_namespace_error(exc)
+    if (
+        _directory_binding_identity(current)
+        != _directory_binding_identity(expected)
+    ):
+        raise _RuntimeHomeConsistencyError
+
+
+def _scrub_runtime_descriptor(
+    directory_descriptor: int,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
+) -> None:
     while True:
         os.lseek(directory_descriptor, 0, os.SEEK_SET)
         with os.scandir(directory_descriptor) as iterator:
@@ -1447,7 +1833,12 @@ def _scrub_runtime_descriptor(directory_descriptor: int) -> None:
                 )
             except FileNotFoundError as exc:
                 raise _RuntimeHomeDisappearanceError from exc
-            _remove_runtime_entry_at(directory_descriptor, name, status)
+            _remove_runtime_entry_at(
+                directory_descriptor,
+                name,
+                status,
+                checkpoint=checkpoint,
+            )
     _fsync_descriptor(directory_descriptor)
 
 
@@ -1503,11 +1894,12 @@ def _open_runtime_components(
 
 
 def _scrub_runtime_home(runtime_home: Path) -> None:
-    descriptor = _open_runtime_directory(runtime_home)
-    try:
-        _scrub_runtime_descriptor(descriptor)
-    finally:
-        os.close(descriptor)
+    reset_runtime_home_contents(runtime_home)
+
+
+def _runtime_scan_checkpoint(name: str) -> None:
+    """Deterministic no-op boundary for real namespace replacement tests."""
+    del name
 
 
 def _fsync_directory(path: Path) -> None:

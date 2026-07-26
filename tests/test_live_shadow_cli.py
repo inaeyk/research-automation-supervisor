@@ -586,11 +586,166 @@ def test_status_and_report_cli_reject_contaminated_runtime_names_nonsecretly(
     assert authoritative_after == authoritative_before
 
 
+@pytest.mark.parametrize("json_mode", (False, True))
+def test_review_cli_contamination_invalidates_without_recording_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    json_mode: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    auth = tmp_path / "fake-auth.json"
+    services = replace(services, codex_authentication_file=auth)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    secret = f"CLI-REVIEW-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    codex_home = tmp_path / "cli-review-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_bytes(auth.read_bytes())
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    contaminated = runtime_home / secret.encode("utf-8").hex()
+    contaminated.write_text(secret, encoding="utf-8")
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    monkeypatch.setattr(
+        cli,
+        "record_live_shadow_review",
+        lambda path, proposal_id, review_path: record_live_shadow_review(
+            path,
+            proposal_id,
+            review_path,
+            services=services,
+        ),
+    )
+    command = [
+        "record-live-shadow-review",
+        str(run_directory),
+        "worker_initial-r000-a001",
+        str(review),
+    ]
+    if json_mode:
+        command.append("--json")
+    captured = runner.invoke(app, command)
+    assert captured.exit_code == 4
+    if json_mode:
+        assert json.loads(captured.stdout)["ok"] is False
+    else:
+        assert "Live-shadow error:" in captured.stderr
+    output = (captured.stdout + captured.stderr).encode()
+    assert secret.encode("utf-8") not in output
+    assert secret.encode("utf-8").hex().encode("ascii") not in output
+    assert not (
+        run_directory / "reviews/worker_initial-r000-a001.json"
+    ).exists()
+    state = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["supervisor_session_usable"] is False
+    assert state["runtime_home_cleanup_completed"] is True
+    assert not contaminated.exists()
+
+
+def test_status_and_report_cli_do_not_heal_pending_cleanup_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.cli as cli
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    auth = tmp_path / "fake-auth.json"
+    services = replace(services, codex_authentication_file=auth)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    secret = f"CLI-PENDING-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    codex_home = tmp_path / "cli-pending-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_bytes(auth.read_bytes())
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    (runtime_home / secret.encode("utf-8").hex()).write_text(
+        secret,
+        encoding="utf-8",
+    )
+    review = write_review(
+        tmp_path / "pending-review.yaml",
+        "worker_initial-r000-a001",
+    )
+
+    def crash(point: str) -> None:
+        if point == "before_runtime_home_scrub":
+            raise RuntimeError("crash before scrub")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="before scrub"):
+        record_live_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            review,
+            services=services,
+        )
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    monkeypatch.setattr(
+        cli,
+        "live_shadow_status",
+        lambda path: live_shadow_status(path, services=services),
+    )
+    monkeypatch.setattr(
+        cli,
+        "live_shadow_report",
+        lambda path: live_shadow_report(path, services=services),
+    )
+    journal_before = (run_directory / "journal.jsonl").read_bytes()
+    state_before = (run_directory / "state.json").read_bytes()
+    result_before = (run_directory / "result.json").read_bytes()
+    for command_name in ("live-shadow-status", "live-shadow-report"):
+        for json_mode in (False, True):
+            command = [command_name, str(run_directory)]
+            if json_mode:
+                command.append("--json")
+            captured = runner.invoke(app, command)
+            assert captured.exit_code == 4
+            if json_mode:
+                assert json.loads(captured.stdout)["ok"] is False
+            else:
+                assert "Live-shadow error:" in captured.stderr
+            output = (captured.stdout + captured.stderr).encode()
+            assert secret.encode("utf-8") not in output
+            assert secret.encode("utf-8").hex().encode("ascii") not in output
+    assert (run_directory / "journal.jsonl").read_bytes() == journal_before
+    assert (run_directory / "state.json").read_bytes() == state_before
+    assert (run_directory / "result.json").read_bytes() == result_before
+
+
 @pytest.mark.parametrize("cleanup_failure", (False, True))
+@pytest.mark.parametrize("json_mode", (False, True))
 def test_abort_cli_scrubs_authentication_path_or_fails_integrity_nonsecretly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cleanup_failure: bool,
+    json_mode: bool,
 ) -> None:
     import research_automation_supervisor.cli as cli
     import research_automation_supervisor.live_shadow_isolation as isolation
@@ -641,22 +796,26 @@ def test_abort_cli_scrubs_authentication_path_or_fails_integrity_nonsecretly(
             services=services,
         ),
     )
-    captured = runner.invoke(
-        app,
-        [
-            "abort-live-shadow",
-            str(run_directory),
-            "--reason",
-            "operator stop",
-            "--json",
-        ],
-    )
+    command = [
+        "abort-live-shadow",
+        str(run_directory),
+        "--reason",
+        "operator stop",
+    ]
+    if json_mode:
+        command.append("--json")
+    captured = runner.invoke(app, command)
     assert captured.exit_code == (4 if cleanup_failure else 8)
-    payload = json.loads(captured.stdout)
-    if cleanup_failure:
-        assert payload["ok"] is False
+    if json_mode:
+        payload = json.loads(captured.stdout)
+        if cleanup_failure:
+            assert payload["ok"] is False
+        else:
+            assert payload["status"] == "aborted"
+    elif cleanup_failure:
+        assert "Live-shadow error:" in captured.stderr
     else:
-        assert payload["status"] == "aborted"
+        assert "Status: aborted" in captured.stdout
     output = (captured.stdout + captured.stderr).encode()
     for fragment in (
         secret.encode(),
@@ -668,7 +827,22 @@ def test_abort_cli_scrubs_authentication_path_or_fails_integrity_nonsecretly(
     ):
         assert fragment not in output
     if cleanup_failure:
-        assert (run_directory / "journal.jsonl").read_bytes() == journal_before
+        journal_after = (run_directory / "journal.jsonl").read_bytes()
+        assert journal_after.startswith(journal_before)
+        entries = [
+            json.loads(line)
+            for line in journal_after.decode("ascii").splitlines()
+        ]
+        assert sum(
+            entry["event_type"]
+            == "runtime_confidentiality_violation_intent"
+            for entry in entries
+        ) == 1
+        state = json.loads(
+            (run_directory / "state.json").read_text(encoding="utf-8")
+        )
+        assert state["supervisor_session_usable"] is False
+        assert state["runtime_home_cleanup_required"] is True
     else:
         assert not contaminated.exists()
     authoritative_after = {

@@ -33,6 +33,8 @@ from research_automation_supervisor.errors import (
     LiveShadowDependencyError,
     LiveShadowInputError,
     LiveShadowIntegrityError,
+    LiveShadowLockError,
+    LiveShadowStateError,
 )
 from research_automation_supervisor.live_shadow_engine import (
     abort_live_shadow,
@@ -57,6 +59,7 @@ from research_automation_supervisor.live_shadow_isolation import (
     _scan_runtime_home_once,
     _validate_mount_allowlist,
     build_bubblewrap_process_launch,
+    inspect_runtime_home_contents,
     preflight_bubblewrap_isolation,
     scrub_runtime_home_contamination,
     validate_runtime_home_contents,
@@ -455,6 +458,466 @@ def test_runtime_home_retries_disappearance_but_rejects_identity_replacement(
         validate_runtime_home_contents(runtime_home)
 
 
+@pytest.mark.parametrize("repetition", range(5))
+def test_runtime_root_actual_replacement_never_accepts_detached_clean_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repetition: int,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    secret = (
+        f"ROOT-REPLACEMENT-{repetition}-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=(tmp_path / "repo", tmp_path / "stage2-runs"),
+    )
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    (runtime_home / "clean").write_bytes(b"clean")
+    detached = tmp_path / f"detached-root-{repetition}"
+    replaced = False
+
+    def replace_root(point: str) -> None:
+        nonlocal replaced
+        if point != "runtime_root_opened" or replaced:
+            return
+        replaced = True
+        runtime_home.rename(detached)
+        runtime_home.mkdir()
+        (runtime_home / "current").write_text(secret, encoding="utf-8")
+
+    monkeypatch.setattr(
+        isolation,
+        "_runtime_scan_checkpoint",
+        replace_root,
+    )
+    findings = inspect_runtime_home_contents(
+        runtime_home,
+        authentication_confidentiality=protection,
+    )
+    assert replaced is True
+    assert findings == ("auth_confidentiality_violation",)
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="clean-content invariant",
+    ) as captured:
+        validate_runtime_home_contents(
+            runtime_home,
+            authentication_confidentiality=protection,
+        )
+    assert secret not in str(captured.value)
+    assert detached.name not in str(captured.value)
+
+
+@pytest.mark.parametrize("repetition", range(5))
+def test_runtime_regular_entry_actual_replacement_is_rechecked_by_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repetition: int,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    secret = (
+        f"FILE-REPLACEMENT-{repetition}-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=(tmp_path / "repo", tmp_path / "stage2-runs"),
+    )
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    current = runtime_home / "current"
+    current.write_bytes(b"clean")
+    replacement = tmp_path / "replacement"
+    replacement.write_text(secret, encoding="utf-8")
+    replaced = False
+
+    def replace_regular_entry(point: str) -> None:
+        nonlocal replaced
+        if point != "runtime_regular_file_read" or replaced:
+            return
+        replaced = True
+        os.replace(replacement, current)
+
+    monkeypatch.setattr(
+        isolation,
+        "_runtime_scan_checkpoint",
+        replace_regular_entry,
+    )
+    findings = inspect_runtime_home_contents(
+        runtime_home,
+        authentication_confidentiality=protection,
+    )
+    assert replaced is True
+    assert findings == ("auth_confidentiality_violation",)
+    assert current.read_text(encoding="utf-8") == secret
+
+
+def test_runtime_directory_entry_actual_replacement_is_rechecked_by_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    secret = (
+        "DIRECTORY-REPLACEMENT-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=(tmp_path / "repo", tmp_path / "stage2-runs"),
+    )
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    current = runtime_home / "current"
+    current.mkdir()
+    (current / "clean").write_bytes(b"clean")
+    detached = runtime_home / "detached"
+    replaced = False
+
+    def replace_directory_entry(point: str) -> None:
+        nonlocal replaced
+        if point != "runtime_directory_opened" or replaced:
+            return
+        replaced = True
+        current.rename(detached)
+        current.mkdir()
+        (current / "current").write_text(secret, encoding="utf-8")
+
+    monkeypatch.setattr(
+        isolation,
+        "_runtime_scan_checkpoint",
+        replace_directory_entry,
+    )
+    findings = inspect_runtime_home_contents(
+        runtime_home,
+        authentication_confidentiality=protection,
+    )
+    assert replaced is True
+    assert findings == ("auth_confidentiality_violation",)
+
+
+def test_runtime_concurrent_replacement_stress_detects_or_fails_closed(
+    tmp_path: Path,
+) -> None:
+    secret = (
+        "WRITER-STRESS-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=(tmp_path / "repo", tmp_path / "stage2-runs"),
+    )
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    current = runtime_home / "current"
+    current.write_bytes(b"clean")
+    stop = threading.Event()
+    started = threading.Event()
+
+    def write_replacements() -> None:
+        index = 0
+        while not stop.is_set():
+            replacement = runtime_home / f"temporary-{index % 2}"
+            replacement.write_bytes(secret.encode("utf-8"))
+            os.replace(replacement, current)
+            started.set()
+            index += 1
+
+    writer = threading.Thread(target=write_replacements, daemon=True)
+    writer.start()
+    assert started.wait(timeout=5)
+    try:
+        try:
+            findings = inspect_runtime_home_contents(
+                runtime_home,
+                authentication_confidentiality=protection,
+            )
+        except LiveShadowIntegrityError as exc:
+            assert "stable" in str(exc) or "identity changed" in str(exc)
+        else:
+            assert findings == ("auth_confidentiality_violation",)
+    finally:
+        stop.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive()
+
+
+def test_review_root_replacement_durably_invalidates_before_full_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    services = replace(
+        services,
+        codex_authentication_file=tmp_path / "fake-auth.json",
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    authoritative = Path(str(result.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    secret = (
+        "REVIEW-ROOT-RACE-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    (tmp_path / "fake-auth.json").write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    detached = run_directory / "quarantine" / "detached-runtime-root"
+    replacement_name = secret.encode("utf-8").hex()
+    replaced = False
+
+    def replace_root(point: str) -> None:
+        nonlocal replaced
+        if point != "runtime_root_opened" or replaced:
+            return
+        replaced = True
+        runtime_home.rename(detached)
+        runtime_home.mkdir(mode=0o700)
+        (runtime_home / replacement_name).write_text(
+            secret,
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        isolation,
+        "_runtime_scan_checkpoint",
+        replace_root,
+    )
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="confidentiality boundary",
+    ) as captured:
+        record_live_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            review,
+            services=services,
+        )
+    assert replaced is True
+    assert secret not in str(captured.value)
+    assert replacement_name not in str(captured.value)
+    state = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["supervisor_session_usable"] is False
+    assert state["runtime_confidentiality_violation_intent_recorded"] is True
+    assert state["runtime_home_cleanup_required"] is False
+    assert state["runtime_home_cleanup_completed"] is True
+    assert state["auth_confidentiality_violation_detected"] is True
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in entries
+    ) == 1
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in entries
+    ) == 1
+    quarantine_entries = {
+        path.name for path in (run_directory / "quarantine").iterdir()
+    }
+    assert quarantine_entries == {"workspace", "codex-home"}
+    assert not tuple(runtime_home.iterdir())
+    raw_run = _raw_runtime_tree(run_directory)
+    assert secret.encode("utf-8") not in raw_run
+    assert detached.name.encode("utf-8") not in raw_run
+    assert replacement_name.encode("utf-8") not in raw_run
+    authoritative_after = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    assert authoritative_after == authoritative_before
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "occurrence"),
+    (
+        ("after_runtime_confidentiality_violation_journal_append", 1),
+        ("after_result_replacement", 1),
+        ("after_state_replacement", 1),
+        ("before_runtime_home_scrub", 1),
+        ("during_runtime_home_scrub", 1),
+        ("after_runtime_home_scrub_before_cleanup_completion", 1),
+        ("after_runtime_cleanup_completion_journal_append", 1),
+        ("after_result_replacement", 2),
+    ),
+)
+def test_confidentiality_cleanup_crash_boundaries_recover_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+    occurrence: int,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    services = replace(
+        services,
+        codex_authentication_file=tmp_path / "fake-auth.json",
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    authoritative = Path(str(result.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    launches_before = (tmp_path / "live-shadow-counter").read_text(
+        encoding="ascii"
+    )
+    secret = (
+        f"CRASH-CLEANUP-{occurrence}-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    (tmp_path / "fake-auth.json").write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    secret_name = secret.encode("utf-8").hex()
+    (runtime_home / secret_name).write_text(secret, encoding="utf-8")
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    seen = 0
+
+    def crash(point: str) -> None:
+        nonlocal seen
+        if point != crash_point:
+            return
+        seen += 1
+        if seen == occurrence:
+            raise RuntimeError(f"crash at {point}")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="crash at"):
+        record_live_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            review,
+            services=services,
+        )
+    assert seen == occurrence
+    journal_after_crash = (
+        run_directory / "journal.jsonl"
+    ).read_bytes()
+    entries_after_crash = [
+        json.loads(line)
+        for line in journal_after_crash.decode("ascii").splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in entries_after_crash
+    ) == 1
+    assert not (
+        run_directory / "reviews/worker_initial-r000-a001.json"
+    ).exists()
+    state_before_status = (run_directory / "state.json").read_bytes()
+    result_before_status = (run_directory / "result.json").read_bytes()
+    with pytest.raises((LiveShadowIntegrityError, LiveShadowStateError)):
+        live_shadow_status(run_directory, services=services)
+    with pytest.raises((LiveShadowIntegrityError, LiveShadowStateError)):
+        live_shadow_report(run_directory, services=services)
+    assert (run_directory / "journal.jsonl").read_bytes() == journal_after_crash
+    assert (run_directory / "state.json").read_bytes() == state_before_status
+    assert (run_directory / "result.json").read_bytes() == result_before_status
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    recovered = resume_live_shadow(run_directory, services=services)
+    assert recovered.status == "shadow_degraded"
+    assert recovered.supervisor_session_usable is False
+    assert recovered.runtime_confidentiality_violation_intent_recorded is True
+    assert recovered.runtime_home_cleanup_required is False
+    assert recovered.runtime_home_cleanup_completed is True
+    recovered_entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in recovered_entries
+    ) == 1
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in recovered_entries
+    ) == 1
+    assert not tuple(runtime_home.iterdir())
+    raw_run = _raw_runtime_tree(run_directory)
+    assert secret.encode("utf-8") not in raw_run
+    assert secret_name.encode("ascii") not in raw_run
+    assert (tmp_path / "live-shadow-counter").read_text(
+        encoding="ascii"
+    ) == launches_before
+    authoritative_after = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    assert authoritative_after == authoritative_before
+
+
 def test_review_validates_and_scrubs_authentication_paths_before_mutation(
     tmp_path: Path,
 ) -> None:
@@ -610,10 +1073,28 @@ def test_abort_cleanup_failure_is_integrity_without_abort_completion(
             services=services,
         )
     assert secret not in str(captured.value)
-    assert (run_directory / "journal.jsonl").read_bytes() == journal_before
-    assert json.loads(
+    journal_after = (run_directory / "journal.jsonl").read_bytes()
+    assert journal_after.startswith(journal_before)
+    entries = [
+        json.loads(line)
+        for line in journal_after.decode("ascii").splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in entries
+    ) == 1
+    assert not any(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in entries
+    )
+    state = json.loads(
         (run_directory / "state.json").read_text(encoding="utf-8")
-    )["status"] == "awaiting_reviews"
+    )
+    assert state["status"] == "shadow_degraded"
+    assert state["supervisor_session_usable"] is False
+    assert state["runtime_home_cleanup_required"] is True
 
 
 def test_abort_in_flight_stops_only_shadow_before_runtime_scan(
@@ -696,18 +1177,21 @@ def test_abort_in_flight_stops_only_shadow_before_runtime_scan(
     runtime_home = run_directory / "quarantine" / "codex-home"
     (runtime_home / secret).write_text(secret, encoding="utf-8")
     scanned = False
-    original_scrub = engine.scrub_runtime_home_contamination
+    original_validation = engine._stable_runtime_home_validation
 
-    def assert_writer_stopped(*args: object, **kwargs: object) -> tuple[str, ...]:
+    def assert_writer_stopped(
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[tuple[str, ...], str | None, object]:
         nonlocal scanned
         scanned = True
         assert not engine._process_identity_running(shadow_pid, shadow_ticks)
         assert engine._process_identity_running(stage2_pid, stage2_ticks)
-        return original_scrub(*args, **kwargs)
+        return original_validation(*args, **kwargs)
 
     monkeypatch.setattr(
         engine,
-        "scrub_runtime_home_contamination",
+        "_stable_runtime_home_validation",
         assert_writer_stopped,
     )
     aborted = abort_live_shadow(
@@ -715,8 +1199,8 @@ def test_abort_in_flight_stops_only_shadow_before_runtime_scan(
         "operator stop",
         services=services,
     )
-    assert scanned is True
     assert aborted.status == "aborted"
+    assert scanned is True
     assert aborted.supervisor_session_usable is False
     assert aborted.auth_confidentiality_violation_detected is True
     assert engine._process_identity_running(stage2_pid, stage2_ticks)
@@ -724,6 +1208,176 @@ def test_abort_in_flight_stops_only_shadow_before_runtime_scan(
     assert not (run_directory / "supervisor-process.json").exists()
     assert secret.encode() not in _raw_runtime_tree(run_directory)
     observer.join(timeout=10)
+    assert not observer.is_alive()
+    assert "error" not in outcome
+
+
+def test_supervisor_launch_cannot_cross_runtime_validation_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            live_supervisor_response(
+                "worker_initial",
+                sleep_seconds=1,
+            ),
+            live_supervisor_response("auditor", resume=True),
+        ],
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_inspect = engine.inspect_runtime_home_contents
+
+    def block_launch_validation(
+        runtime_home: Path,
+        **kwargs: object,
+    ) -> tuple[str, ...]:
+        findings = original_inspect(runtime_home, **kwargs)
+        run_directory = runtime_home.parent.parent
+        state_path = run_directory / "state.json"
+        if (
+            not entered.is_set()
+            and state_path.is_file()
+        ):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if (
+                state["observed_decision_ids"]
+                and state["pending_action"] is None
+                and not state["proposal_ids"]
+            ):
+                entered.set()
+                assert release.wait(timeout=10)
+        return findings
+
+    monkeypatch.setattr(
+        engine,
+        "inspect_runtime_home_contents",
+        block_launch_validation,
+    )
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = run_live_shadow(
+                spec,
+                runs_dir=tmp_path / "live-runs",
+                stage2_runs_dir=tmp_path / "stage2-runs",
+                services=services,
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    observer = threading.Thread(target=run, daemon=True)
+    observer.start()
+    assert entered.wait(timeout=10)
+    assert not (tmp_path / "live-shadow-counter").exists()
+    run_directory = next((tmp_path / "live-runs").iterdir())
+    assert not (run_directory / "supervisor-process.json").exists()
+    release.set()
+    observer.join(timeout=15)
+    assert not observer.is_alive()
+    assert "error" not in outcome
+    assert isinstance(outcome["result"], LiveShadowResult)
+    assert outcome["result"].status in {
+        "awaiting_reviews",
+        "shadow_degraded",
+    }
+    assert int(
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii")
+    ) >= 1
+
+
+def test_review_never_scans_across_active_supervisor_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            live_supervisor_response(
+                "worker_initial",
+                sleep_seconds=2,
+            ),
+            live_supervisor_response("auditor", resume=True),
+        ],
+    )
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = run_live_shadow(
+                spec,
+                runs_dir=tmp_path / "live-runs",
+                stage2_runs_dir=tmp_path / "stage2-runs",
+                services=services,
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    observer = threading.Thread(target=run, daemon=True)
+    observer.start()
+    run_directory: Path | None = None
+    process_record: dict[str, object] | None = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        candidates = tuple((tmp_path / "live-runs").glob("*"))
+        if candidates:
+            run_directory = candidates[0]
+            process_path = run_directory / "supervisor-process.json"
+            if process_path.is_file():
+                process_record = json.loads(
+                    process_path.read_text(encoding="utf-8")
+                )
+                break
+        time.sleep(0.005)
+    assert run_directory is not None
+    assert process_record is not None
+    scanned = False
+    original_inspect = engine.inspect_runtime_home_contents
+
+    def record_scan(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal scanned
+        scanned = True
+        return original_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        engine,
+        "inspect_runtime_home_contents",
+        record_scan,
+    )
+    review = write_review(
+        tmp_path / "review-active.yaml",
+        "worker_initial-r000-a001",
+    )
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            record_live_shadow_review(
+                run_directory,
+                "worker_initial-r000-a001",
+                review,
+                services=services,
+            )
+        except LiveShadowLockError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.001)
+            continue
+        except LiveShadowInputError as exc:
+            assert "still in flight" in str(exc)
+            break
+        raise AssertionError("review unexpectedly crossed the active writer")
+    assert scanned is False
+    pid = int(process_record["process_id"])
+    ticks = int(process_record["process_start_ticks"])
+    assert engine._process_identity_running(pid, ticks)
+    observer.join(timeout=15)
     assert not observer.is_alive()
     assert "error" not in outcome
 
@@ -1870,9 +2524,10 @@ def test_real_bubblewrap_rejects_and_scrubs_authentication_exfiltration(
     )
     runtime_home = run_directory / "quarantine" / "codex-home"
     assert not (runtime_home / "copied-auth.txt").exists()
-    assert (
-        runtime_home / "supervisor-launch-count"
-    ).read_text(encoding="ascii") == "1"
+    assert not (runtime_home / "supervisor-launch-count").exists()
+    assert not tuple(runtime_home.iterdir())
+    assert state["runtime_confidentiality_violation_intent_recorded"] is True
+    assert state["runtime_home_cleanup_completed"] is True
     assert not (
         run_directory
         / "proposals/auditor-r000-a002/stage1-run/stage2-completion.json"

@@ -337,6 +337,7 @@ def test_live_run_preserves_authority_and_quarantines_two_proposals(
 
 def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     values = {
         domain: f"{domain}-{hashlib.sha256(os.urandom(32)).hexdigest()}"
@@ -351,6 +352,8 @@ def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(
             "comparison",
             "review",
             "future-sentinel",
+            "rendered-prompt",
+            "state-transition",
         )
     }
     first_worker = json.loads(worker_result())
@@ -419,6 +422,72 @@ def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(
     git(project, "add", "control/worker-initial.md", "tools/acceptance.py")
     git(project, "commit", "-q", "-m", "seed blind-input domain sentinels")
 
+    rendered_sentinel = values["rendered-prompt"].encode("utf-8")
+    transition_sentinel = values["state-transition"].encode("utf-8")
+    injection_directory = tmp_path / "authoritative-render-injection"
+    injection_directory.mkdir()
+    injection_source = (
+        "import base64\n"
+        "import hashlib\n"
+        "from dataclasses import replace\n"
+        "import research_automation_supervisor.workflow_engine as engine\n"
+        "_original = engine.build_initial_worker_prompt\n"
+        "_original_update = engine._update_state\n"
+        f"_sentinel = base64.b64decode({base64.b64encode(rendered_sentinel)!r})\n"
+        f"_transition = base64.b64decode({base64.b64encode(transition_sentinel)!r}).decode()\n"
+        "def _seed(prepared, baseline):\n"
+        "    rendered = _original(prepared, baseline)\n"
+        "    content = rendered.content + b'\\n' + _sentinel + b'\\n'\n"
+        "    return replace(rendered, content=content, "
+        "rendered_sha256=hashlib.sha256(content).hexdigest(), "
+        "byte_count=len(content))\n"
+        "def _seed_update(context, reason, updates):\n"
+        "    copied = dict(updates)\n"
+        "    if reason == 'auditor_result_validated' and context.state.repair_round == 1:\n"
+        "        copied['summary'] = _transition\n"
+        "    return _original_update(context, reason, copied)\n"
+        "engine.build_initial_worker_prompt = _seed\n"
+        "engine._update_state = _seed_update\n"
+    )
+    (injection_directory / "sitecustomize.py").write_text(
+        injection_source,
+        encoding="utf-8",
+    )
+    authoritative_environment = dict(os.environ)
+    prior_pythonpath = authoritative_environment.get("PYTHONPATH")
+    authoritative_environment["PYTHONPATH"] = (
+        str(injection_directory)
+        if not prior_pythonpath
+        else f"{injection_directory}{os.pathsep}{prior_pythonpath}"
+    )
+    services = replace(
+        services,
+        authoritative_environ=authoritative_environment,
+    )
+
+    import research_automation_supervisor.shadow_sources as shadow_sources
+
+    original_reconstruction = shadow_sources.build_initial_worker_prompt
+
+    def reconstruct_seeded_prompt(
+        prepared: Any,
+        baseline: Any,
+    ) -> Any:
+        rendered = original_reconstruction(prepared, baseline)
+        content = rendered.content + b"\n" + rendered_sentinel + b"\n"
+        return replace(
+            rendered,
+            content=content,
+            rendered_sha256=hashlib.sha256(content).hexdigest(),
+            byte_count=len(content),
+        )
+
+    monkeypatch.setattr(
+        shadow_sources,
+        "build_initial_worker_prompt",
+        reconstruct_seeded_prompt,
+    )
+
     result = run_live_shadow(
         spec,
         runs_dir=tmp_path / "live-runs",
@@ -458,6 +527,7 @@ def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(
     exact_authoritative_prompt = base64.b64decode(
         _read_json(first_stage2_observation)["prompt_base64"]
     )
+    assert rendered_sentinel in exact_authoritative_prompt
     later_stage2_entries = [
         json.loads(line)
         for line in (authoritative_run / "journal.jsonl")
@@ -481,6 +551,49 @@ def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(
     assert str(first_envelope["source_action_id"]).encode("ascii") in exact_stdin
     assert str(first_envelope["baseline_commit"]).encode("ascii") in exact_stdin
     assert b'"proposal_kind":"worker_initial"' in exact_stdin
+    rendered_comparison = (
+        run_directory
+        / "comparisons/worker_initial-r000-a001/authoritative-rendered.md"
+    ).read_bytes()
+    assert rendered_sentinel in rendered_comparison
+    for source in (
+        human_source,
+        (project / "control/contract.md").read_bytes(),
+        (tmp_path / "live-control/project-context.md").read_bytes(),
+    ):
+        assert rendered_sentinel not in source
+
+    transition_entries = [
+        entry
+        for entry in later_stage2_entries
+        if transition_sentinel
+        in json.dumps(entry, sort_keys=True).encode("utf-8")
+    ]
+    assert transition_entries
+    assert all(
+        entry["sequence"] > first_envelope["journal_intent_sequence"]
+        for entry in transition_entries
+    )
+    for artifact in (authoritative_run / "audits").rglob("*"):
+        if artifact.is_file():
+            assert transition_sentinel not in artifact.read_bytes()
+    first_decision = (
+        run_directory / "decisions/worker_initial-r000-a001"
+    )
+    assert transition_sentinel not in (
+        first_decision / "envelope.json"
+    ).read_bytes()
+    assert transition_sentinel not in (
+        first_decision / "blind-input-manifest.json"
+    ).read_bytes()
+    for root in (
+        first_decision,
+        run_directory / "proposals/worker_initial-r000-a001",
+        run_directory / "comparisons/worker_initial-r000-a001",
+    ):
+        for artifact in root.rglob("*"):
+            if artifact.is_file():
+                assert transition_sentinel not in artifact.read_bytes()
 
 
 @pytest.mark.parametrize(

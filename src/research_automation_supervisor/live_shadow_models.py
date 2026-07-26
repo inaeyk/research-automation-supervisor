@@ -330,6 +330,8 @@ class LiveShadowJournalEntry(BaseModel):
         "comparison",
         "review",
         "shadow_failure",
+        "runtime_confidentiality_violation_intent",
+        "runtime_confidentiality_cleanup_completion",
     ]
     previous_state: LiveShadowStatus | None
     new_state: LiveShadowStatus
@@ -376,6 +378,15 @@ class LiveShadowState(BaseModel):
     auth_protected_value_count: Annotated[int, Field(ge=1)] = 1
     auth_scan_completed: bool = True
     auth_confidentiality_violation_detected: bool = False
+    runtime_confidentiality_violation_intent_recorded: bool = False
+    runtime_home_cleanup_required: bool = False
+    runtime_home_cleanup_completed: bool = False
+    runtime_home_cleanup_reason: Literal[
+        "auth_confidentiality_violation",
+        "runtime_home_contamination",
+        "runtime_home_instability",
+    ] | None = None
+    runtime_confidentiality_rejected_action_id: str | None = None
     observed_decision_ids: StringTuple
     proposal_ids: StringTuple
     comparison_ids: StringTuple
@@ -452,6 +463,9 @@ class LiveShadowResult(BaseModel):
     auth_protected_value_count: Annotated[int, Field(ge=1)] = 1
     auth_scan_completed: bool = True
     auth_confidentiality_violation_detected: bool = False
+    runtime_confidentiality_violation_intent_recorded: bool = False
+    runtime_home_cleanup_required: bool = False
+    runtime_home_cleanup_completed: bool = False
     observed_decision_count: Annotated[int, Field(ge=0)]
     proposal_count: Annotated[int, Field(ge=0)]
     comparison_count: Annotated[int, Field(ge=0)]

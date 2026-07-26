@@ -44,6 +44,7 @@ from research_automation_supervisor.errors import (
     LiveShadowInputError,
     LiveShadowIntegrityError,
     LiveShadowLockError,
+    LiveShadowRuntimeHomeInstabilityError,
     LiveShadowStateError,
     ShadowInputError,
     ShadowLockError,
@@ -57,10 +58,11 @@ from research_automation_supervisor.live_shadow_isolation import (
     BubblewrapCapability,
     IsolationPreflight,
     build_bubblewrap_process_launch,
+    inspect_runtime_home_contents,
     load_backend_identity,
     preflight_bubblewrap_isolation,
+    recreate_engine_runtime_home,
     resolve_authentication_confidentiality,
-    scrub_runtime_home_contamination,
     validate_runtime_home_contents,
     verify_recorded_bubblewrap_command,
 )
@@ -143,6 +145,14 @@ SUPERVISOR_TERMINATION_TIMEOUT_SECONDS = 2.0
 DEFAULT_LIVE_SHADOW_RUNS_DIRECTORY = (
     Path(tempfile.gettempdir()) / "research-automation-supervisor-live-shadow"
 )
+_LIFECYCLE_GATES_LOCK = threading.Lock()
+_LIFECYCLE_GATES: dict[str, threading.RLock] = {}
+_ACTIVE_SUPERVISOR_THREADS: dict[
+    tuple[str, str],
+    threading.Thread,
+] = {}
+_TERMINATED_SUPERVISOR_ACTIONS: set[tuple[str, str]] = set()
+_LIVE_LOCK_DEPTH = threading.local()
 
 TERMINAL_LIVE_STATUSES = frozenset(
     {
@@ -217,6 +227,14 @@ class _SupervisorTask:
     thread: threading.Thread
     returned_result: CodexRunResult | None = None
     error: BaseException | None = None
+
+
+@dataclass(frozen=True)
+class _RuntimeLifecycleIdentity:
+    pending_action_id: str | None
+    supervisor_session_id: str | None
+    process_identity: tuple[int, int] | None
+    completion_recorded: bool
 
 
 def validate_live_shadow_spec(
@@ -402,67 +420,13 @@ def resume_live_shadow(
         services.sleep(0.01)
         boundary_state = _load_state(resolved)
         boundary_prepared = _reload_prepared(boundary_state, services)
-    boundary_findings, _ = _scrub_runtime_home_before_mutation(
+    prepared_boundary = _prepare_resume_runtime_boundary(
         resolved,
-        boundary_state,
-        boundary_prepared,
         services,
     )
-    state, prepared = _load_reconciled_run(resolved, services)
-    if state.status in TERMINAL_LIVE_STATUSES:
-        raise LiveShadowInputError("live-shadow state cannot be resumed automatically")
-    launch_path = resolved / "authoritative" / "launch.json"
-    if not launch_path.is_file():
-        intent = _load_model(
-            resolved / "authoritative" / "launch-intent.json",
-            AuthoritativeLaunchRecord,
-            "authoritative launch intent",
-        )
-        if intent.launch_state != "prepared":
-            raise LiveShadowIntegrityError(
-                "authoritative launch intent is contradictory"
-            )
-        state = _transition_state_only(
-            resolved,
-            state,
-            prepared,
-            "human_paused",
-            "authoritative_launch_unproven",
-            "An authoritative launch was prepared but cannot be proven; it will not be repeated.",
-            services.utc_now,
-        )
-        return _result_for_state(state, prepared)
-    launch = _load_model(
-        launch_path,
-        AuthoritativeLaunchRecord,
-        "authoritative launch",
-    )
-    if launch.launch_state != "launched":
-        raise LiveShadowIntegrityError(
-            "authoritative launch record is not a launched identity"
-        )
-    if state.status == "authoritative_starting":
-        state = _journal_event(
-            resolved,
-            state,
-            prepared,
-            event_type="authoritative_launch",
-            reason="authoritative_stage2_launch_recovered",
-            updates={
-                "status": "authoritative_running",
-                "summary": (
-                    "Recovered the proven authoritative Stage 2 launch "
-                    "without relaunching it."
-                ),
-            },
-            artifact_hashes={
-                str(resolved / "authoritative" / "launch.json"):
-                sha256_regular_file(
-                    resolved / "authoritative" / "launch.json"
-                )
-            },
-            utc_now=services.utc_now,
-        )
+    if isinstance(prepared_boundary, LiveShadowResult):
+        return prepared_boundary
+    state, prepared, launch = prepared_boundary
     codex_executable = services.codex_executable or launch.codex_executable
     capability: BubblewrapCapability | None = None
     isolation_failure: str | None = None
@@ -514,35 +478,6 @@ def resume_live_shadow(
         isolation_capability=capability,
         isolation_dependency_failure=isolation_failure,
     )
-    if boundary_findings:
-        if context.isolation_capability is not None:
-            _refresh_authentication_confidentiality(context)
-        runtime_findings = boundary_findings
-        if runtime_findings:
-            auth_violation = (
-                "auth_confidentiality_violation" in runtime_findings
-            )
-            if context.state.pending_action is not None:
-                _record_failed_proposal(
-                    context,
-                    context.state.pending_action,
-                    (
-                        "auth_confidentiality_violation"
-                        if auth_violation
-                        else "runtime_home_contamination"
-                    ),
-                    (
-                        "Recovery found and scrubbed persistent supervisor "
-                        "runtime-home contamination."
-                    ),
-                    session_unusable=True,
-                    auth_violation=auth_violation,
-                )
-            else:
-                context.state = _record_runtime_home_failure(
-                    context,
-                    auth_violation=auth_violation,
-                )
     if (
         isolation_failure is not None
         and not any(
@@ -550,14 +485,136 @@ def resume_live_shadow(
             for failure in context.state.shadow_failures
         )
     ):
-        context.state = _record_shadow_failure(
-            context,
-            decision_id=None,
-            reason="isolation_dependency_failure",
-            detail=isolation_failure,
-            temporal_or_integrity=True,
-        )
+        with _supervisor_lifecycle_gate(resolved), _live_lock(
+            resolved,
+            services.utc_now,
+        ):
+            context.state = _record_shadow_failure(
+                context,
+                decision_id=None,
+                reason="isolation_dependency_failure",
+                detail=isolation_failure,
+                temporal_or_integrity=True,
+            )
     return _drive(context)
+
+
+def _prepare_resume_runtime_boundary(
+    run_directory: Path,
+    services: LiveShadowServices,
+) -> (
+    tuple[
+        LiveShadowState,
+        PreparedLiveShadowSpecification,
+        AuthoritativeLaunchRecord,
+    ]
+    | LiveShadowResult
+):
+    with _supervisor_lifecycle_gate(run_directory), _live_lock(run_directory, services.utc_now):
+        state, prepared = _load_reconciled_run(
+            run_directory,
+            services,
+        )
+        if (run_directory / ABORT_INTENT_FILE).is_file():
+            return _unproven_abort_result(state, prepared)
+        context = _mutation_context(
+            run_directory,
+            state,
+            prepared,
+            services,
+            _runtime_boundary_inputs(
+                run_directory,
+                state,
+                prepared,
+                services,
+            )[0],
+        )
+        if context.state.runtime_home_cleanup_required:
+            _complete_runtime_confidentiality_cleanup(context)
+        findings, instability_reason, _ = (
+            _stable_runtime_home_validation(
+                run_directory,
+                context.state,
+                prepared,
+                services,
+            )
+        )
+        if findings or instability_reason is not None:
+            reason = instability_reason or (
+                "auth_confidentiality_violation"
+                if "auth_confidentiality_violation" in findings
+                else "runtime_home_contamination"
+            )
+            _record_runtime_confidentiality_intent(
+                context,
+                reason=reason,
+                rejected_action_id=(
+                    context.state.pending_action.action_id
+                    if context.state.pending_action is not None
+                    else None
+                ),
+            )
+            _complete_runtime_confidentiality_cleanup(context)
+        state = context.state
+        if state.status in TERMINAL_LIVE_STATUSES:
+            return _result_for_state(state, prepared)
+        launch_path = run_directory / "authoritative" / "launch.json"
+        if not launch_path.is_file():
+            intent = _load_model(
+                run_directory / "authoritative" / "launch-intent.json",
+                AuthoritativeLaunchRecord,
+                "authoritative launch intent",
+            )
+            if intent.launch_state != "prepared":
+                raise LiveShadowIntegrityError(
+                    "authoritative launch intent is contradictory"
+                )
+            state = _transition_state_only(
+                run_directory,
+                state,
+                prepared,
+                "human_paused",
+                "authoritative_launch_unproven",
+                (
+                    "An authoritative launch was prepared but cannot be "
+                    "proven; it will not be repeated."
+                ),
+                services.utc_now,
+            )
+            return _result_for_state(state, prepared)
+        launch = _load_model(
+            launch_path,
+            AuthoritativeLaunchRecord,
+            "authoritative launch",
+        )
+        if launch.launch_state != "launched":
+            raise LiveShadowIntegrityError(
+                "authoritative launch record is not a launched identity"
+            )
+        if state.status == "authoritative_starting":
+            state = _journal_event(
+                run_directory,
+                state,
+                prepared,
+                event_type="authoritative_launch",
+                reason="authoritative_stage2_launch_recovered",
+                updates={
+                    "status": "authoritative_running",
+                    "summary": (
+                        "Recovered the proven authoritative Stage 2 launch "
+                        "without relaunching it."
+                    ),
+                },
+                artifact_hashes={
+                    str(
+                        run_directory / "authoritative" / "launch.json"
+                    ): sha256_regular_file(
+                        run_directory / "authoritative" / "launch.json"
+                    )
+                },
+                utc_now=services.utc_now,
+            )
+        return state, prepared, launch
 
 
 def live_shadow_status(
@@ -569,17 +626,18 @@ def live_shadow_status(
     sensitive_values = _sensitive_values(services.environ)
     raw_run = _preflight_locator(run_directory, sensitive_values, "live-shadow run")
     resolved = _resolve_run_directory(Path(raw_run))
-    state, prepared = _load_stable_run(
-        resolved,
-        services,
-    )
-    _validate_runtime_home_for_read(
-        resolved,
-        state,
-        prepared,
-        services,
-    )
-    return _result_for_state(state, prepared)
+    with _supervisor_lifecycle_gate(resolved), _live_lock(resolved, services.utc_now):
+        state, prepared = _load_stable_run(
+            resolved,
+            services,
+        )
+        _validate_runtime_home_for_read(
+            resolved,
+            state,
+            prepared,
+            services,
+        )
+        return _result_for_state(state, prepared)
 
 
 def record_live_shadow_review(
@@ -602,24 +660,14 @@ def record_live_shadow_review(
     except ShadowInputError as exc:
         raise LiveShadowInputError(str(exc)) from exc
     resolved = _resolve_run_directory(Path(raw_run))
-    boundary_state = _load_state(resolved)
-    boundary_prepared = _reload_prepared(boundary_state, services)
-    if boundary_state.pending_action is not None:
-        raise LiveShadowInputError(
-            "a supervisor action is still in flight"
-        )
-    runtime_findings, confidentiality = _scrub_runtime_home_before_mutation(
-        resolved,
-        boundary_state,
-        boundary_prepared,
-        services,
-    )
-    state, prepared = _load_reconciled_run(resolved, services)
-    if state.pending_action is not None:
-        raise LiveShadowInputError(
-            "a supervisor action is still in flight"
-        )
-    if runtime_findings:
+    with _supervisor_lifecycle_gate(resolved), _live_lock(resolved, services.utc_now):
+        state, prepared = _load_reconciled_run(resolved, services)
+        confidentiality = _runtime_boundary_inputs(
+            resolved,
+            state,
+            prepared,
+            services,
+        )[0]
         context = _mutation_context(
             resolved,
             state,
@@ -627,85 +675,108 @@ def record_live_shadow_review(
             services,
             confidentiality,
         )
-        context.state = _record_runtime_home_failure(
-            context,
-            auth_violation=(
-                "auth_confidentiality_violation" in runtime_findings
+        if context.state.runtime_home_cleanup_required:
+            _complete_runtime_confidentiality_cleanup(context)
+        if _runtime_home_writer_is_active(
+            resolved,
+            context.state,
+        ):
+            raise LiveShadowInputError(
+                "a supervisor action is still in flight"
+            )
+        if context.state.pending_action is not None:
+            raise LiveShadowInputError(
+                "a supervisor action is still in flight"
+            )
+        findings, instability_reason, _ = (
+            _stable_runtime_home_validation(
+                resolved,
+                context.state,
+                prepared,
+                services,
+            )
+        )
+        if findings or instability_reason is not None:
+            reason = instability_reason or (
+                "auth_confidentiality_violation"
+                if "auth_confidentiality_violation" in findings
+                else "runtime_home_contamination"
+            )
+            _record_runtime_confidentiality_intent(
+                context,
+                reason=reason,
+                rejected_action_id=f"review-{proposal_id}",
+            )
+            _complete_runtime_confidentiality_cleanup(context)
+            raise LiveShadowIntegrityError(
+                "Codex runtime home failed its confidentiality boundary"
+            )
+        state = context.state
+        if proposal_id not in state.comparison_ids:
+            raise LiveShadowInputError(
+                "proposal has no finalized comparison"
+            )
+        comparison = _load_comparison(resolved, proposal_id)
+        if not comparison.comparison_available:
+            raise LiveShadowInputError(
+                "proposal comparison is unavailable"
+            )
+        destination = resolved / "reviews" / f"{proposal_id}.json"
+        if proposal_id in state.reviewed_proposal_ids:
+            raise LiveShadowInputError(
+                "proposal already has an immutable review"
+            )
+        review = load_live_shadow_review(
+            review_path,
+            sensitive_values=sensitive_values,
+        )
+        if review.proposal_id != proposal_id:
+            raise LiveShadowInputError(
+                "review proposal ID does not match the command"
+            )
+        _write_immutable_json(
+            destination,
+            review.model_dump(mode="json"),
+        )
+        reviewed = (*state.reviewed_proposal_ids, proposal_id)
+        comparable = {
+            item
+            for item in state.comparison_ids
+            if _load_comparison(resolved, item).comparison_available
+        }
+        new_status = state.status
+        if (
+            state.status == "awaiting_reviews"
+            and comparable.issubset(reviewed)
+        ):
+            new_status = "completed"
+        updates: dict[str, object] = {
+            "reviewed_proposal_ids": reviewed,
+            "summary": (
+                "All comparison-available live proposals have immutable "
+                "human reviews."
+                if new_status == "completed"
+                else "Immutable live-shadow review recorded."
             ),
-        )
-        raise LiveShadowIntegrityError(
-            "Codex runtime home failed its confidentiality boundary"
-        )
-    if proposal_id not in state.comparison_ids:
-        raise LiveShadowInputError("proposal has no finalized comparison")
-    comparison = _load_comparison(resolved, proposal_id)
-    if not comparison.comparison_available:
-        raise LiveShadowInputError("proposal comparison is unavailable")
-    destination = resolved / "reviews" / f"{proposal_id}.json"
-    if proposal_id in state.reviewed_proposal_ids:
-        raise LiveShadowInputError("proposal already has an immutable review")
-    review = load_live_shadow_review(review_path, sensitive_values=sensitive_values)
-    if review.proposal_id != proposal_id:
-        raise LiveShadowInputError("review proposal ID does not match the command")
-    repeated_findings, repeated_confidentiality = (
-        _scrub_runtime_home_before_mutation(
-        resolved,
-        state,
-        prepared,
-        services,
-        )
-    )
-    if repeated_findings:
-        context = _mutation_context(
+        }
+        if new_status != state.status:
+            updates["status"] = new_status
+        state = _journal_event(
             resolved,
             state,
             prepared,
-            services,
-            repeated_confidentiality,
+            event_type="review",
+            reason="human_review_recorded",
+            action_id=None,
+            decision_id=proposal_id,
+            updates=updates,
+            artifact_hashes={
+                str(destination): sha256_regular_file(destination)
+            },
+            utc_now=services.utc_now,
+            post_journal_checkpoint="after_review_journal_append",
         )
-        context.state = _record_runtime_home_failure(
-            context,
-            auth_violation=(
-                "auth_confidentiality_violation" in repeated_findings
-            ),
-        )
-        raise LiveShadowIntegrityError(
-            "Codex runtime home failed its confidentiality boundary"
-        )
-    _write_immutable_json(destination, review.model_dump(mode="json"))
-    reviewed = (*state.reviewed_proposal_ids, proposal_id)
-    comparable = {
-        item
-        for item in state.comparison_ids
-        if _load_comparison(resolved, item).comparison_available
-    }
-    new_status = state.status
-    if state.status == "awaiting_reviews" and comparable.issubset(reviewed):
-        new_status = "completed"
-    updates: dict[str, object] = {
-        "reviewed_proposal_ids": reviewed,
-        "summary": (
-            "All comparison-available live proposals have immutable human reviews."
-            if new_status == "completed"
-            else "Immutable live-shadow review recorded."
-        ),
-    }
-    if new_status != state.status:
-        updates["status"] = new_status
-    state = _journal_event(
-        resolved,
-        state,
-        prepared,
-        event_type="review",
-        reason="human_review_recorded",
-        action_id=None,
-        decision_id=proposal_id,
-        updates=updates,
-        artifact_hashes={str(destination): sha256_regular_file(destination)},
-        utc_now=services.utc_now,
-        post_journal_checkpoint="after_review_journal_append",
-    )
-    return _result_for_state(state, prepared)
+        return _result_for_state(state, prepared)
 
 
 def live_shadow_report(
@@ -717,17 +788,35 @@ def live_shadow_report(
     sensitive_values = _sensitive_values(services.environ)
     raw_run = _preflight_locator(run_directory, sensitive_values, "live-shadow run")
     resolved = _resolve_run_directory(Path(raw_run))
-    state, prepared = _load_stable_run(
-        resolved,
-        services,
-    )
-    _validate_runtime_home_for_read(
-        resolved,
-        state,
-        prepared,
-        services,
-    )
-    readiness = _readiness_for_state(state, prepared)
+    with _supervisor_lifecycle_gate(resolved), _live_lock(resolved, services.utc_now):
+        state, prepared = _load_stable_run(
+            resolved,
+            services,
+        )
+        _validate_runtime_home_for_read(
+            resolved,
+            state,
+            prepared,
+            services,
+        )
+        readiness = _readiness_for_state(state, prepared)
+        return _build_live_shadow_report(
+            resolved,
+            state,
+            prepared,
+            readiness,
+            sensitive_values,
+        )
+
+
+def _build_live_shadow_report(
+    resolved: Path,
+    state: LiveShadowState,
+    prepared: PreparedLiveShadowSpecification,
+    readiness: LiveReadinessReport,
+    sensitive_values: Sequence[str],
+) -> dict[str, object]:
+    del prepared
     assessments = {
         proposal_id: _load_assessment(resolved, proposal_id)
         for proposal_id in state.comparison_ids
@@ -760,6 +849,8 @@ def live_shadow_report(
             "supervisor_session_usable": (
                 state.supervisor_session_usable
             ),
+            "cleanup_pending": state.runtime_home_cleanup_required,
+            "cleanup_completed": state.runtime_home_cleanup_completed,
         },
         "readiness": readiness.model_dump(mode="json"),
         "assessments": [
@@ -828,6 +919,19 @@ def abort_live_shadow(
     if not sanitized:
         raise LiveShadowInputError("abort reason must not be empty")
     resolved = _resolve_run_directory(Path(raw_run))
+    with _supervisor_lifecycle_gate(resolved):
+        return _abort_live_shadow_with_lifecycle_gate(
+            resolved,
+            sanitized,
+            services,
+        )
+
+
+def _abort_live_shadow_with_lifecycle_gate(
+    resolved: Path,
+    sanitized: str,
+    services: LiveShadowServices,
+) -> LiveShadowResult:
     deadline = services.monotonic() + SUPERVISOR_TERMINATION_TIMEOUT_SECONDS
     abort_intent_written = False
     for attempt in range(200):
@@ -906,87 +1010,113 @@ def abort_live_shadow(
                 boundary_state,
                 boundary_prepared,
             )
-        runtime_findings, confidentiality = (
-            _scrub_runtime_home_before_mutation(
-                resolved,
-                boundary_state,
-                boundary_prepared,
-                services,
-            )
-        )
-        if confidentiality.contains_bytes(sanitized.encode("utf-8")):
-            raise LiveShadowInputError(
-                "abort reason failed confidentiality validation"
-            )
         try:
-            state, prepared = _load_reconciled_run(resolved, services)
-            if state.status in {"completed", "failed", "aborted"}:
-                raise LiveShadowInputError(
-                    "terminal live-shadow run cannot be aborted"
-                )
-            if (
-                state.pending_action is not None
-                and _load_active_supervisor_process(
+            with _live_lock(resolved, services.utc_now):
+                state, prepared = _load_reconciled_run(
                     resolved,
-                    state.pending_action,
+                    services,
                 )
-                is not None
-            ):
-                if services.monotonic() >= deadline:
-                    return _unproven_abort_result(state, prepared)
-                services.sleep(0.01)
-                continue
-            failures = state.shadow_failures
-            auth_violation = (
-                "auth_confidentiality_violation" in runtime_findings
-            )
-            if runtime_findings:
-                failures = (
-                    *failures,
-                    LiveShadowFailure(
-                        decision_id=(
-                            state.pending_action.proposal_id
-                            if state.pending_action is not None
-                            else None
-                        ),
-                        reason=(
-                            "auth_confidentiality_violation"
-                            if auth_violation
-                            else "runtime_home_contamination"
-                        ),
-                        detail=(
-                            "Persistent supervisor runtime-home contamination "
-                            "was scrubbed before abort."
-                        ),
-                        temporal_or_integrity=True,
-                        recorded_at=_utc_string(services.utc_now()),
-                    ),
+                if state.status in {"completed", "failed", "aborted"}:
+                    raise LiveShadowInputError(
+                        "terminal live-shadow run cannot be aborted"
+                    )
+                confidentiality = _runtime_boundary_inputs(
+                    resolved,
+                    state,
+                    prepared,
+                    services,
+                )[0]
+                if confidentiality.contains_bytes(
+                    sanitized.encode("utf-8")
+                ):
+                    raise LiveShadowInputError(
+                        "abort reason failed confidentiality validation"
+                    )
+                context = _mutation_context(
+                    resolved,
+                    state,
+                    prepared,
+                    services,
+                    confidentiality,
                 )
-            state = _journal_event(
-                resolved,
-                state,
-                prepared,
-                event_type="transition",
-                reason="observer_aborted",
-                updates={
-                    "status": "aborted",
-                    "pending_action": None,
-                    "supervisor_session_usable": False,
-                    "shadow_failures": failures,
-                    **(
-                        {"auth_confidentiality_violation_detected": True}
-                        if auth_violation
-                        else {}
-                    ),
-                    "pause_reason": sanitized[:16384],
-                    "summary": (
-                        "Live-shadow observation aborted; authoritative "
-                        "Stage 2 was untouched."
-                    ),
-                },
-                artifact_hashes={},
-                utc_now=services.utc_now,
-            )
+                if context.state.runtime_home_cleanup_required:
+                    _complete_runtime_confidentiality_cleanup(context)
+                if _runtime_home_writer_is_active(
+                    resolved,
+                    context.state,
+                ):
+                    if services.monotonic() >= deadline:
+                        return _unproven_abort_result(
+                            context.state,
+                            prepared,
+                        )
+                    services.sleep(0.01)
+                    continue
+                findings, instability_reason, _ = (
+                    _stable_runtime_home_validation(
+                        resolved,
+                        context.state,
+                        prepared,
+                        services,
+                    )
+                )
+                if findings or instability_reason is not None:
+                    cleanup_reason = instability_reason or (
+                        "auth_confidentiality_violation"
+                        if "auth_confidentiality_violation" in findings
+                        else "runtime_home_contamination"
+                    )
+                    _record_runtime_confidentiality_intent(
+                        context,
+                        reason=cleanup_reason,
+                        rejected_action_id=(
+                            context.state.pending_action.action_id
+                            if context.state.pending_action is not None
+                            else "observer-abort"
+                        ),
+                    )
+                    _complete_runtime_confidentiality_cleanup(context)
+                state = _journal_event(
+                    resolved,
+                    context.state,
+                    prepared,
+                    event_type="transition",
+                    reason="observer_aborted",
+                    updates={
+                        "status": "aborted",
+                        "pending_action": None,
+                        "supervisor_session_usable": False,
+                        "pause_reason": sanitized[:16384],
+                        "summary": (
+                            "Live-shadow observation aborted; authoritative "
+                            "Stage 2 was untouched."
+                        ),
+                    },
+                    artifact_hashes={},
+                    utc_now=services.utc_now,
+                )
+                if (
+                    pending is not None
+                    and (resolved / SUPERVISOR_PROCESS_FILE).exists()
+                ):
+                    stopped = _load_active_supervisor_process(
+                        resolved,
+                        pending,
+                    )
+                    if stopped is not None:
+                        stopped_pid, stopped_ticks = stopped
+                        if (
+                            not _process_identity_running(
+                                stopped_pid,
+                                stopped_ticks,
+                            )
+                            and not _process_group_exists(stopped_pid)
+                        ):
+                            _clear_supervisor_process(
+                                resolved,
+                                pending,
+                                stopped_pid,
+                            )
         except LiveShadowStateError as exc:
             if (
                 str(exc)
@@ -1063,6 +1193,11 @@ def _initial_state(
             authentication_confidentiality.scan_completed
         ),
         auth_confidentiality_violation_detected=False,
+        runtime_confidentiality_violation_intent_recorded=False,
+        runtime_home_cleanup_required=False,
+        runtime_home_cleanup_completed=False,
+        runtime_home_cleanup_reason=None,
+        runtime_confidentiality_rejected_action_id=None,
         observed_decision_ids=(),
         proposal_ids=(),
         comparison_ids=(),
@@ -1388,104 +1523,15 @@ def _drive(context: _LiveContext) -> LiveShadowResult:
     )
     consecutive_lock_failures = 0
     while True:
-        durable = _load_state(context.run_directory)
-        if durable != context.state:
-            if durable.status == "aborted":
-                context.state = durable
-                return _result_for_state(durable, context.prepared)
-            raise LiveShadowStateError("live-shadow state changed during active observation")
-        if context.state.status in TERMINAL_LIVE_STATUSES:
-            return _result_for_state(context.state, context.prepared)
-        if (context.run_directory / ABORT_INTENT_FILE).is_file():
-            context.services.sleep(min(poll_seconds, 0.01))
-            continue
-        if (
-            context.supervisor_task is not None
-            and context.supervisor_task.thread.is_alive()
-        ):
-            _snapshot_checkpoint("while_supervisor_in_flight")
-        progressed = False
         try:
-            before = context.state
-            _discover_authoritative_run(context)
-            progressed = progressed or context.state != before
-            if context.state.authoritative_run_directory is not None:
-                while _observe_next_authoritative_entry(context):
-                    progressed = True
-                    _finalize_ready_comparisons(context)
-                    _finish_supervisor_if_ready(context)
-                    _launch_next_supervisor_if_ready(context)
-            _finish_supervisor_if_ready(context)
-            _launch_next_supervisor_if_ready(context)
-            running = _authoritative_process_running(context)
-            if not running:
-                if context.state.authoritative_run_directory is None:
-                    context.state = _transition(
-                        context,
-                        "human_paused",
-                        "authoritative_launch_unproven",
-                        "The Stage 2 child ended before its run identity could be proven.",
-                    )
-                    continue
-                if context.state.authoritative_status is None:
-                    try:
-                        current_result, _, _ = read_stage2_source_for_shadow(
-                            Path(context.state.authoritative_run_directory)
-                        )
-                    except WorkflowStateError as exc:
-                        context.external_authority_read_failures += 1
-                        if context.external_authority_read_failures >= 100:
-                            raise LiveShadowIntegrityError(
-                                "authoritative Stage 2 status could not be verified"
-                            ) from exc
-                        context.services.sleep(
-                            min(poll_seconds, 0.05)
-                        )
-                        continue
-                    context.external_authority_read_failures = 0
-                    if current_result.status in {
-                        "human_paused",
-                        "repair_limit_paused",
-                    }:
-                        if (
-                            context.external_continuation_grace_deadline
-                            is None
-                        ):
-                            context.external_continuation_grace_deadline = (
-                                context.services.monotonic() + 0.5
-                            )
-                        if (
-                            context.services.monotonic()
-                            < context.external_continuation_grace_deadline
-                        ):
-                            context.services.sleep(
-                                min(poll_seconds, 0.05)
-                            )
-                            continue
-                    elif current_result.status not in {
-                        "checkpoint_paused",
-                        "completed",
-                        "failed",
-                        "aborted",
-                    }:
-                        context.external_continuation_grace_deadline = None
-                        context.services.sleep(
-                            min(poll_seconds, 0.05)
-                        )
-                        continue
-                    _record_authoritative_terminal(context)
-                    progressed = True
-                while _observe_next_authoritative_entry(context):
-                    progressed = True
-                    _finalize_ready_comparisons(context)
-                    _finish_supervisor_if_ready(context)
-                    _launch_next_supervisor_if_ready(context)
-                _finalize_ready_comparisons(context)
-                _finish_supervisor_if_ready(context)
-                _launch_next_supervisor_if_ready(context)
-                _finalize_after_authoritative(context)
-                if context.state.status in TERMINAL_LIVE_STATUSES:
-                    continue
+            with _supervisor_lifecycle_gate(context.run_directory), _live_lock(
+                context.run_directory,
+                context.services.utc_now,
+            ):
+                delay = _drive_locked_iteration(
+                    context,
+                    poll_seconds,
+                )
         except LiveShadowIntegrityError:
             raise
         except LiveShadowInputError as exc:
@@ -1501,8 +1547,108 @@ def _drive(context: _LiveContext) -> LiveShadowResult:
             context.services.sleep(min(poll_seconds, 0.01))
             continue
         consecutive_lock_failures = 0
-        if not progressed:
-            context.services.sleep(poll_seconds)
+        if delay is None:
+            return _result_for_state(context.state, context.prepared)
+        if delay > 0:
+            context.services.sleep(delay)
+
+
+def _drive_locked_iteration(
+    context: _LiveContext,
+    poll_seconds: float,
+) -> float | None:
+    durable = _load_state(context.run_directory)
+    if durable != context.state:
+        if durable.status == "aborted":
+            context.state = durable
+            return None
+        raise LiveShadowStateError(
+            "live-shadow state changed during active observation"
+        )
+    if context.state.status in TERMINAL_LIVE_STATUSES:
+        return None
+    if context.state.runtime_home_cleanup_required:
+        _complete_runtime_confidentiality_cleanup(context)
+    if (context.run_directory / ABORT_INTENT_FILE).is_file():
+        return min(poll_seconds, 0.01)
+    if (
+        context.supervisor_task is not None
+        and context.supervisor_task.thread.is_alive()
+    ):
+        _snapshot_checkpoint("while_supervisor_in_flight")
+    progressed = False
+    before = context.state
+    _discover_authoritative_run(context)
+    progressed = progressed or context.state != before
+    if context.state.authoritative_run_directory is not None:
+        while _observe_next_authoritative_entry(context):
+            progressed = True
+            _finalize_ready_comparisons(context)
+            _finish_supervisor_if_ready(context)
+            _launch_next_supervisor_if_ready(context)
+    _finish_supervisor_if_ready(context)
+    _launch_next_supervisor_if_ready(context)
+    running = _authoritative_process_running(context)
+    if not running:
+        if context.state.authoritative_run_directory is None:
+            context.state = _transition(
+                context,
+                "human_paused",
+                "authoritative_launch_unproven",
+                (
+                    "The Stage 2 child ended before its run identity could "
+                    "be proven."
+                ),
+            )
+            return 0
+        if context.state.authoritative_status is None:
+            try:
+                current_result, _, _ = read_stage2_source_for_shadow(
+                    Path(context.state.authoritative_run_directory)
+                )
+            except WorkflowStateError as exc:
+                context.external_authority_read_failures += 1
+                if context.external_authority_read_failures >= 100:
+                    raise LiveShadowIntegrityError(
+                        "authoritative Stage 2 status could not be verified"
+                    ) from exc
+                return min(poll_seconds, 0.05)
+            context.external_authority_read_failures = 0
+            if current_result.status in {
+                "human_paused",
+                "repair_limit_paused",
+            }:
+                if context.external_continuation_grace_deadline is None:
+                    context.external_continuation_grace_deadline = (
+                        context.services.monotonic() + 0.5
+                    )
+                if (
+                    context.services.monotonic()
+                    < context.external_continuation_grace_deadline
+                ):
+                    return min(poll_seconds, 0.05)
+            elif current_result.status not in {
+                "checkpoint_paused",
+                "completed",
+                "failed",
+                "aborted",
+            }:
+                context.external_continuation_grace_deadline = None
+                return min(poll_seconds, 0.05)
+            _record_authoritative_terminal(context)
+            progressed = True
+        while _observe_next_authoritative_entry(context):
+            progressed = True
+            _finalize_ready_comparisons(context)
+            _finish_supervisor_if_ready(context)
+            _launch_next_supervisor_if_ready(context)
+        _finalize_ready_comparisons(context)
+        _finish_supervisor_if_ready(context)
+        _launch_next_supervisor_if_ready(context)
+        _finalize_after_authoritative(context)
+        if context.state.status in TERMINAL_LIVE_STATUSES:
+            return 0
+    return 0 if progressed else poll_seconds
 
 
 def _observe_next_authoritative_entry(context: _LiveContext) -> bool:
@@ -1755,28 +1901,10 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
             "The one persistent supervisor session is unavailable; no replacement was launched.",
         )
         return
+    if not _guard_context_runtime_mutation(context):
+        return
     envelope = _load_envelope(context.run_directory, decision_id)
     confidentiality = _refresh_authentication_confidentiality(context)
-    runtime_findings = scrub_runtime_home_contamination(
-        _codex_runtime_home(context.run_directory),
-        authentication_confidentiality=confidentiality,
-        forbidden_fragments=_runtime_forbidden_fragments(context),
-    )
-    if runtime_findings:
-        _finalize_unlaunchable_decision(
-            context,
-            decision_id,
-            (
-                "auth_confidentiality_violation"
-                if "auth_confidentiality_violation" in runtime_findings
-                else "runtime_home_contamination"
-            ),
-            (
-                "The persistent supervisor runtime home failed its clean "
-                "invariant and the session was not used."
-            ),
-        )
-        return
     quarantine_workspace = _quarantine_workspace(context.run_directory)
     _validate_quarantine_workspace(context.run_directory / "quarantine")
     rendered = build_live_blind_supervisor_prompt(
@@ -1848,11 +1976,39 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
         thread=threading.Thread(),
     )
 
+    def process_record_transition(
+        operation: Callable[[], None],
+    ) -> None:
+        for attempt in range(2_000):
+            try:
+                with _live_lock(
+                    context.run_directory,
+                    context.services.utc_now,
+                ):
+                    operation()
+                return
+            except LiveShadowLockError:
+                if attempt == 1_999:
+                    raise
+                time.sleep(0.001)
+
     def process_started(pid: int) -> None:
-        _record_supervisor_process(context, pending, pid)
+        process_record_transition(
+            lambda: _record_supervisor_process(
+                context,
+                pending,
+                pid,
+            )
+        )
 
     def process_finished(pid: int) -> None:
-        _clear_supervisor_process(context.run_directory, pending, pid)
+        process_record_transition(
+            lambda: _clear_supervisor_process(
+                context.run_directory,
+                pending,
+                pid,
+            )
+        )
 
     def invoke() -> None:
         try:
@@ -1926,6 +2082,14 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
             holder.error = LiveShadowStateError(
                 "isolated supervisor execution failed"
             )
+        finally:
+            key = (
+                os.path.abspath(os.fspath(context.run_directory)),
+                pending.action_id,
+            )
+            with _LIFECYCLE_GATES_LOCK:
+                _ACTIVE_SUPERVISOR_THREADS.pop(key, None)
+                _TERMINATED_SUPERVISOR_ACTIONS.add(key)
 
     holder.thread = threading.Thread(
         target=invoke,
@@ -1933,6 +2097,13 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
         daemon=True,
     )
     context.supervisor_task = holder
+    thread_key = (
+        os.path.abspath(os.fspath(context.run_directory)),
+        pending.action_id,
+    )
+    with _LIFECYCLE_GATES_LOCK:
+        _TERMINATED_SUPERVISOR_ACTIONS.discard(thread_key)
+        _ACTIVE_SUPERVISOR_THREADS[thread_key] = holder.thread
     holder.thread.start()
 
 
@@ -1978,6 +2149,25 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
     completion = Path(pending.stage1_artifact_directory) / "stage2-completion.json"
     if task is None and not completion.is_file():
         return
+    if not context.state.supervisor_session_usable:
+        context.supervisor_task = None
+        _record_failed_proposal(
+            context,
+            pending,
+            context.state.runtime_home_cleanup_reason
+            or "auth_confidentiality_violation",
+            (
+                "The persistent supervisor session was durably invalidated; "
+                "the action was rejected."
+            ),
+            session_unusable=True,
+            auth_violation=(
+                context.state.runtime_home_cleanup_reason
+                == "auth_confidentiality_violation"
+            ),
+            failure_already_recorded=True,
+        )
+        return
     if task is not None and task.error is not None:
         context.supervisor_task = None
         _record_failed_proposal(
@@ -1992,32 +2182,8 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
         raise LiveShadowIntegrityError(
             "supervisor completion lacks authentication protection"
         )
-    confidentiality = _refresh_authentication_confidentiality(context)
-    runtime_findings = scrub_runtime_home_contamination(
-        _codex_runtime_home(context.run_directory),
-        authentication_confidentiality=confidentiality,
-        forbidden_fragments=_runtime_forbidden_fragments(context),
-    )
-    if runtime_findings:
+    if not _guard_context_runtime_mutation(context):
         context.supervisor_task = None
-        auth_violation = (
-            "auth_confidentiality_violation" in runtime_findings
-        )
-        _record_failed_proposal(
-            context,
-            pending,
-            (
-                "auth_confidentiality_violation"
-                if auth_violation
-                else "runtime_home_contamination"
-            ),
-            (
-                "The supervisor runtime home was contaminated and scrubbed; "
-                "the persistent session is unusable."
-            ),
-            session_unusable=True,
-            auth_violation=auth_violation,
-        )
         return
     envelope = _load_envelope(context.run_directory, pending.proposal_id)
     decision = _proof_decision(envelope)
@@ -2209,6 +2375,7 @@ def _record_failed_proposal(
     *,
     session_unusable: bool = False,
     auth_violation: bool = False,
+    failure_already_recorded: bool = False,
 ) -> None:
     if _runtime_home_writer_is_active(
         context.run_directory,
@@ -2217,26 +2384,37 @@ def _record_failed_proposal(
         raise LiveShadowIntegrityError(
             "supervisor termination could not be proven"
         )
-    runtime_findings, _ = _scrub_runtime_home_before_mutation(
-        context.run_directory,
-        context.state,
-        context.prepared,
-        context.services,
-    )
-    if runtime_findings:
-        auth_violation = (
-            "auth_confidentiality_violation" in runtime_findings
+    if (
+        auth_violation
+        and not context.state.runtime_confidentiality_violation_intent_recorded
+    ):
+        _record_runtime_confidentiality_intent(
+            context,
+            reason="auth_confidentiality_violation",
+            rejected_action_id=pending.action_id,
         )
+        _complete_runtime_confidentiality_cleanup(context)
+        failure_already_recorded = True
         session_unusable = True
-        reason = (
-            "auth_confidentiality_violation"
-            if auth_violation
-            else "runtime_home_contamination"
-        )
+    if context.state.runtime_home_cleanup_required:
+        _complete_runtime_confidentiality_cleanup(context)
+    if (
+        context.state.runtime_confidentiality_violation_intent_recorded
+        and not context.state.supervisor_session_usable
+    ):
+        failure_already_recorded = True
+        session_unusable = True
+        reason = context.state.runtime_home_cleanup_reason or reason
+        auth_violation = reason == "auth_confidentiality_violation"
         detail = (
-            "The supervisor runtime home was contaminated and scrubbed; "
-            "the persistent session is unusable."
+            "The persistent supervisor session was durably invalidated; "
+            "the action was rejected."
         )
+    elif not _guard_context_runtime_mutation(context):
+        failure_already_recorded = True
+        session_unusable = True
+        reason = context.state.runtime_home_cleanup_reason or reason
+        auth_violation = reason == "auth_confidentiality_violation"
     proposal_directory = context.run_directory / "proposals" / pending.proposal_id
     _prepare_proposal_directories(proposal_directory)
     result_path = proposal_directory / "supervisor-result.json"
@@ -2302,13 +2480,14 @@ def _record_failed_proposal(
         utc_now=context.services.utc_now,
         post_journal_checkpoint="after_proposal_journal_append",
     )
-    context.state = _record_shadow_failure(
-        context,
-        decision_id=pending.proposal_id,
-        reason=reason,
-        detail=detail,
-        temporal_or_integrity=reason.endswith("unprovable"),
-    )
+    if not failure_already_recorded:
+        context.state = _record_shadow_failure(
+            context,
+            decision_id=pending.proposal_id,
+            reason=reason,
+            detail=detail,
+            temporal_or_integrity=reason.endswith("unprovable"),
+        )
 
 
 def _finalize_unlaunchable_decision(
@@ -2317,22 +2496,8 @@ def _finalize_unlaunchable_decision(
     reason: str,
     detail: str,
 ) -> None:
-    runtime_findings, _ = _scrub_runtime_home_before_mutation(
-        context.run_directory,
-        context.state,
-        context.prepared,
-        context.services,
-    )
-    if runtime_findings:
-        reason = (
-            "auth_confidentiality_violation"
-            if "auth_confidentiality_violation" in runtime_findings
-            else "runtime_home_contamination"
-        )
-        detail = (
-            "The supervisor runtime home was contaminated and scrubbed; "
-            "the persistent session is unusable."
-        )
+    if context.state.runtime_home_cleanup_required:
+        _complete_runtime_confidentiality_cleanup(context)
     envelope = _load_envelope(context.run_directory, decision_id)
     pending = PendingSupervisorAction(
         action_id=f"supervisor-{decision_id}",
@@ -3296,51 +3461,127 @@ def _record_shadow_failure(
     )
 
 
-def _record_runtime_home_failure(
+def _record_runtime_confidentiality_intent(
     context: _LiveContext,
     *,
-    auth_violation: bool,
-) -> LiveShadowState:
-    reason = (
-        "auth_confidentiality_violation"
-        if auth_violation
-        else "runtime_home_contamination"
+    reason: str,
+    rejected_action_id: str | None,
+) -> None:
+    if context.state.runtime_confidentiality_violation_intent_recorded:
+        if context.state.runtime_home_cleanup_required:
+            return
+        # The one persistent session is already durably unusable. A later host
+        # contamination is removed under that existing invalidation boundary.
+        recreate_engine_runtime_home(
+            _codex_runtime_home(context.run_directory),
+            checkpoint=_snapshot_checkpoint,
+        )
+        return
+    auth_violation = reason == "auth_confidentiality_violation"
+    decision_id = (
+        context.state.pending_action.proposal_id
+        if context.state.pending_action is not None
+        else None
     )
     failure = LiveShadowFailure(
-        decision_id=None,
+        decision_id=decision_id,
         reason=reason,
         detail=(
-            "Persistent supervisor runtime-home contamination was scrubbed; "
-            "the session is unusable."
+            "Persistent supervisor runtime-home validation failed; the "
+            "session is durably unusable and cleanup is required."
         ),
         temporal_or_integrity=True,
         recorded_at=_utc_string(context.services.utc_now()),
     )
-    return _journal_event(
+    status = context.state.status
+    if status == "awaiting_reviews":
+        status = "shadow_degraded"
+    context.state = _journal_event(
         context.run_directory,
         context.state,
         context.prepared,
-        event_type="shadow_failure",
-        reason="shadow_failure_recorded",
-        action_id=None,
-        decision_id=None,
+        event_type="runtime_confidentiality_violation_intent",
+        reason="runtime_confidentiality_violation_intent",
+        action_id=rejected_action_id,
+        decision_id=decision_id,
         updates={
-            "shadow_failures": (
-                *context.state.shadow_failures,
-                failure,
-            ),
+            "status": status,
+            "shadow_failures": (*context.state.shadow_failures, failure),
             "supervisor_session_usable": False,
-            **(
-                {"auth_confidentiality_violation_detected": True}
-                if auth_violation
-                else {}
+            "auth_confidentiality_violation_detected": (
+                context.state.auth_confidentiality_violation_detected
+                or auth_violation
             ),
+            "runtime_confidentiality_violation_intent_recorded": True,
+            "runtime_home_cleanup_required": True,
+            "runtime_home_cleanup_completed": False,
+            "runtime_home_cleanup_reason": reason,
+            "runtime_confidentiality_rejected_action_id": rejected_action_id,
             "summary": (
-                "Runtime-home contamination was scrubbed; Stage 2 was not changed."
+                "Persistent supervisor runtime-home cleanup is required; "
+                "Stage 2 was not changed."
             ),
         },
         artifact_hashes={},
         utc_now=context.services.utc_now,
+        post_journal_checkpoint=(
+            "after_runtime_confidentiality_violation_journal_append"
+        ),
+    )
+
+
+def _complete_runtime_confidentiality_cleanup(
+    context: _LiveContext,
+) -> None:
+    if not context.state.runtime_home_cleanup_required:
+        return
+    if context.state.supervisor_session_usable:
+        raise LiveShadowIntegrityError(
+            "runtime cleanup lacks durable session invalidation"
+        )
+    if _runtime_home_writer_is_active(
+        context.run_directory,
+        context.state,
+    ):
+        raise LiveShadowIntegrityError(
+            "supervisor termination could not be proven before cleanup"
+        )
+    _snapshot_checkpoint("before_runtime_home_scrub")
+    try:
+        recreate_engine_runtime_home(
+            _codex_runtime_home(context.run_directory),
+            checkpoint=_snapshot_checkpoint,
+        )
+    except (LiveShadowIntegrityError, OSError) as exc:
+        raise LiveShadowIntegrityError(
+            "Codex runtime-home contamination could not be scrubbed"
+        ) from exc
+    _snapshot_checkpoint("after_runtime_home_scrub_before_cleanup_completion")
+    context.state = _journal_event(
+        context.run_directory,
+        context.state,
+        context.prepared,
+        event_type="runtime_confidentiality_cleanup_completion",
+        reason="runtime_confidentiality_cleanup_completed",
+        action_id=context.state.runtime_confidentiality_rejected_action_id,
+        decision_id=(
+            context.state.pending_action.proposal_id
+            if context.state.pending_action is not None
+            else None
+        ),
+        updates={
+            "runtime_home_cleanup_required": False,
+            "runtime_home_cleanup_completed": True,
+            "summary": (
+                "Persistent supervisor runtime-home cleanup completed; "
+                "the invalidated session will not be resumed."
+            ),
+        },
+        artifact_hashes={},
+        utc_now=context.services.utc_now,
+        post_journal_checkpoint=(
+            "after_runtime_cleanup_completion_journal_append"
+        ),
     )
 
 
@@ -3629,6 +3870,11 @@ def _validate_live_journal_replay(
         "supervisor_session_id",
         "supervisor_session_usable",
         "auth_confidentiality_violation_detected",
+        "runtime_confidentiality_violation_intent_recorded",
+        "runtime_home_cleanup_required",
+        "runtime_home_cleanup_completed",
+        "runtime_home_cleanup_reason",
+        "runtime_confidentiality_rejected_action_id",
         "observed_decision_ids",
         "proposal_ids",
         "comparison_ids",
@@ -3653,6 +3899,11 @@ def _validate_live_journal_replay(
         "supervisor_session_id": None,
         "supervisor_session_usable": True,
         "auth_confidentiality_violation_detected": False,
+        "runtime_confidentiality_violation_intent_recorded": False,
+        "runtime_home_cleanup_required": False,
+        "runtime_home_cleanup_completed": False,
+        "runtime_home_cleanup_reason": None,
+        "runtime_confidentiality_rejected_action_id": None,
         "observed_decision_ids": [],
         "proposal_ids": [],
         "comparison_ids": [],
@@ -3685,6 +3936,42 @@ def _validate_live_journal_replay(
             raise LiveShadowStateError("Stage 4 journal new state is contradictory")
         replay.update(entry.state_updates)
         current = entry.new_state
+    violation_entries = tuple(
+        entry
+        for entry in entries
+        if entry.event_type
+        == "runtime_confidentiality_violation_intent"
+    )
+    cleanup_entries = tuple(
+        entry
+        for entry in entries
+        if entry.event_type
+        == "runtime_confidentiality_cleanup_completion"
+    )
+    if (
+        len(violation_entries) > 1
+        or len(cleanup_entries) > 1
+        or (
+            cleanup_entries
+            and (
+                not violation_entries
+                or cleanup_entries[0].sequence
+                <= violation_entries[0].sequence
+            )
+        )
+        or any(
+            entry.reason != "runtime_confidentiality_violation_intent"
+            for entry in violation_entries
+        )
+        or any(
+            entry.reason
+            != "runtime_confidentiality_cleanup_completed"
+            for entry in cleanup_entries
+        )
+    ):
+        raise LiveShadowStateError(
+            "runtime confidentiality cleanup journal semantics are invalid"
+        )
     state_value = state.model_dump(mode="json")
     if any(state_value[field] != value for field, value in replay.items()):
         raise LiveShadowStateError("Stage 4 state contradicts journal replay")
@@ -3747,6 +4034,11 @@ def _result_for_state(
         auth_confidentiality_violation_detected=(
             state.auth_confidentiality_violation_detected
         ),
+        runtime_confidentiality_violation_intent_recorded=(
+            state.runtime_confidentiality_violation_intent_recorded
+        ),
+        runtime_home_cleanup_required=state.runtime_home_cleanup_required,
+        runtime_home_cleanup_completed=state.runtime_home_cleanup_completed,
         observed_decision_count=len(state.observed_decision_ids),
         proposal_count=len(state.proposal_ids),
         comparison_count=len(state.comparison_ids),
@@ -3830,7 +4122,46 @@ def _validate_run(
     if source_hashes != expected_source:
         raise LiveShadowIntegrityError("frozen Stage 2 source hashes drifted")
     load_backend_identity(run_directory / "isolation.json")
-    _validate_quarantine_workspace(run_directory / "quarantine")
+    if not state.runtime_home_cleanup_required:
+        _validate_quarantine_workspace(run_directory / "quarantine")
+    else:
+        try:
+            quarantine_status = (
+                run_directory / "quarantine"
+            ).lstat()
+        except OSError as exc:
+            raise LiveShadowIntegrityError(
+                "pending runtime cleanup lost its quarantine root"
+            ) from exc
+        if (
+            not stat.S_ISDIR(quarantine_status.st_mode)
+            or quarantine_status.st_uid != os.geteuid()
+            or quarantine_status.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise LiveShadowIntegrityError(
+                "pending runtime cleanup has an untrusted quarantine root"
+            )
+    if (
+        state.runtime_home_cleanup_required
+        and (
+            not state.runtime_confidentiality_violation_intent_recorded
+            or state.supervisor_session_usable
+            or state.runtime_home_cleanup_reason is None
+        )
+    ):
+        raise LiveShadowStateError(
+            "pending runtime cleanup lacks durable session invalidation"
+        )
+    if (
+        state.runtime_home_cleanup_completed
+        and (
+            not state.runtime_confidentiality_violation_intent_recorded
+            or state.runtime_home_cleanup_required
+        )
+    ):
+        raise LiveShadowStateError(
+            "runtime cleanup completion contradicts its durable intent"
+        )
     if state.authoritative_run_directory is not None:
         authoritative_path = Path(state.authoritative_run_directory)
         run_record = _load_model(
@@ -4506,56 +4837,93 @@ def _refresh_authentication_confidentiality(
 
 def _guard_context_runtime_mutation(context: _LiveContext) -> bool:
     """Central auth-aware boundary for trusted Stage 4 semantic mutations."""
-    task = context.supervisor_task
-    if task is not None and task.thread.is_alive():
-        return False
-    if context.state.pending_action is not None:
-        active = _load_active_supervisor_process(
-            context.run_directory,
-            context.state.pending_action,
-        )
-        if active is not None:
-            pid, start_ticks = active
-            if _process_identity_running(pid, start_ticks) or _process_group_exists(
-                pid
-            ):
-                return False
-    if not (
-        context.run_directory / "authoritative" / "launch.json"
-    ).exists() and not (
-        context.run_directory / "authoritative" / "launch-intent.json"
-    ).exists():
-        confidentiality = _refresh_authentication_confidentiality(context)
-        findings = scrub_runtime_home_contamination(
-            _codex_runtime_home(context.run_directory),
-            authentication_confidentiality=confidentiality,
-            forbidden_fragments=_runtime_forbidden_fragments(context),
-        )
-    else:
-        findings, confidentiality = _scrub_runtime_home_before_mutation(
+    with _supervisor_lifecycle_gate(context.run_directory), _live_lock(
+        context.run_directory,
+        context.services.utc_now,
+    ):
+        if context.state.runtime_home_cleanup_required:
+            _complete_runtime_confidentiality_cleanup(context)
+            return False
+        task = context.supervisor_task
+        if task is not None and task.thread.is_alive():
+            return False
+        if _runtime_home_writer_is_active(
             context.run_directory,
             context.state,
-            context.prepared,
-            context.services,
+        ):
+            return False
+        has_launch_boundary = (
+            context.run_directory / "authoritative" / "launch.json"
+        ).exists() or (
+            context.run_directory
+            / "authoritative"
+            / "launch-intent.json"
+        ).exists()
+        if has_launch_boundary:
+            findings, reason, confidentiality = (
+                _stable_runtime_home_validation(
+                    context.run_directory,
+                    context.state,
+                    context.prepared,
+                    context.services,
+                )
+            )
+        else:
+            before = _runtime_lifecycle_identity(
+                context.run_directory,
+                context.state,
+            )
+            confidentiality = _refresh_authentication_confidentiality(
+                context
+            )
+            reason = None
+            try:
+                findings = inspect_runtime_home_contents(
+                    _codex_runtime_home(context.run_directory),
+                    authentication_confidentiality=confidentiality,
+                    forbidden_fragments=(
+                        _runtime_forbidden_fragments(context)
+                    ),
+                )
+            except LiveShadowRuntimeHomeInstabilityError:
+                findings = ()
+                reason = "runtime_home_instability"
+            if (
+                _load_state(context.run_directory) != context.state
+                or _runtime_lifecycle_identity(
+                        context.run_directory,
+                        context.state,
+                )
+                != before
+            ):
+                findings = ()
+                reason = "runtime_home_instability"
+        if context.isolation_capability is not None:
+            capability = context.isolation_capability
+            context.isolation_capability = BubblewrapCapability(
+                identity=capability.identity,
+                authentication_file=capability.authentication_file,
+                authentication_confidentiality=confidentiality,
+            )
+        if reason is None and not findings:
+            return True
+        rejected_action_id = (
+            context.state.pending_action.action_id
+            if context.state.pending_action is not None
+            else None
         )
-    if context.isolation_capability is not None:
-        capability = context.isolation_capability
-        context.isolation_capability = BubblewrapCapability(
-            identity=capability.identity,
-            authentication_file=capability.authentication_file,
-            authentication_confidentiality=confidentiality,
+        cleanup_reason = reason or (
+            "auth_confidentiality_violation"
+            if "auth_confidentiality_violation" in findings
+            else "runtime_home_contamination"
         )
-    if not findings:
-        return True
-    if context.state.pending_action is not None:
+        _record_runtime_confidentiality_intent(
+            context,
+            reason=cleanup_reason,
+            rejected_action_id=rejected_action_id,
+        )
+        _complete_runtime_confidentiality_cleanup(context)
         return False
-    context.state = _record_runtime_home_failure(
-        context,
-        auth_violation=(
-            "auth_confidentiality_violation" in findings
-        ),
-    )
-    return False
 
 
 def _runtime_forbidden_fragments(
@@ -4579,15 +4947,49 @@ def _validate_runtime_home_for_read(
     prepared: PreparedLiveShadowSpecification,
     services: LiveShadowServices,
 ) -> None:
-    if (
-        state.pending_action is not None
-        and not (
-            Path(state.pending_action.stage1_artifact_directory)
-            / "stage2-completion.json"
-        ).is_file()
-    ):
+    if state.runtime_home_cleanup_required:
+        raise LiveShadowIntegrityError(
+            "runtime confidentiality cleanup is pending"
+        )
+    if _runtime_home_writer_is_active(run_directory, state):
         raise LiveShadowStateError(
             "supervisor runtime-home writer is still active"
+        )
+    findings, reason, _ = _stable_runtime_home_validation(
+        run_directory,
+        state,
+        prepared,
+        services,
+    )
+    if reason is not None:
+        raise LiveShadowRuntimeHomeInstabilityError(
+            "Codex runtime home did not remain stable while checked"
+        )
+    if findings:
+        raise LiveShadowIntegrityError(
+            "Codex runtime home failed its confidentiality boundary"
+        )
+
+
+def _stable_runtime_home_validation(
+    run_directory: Path,
+    state: LiveShadowState,
+    prepared: PreparedLiveShadowSpecification,
+    services: LiveShadowServices,
+) -> tuple[
+    tuple[str, ...],
+    str | None,
+    AuthenticationConfidentiality,
+]:
+    if _runtime_home_writer_is_active(run_directory, state):
+        raise LiveShadowStateError(
+            "supervisor runtime-home writer is still active"
+        )
+    before = _runtime_lifecycle_identity(run_directory, state)
+    durable_before = _load_state(run_directory)
+    if durable_before != state:
+        raise LiveShadowStateError(
+            "live-shadow state changed before runtime validation"
         )
     confidentiality, fragments, _ = _runtime_boundary_inputs(
         run_directory,
@@ -4595,31 +4997,26 @@ def _validate_runtime_home_for_read(
         prepared,
         services,
     )
-    validate_runtime_home_contents(
-        _codex_runtime_home(run_directory),
-        authentication_confidentiality=confidentiality,
-        forbidden_fragments=fragments,
-    )
-
-
-def _scrub_runtime_home_before_mutation(
-    run_directory: Path,
-    state: LiveShadowState,
-    prepared: PreparedLiveShadowSpecification,
-    services: LiveShadowServices,
-) -> tuple[tuple[str, ...], AuthenticationConfidentiality]:
-    confidentiality, fragments, _ = _runtime_boundary_inputs(
-        run_directory,
-        state,
-        prepared,
-        services,
-    )
-    findings = scrub_runtime_home_contamination(
-        _codex_runtime_home(run_directory),
-        authentication_confidentiality=confidentiality,
-        forbidden_fragments=fragments,
-    )
-    return findings, confidentiality
+    reason: str | None = None
+    try:
+        findings = inspect_runtime_home_contents(
+            _codex_runtime_home(run_directory),
+            authentication_confidentiality=confidentiality,
+            forbidden_fragments=fragments,
+        )
+    except LiveShadowRuntimeHomeInstabilityError:
+        findings = ()
+        reason = "runtime_home_instability"
+    durable_after = _load_state(run_directory)
+    after = _runtime_lifecycle_identity(run_directory, durable_after)
+    if (
+        durable_after != state
+        or before != after
+        or _runtime_home_writer_is_active(run_directory, durable_after)
+    ):
+        findings = ()
+        reason = "runtime_home_instability"
+    return findings, reason, confidentiality
 
 
 def _runtime_boundary_inputs(
@@ -4794,11 +5191,41 @@ def _live_lock(
     run_directory: Path,
     utc_now: Callable[[], datetime],
 ) -> Iterator[None]:
+    key = os.path.abspath(os.fspath(run_directory))
+    depths = cast(
+        dict[str, int],
+        getattr(_LIVE_LOCK_DEPTH, "depths", {}),
+    )
+    if key in depths:
+        depths[key] += 1
+        _LIVE_LOCK_DEPTH.depths = depths
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+            if depths[key] == 0:
+                del depths[key]
+        return
     try:
         with _ShadowLock(run_directory, utc_now):
-            yield
+            depths[key] = 1
+            _LIVE_LOCK_DEPTH.depths = depths
+            try:
+                yield
+            finally:
+                del depths[key]
     except ShadowLockError as exc:
         raise LiveShadowLockError(str(exc)) from exc
+
+
+@contextmanager
+def _supervisor_lifecycle_gate(run_directory: Path) -> Iterator[None]:
+    """Serialize launch/process transitions with runtime validation."""
+    key = os.path.abspath(os.fspath(run_directory))
+    with _LIFECYCLE_GATES_LOCK:
+        gate = _LIFECYCLE_GATES.setdefault(key, threading.RLock())
+    with gate:
+        yield
 
 
 def _process_start_ticks(pid: int) -> int | None:
@@ -4950,18 +5377,65 @@ def _runtime_home_writer_is_active(
                 "active supervisor process evidence has no pending action"
             )
         return False
-    if (
+    thread_key = (
+        os.path.abspath(os.fspath(run_directory)),
+        pending.action_id,
+    )
+    with _LIFECYCLE_GATES_LOCK:
+        tracked_thread = _ACTIVE_SUPERVISOR_THREADS.get(thread_key)
+        thread_terminated = thread_key in _TERMINATED_SUPERVISOR_ACTIONS
+    if tracked_thread is not None and tracked_thread.is_alive():
+        return True
+    active = _load_active_supervisor_process(run_directory, pending)
+    if active is not None:
+        pid, start_ticks = active
+        return (
+            _process_identity_running(pid, start_ticks)
+            or _process_group_exists(pid)
+        )
+    completion = (
         Path(pending.stage1_artifact_directory)
         / "stage2-completion.json"
-    ).is_file():
-        return False
+    )
+    # Before the completion boundary, an absent process record is the launch
+    # callback race, not proof that no process can write.
+    return not completion.is_file() and not thread_terminated
+
+
+def _runtime_lifecycle_identity(
+    run_directory: Path,
+    state: LiveShadowState,
+) -> _RuntimeLifecycleIdentity:
+    pending = state.pending_action
+    if pending is None:
+        if (run_directory / SUPERVISOR_PROCESS_FILE).exists():
+            raise LiveShadowIntegrityError(
+                "active supervisor process evidence has no pending action"
+            )
+        return _RuntimeLifecycleIdentity(
+            pending_action_id=None,
+            supervisor_session_id=state.supervisor_session_id,
+            process_identity=None,
+            completion_recorded=False,
+        )
     active = _load_active_supervisor_process(run_directory, pending)
-    if active is None:
-        return False
-    pid, start_ticks = active
-    return (
-        _process_identity_running(pid, start_ticks)
-        or _process_group_exists(pid)
+    thread_key = (
+        os.path.abspath(os.fspath(run_directory)),
+        pending.action_id,
+    )
+    with _LIFECYCLE_GATES_LOCK:
+        thread_terminated = thread_key in _TERMINATED_SUPERVISOR_ACTIONS
+    return _RuntimeLifecycleIdentity(
+        pending_action_id=pending.action_id,
+        supervisor_session_id=state.supervisor_session_id,
+        process_identity=active,
+        completion_recorded=(
+            (
+                Path(pending.stage1_artifact_directory)
+                / "stage2-completion.json"
+            ).is_file()
+            or thread_terminated
+        ),
     )
 
 
