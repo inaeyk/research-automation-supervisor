@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from typer.testing import CliRunner
 
 from research_automation_supervisor.cli import app
-from research_automation_supervisor.errors import LiveShadowDependencyError
+from research_automation_supervisor.errors import (
+    LiveShadowDependencyError,
+    LiveShadowIntegrityError,
+)
 from research_automation_supervisor.live_shadow_engine import (
     abort_live_shadow,
     live_shadow_exit_code,
@@ -414,3 +422,303 @@ def test_run_live_shadow_human_mode_executes_one_authoritative_launch(
     assert result.exit_code == 5
     assert "Status: awaiting_reviews" in result.stdout
     assert len(tuple((tmp_path / "stage2-runs").iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        ("run-live-shadow", "spec.yaml"),
+        ("resume-live-shadow", "run"),
+        ("live-shadow-status", "run"),
+        (
+            "record-live-shadow-review",
+            "run",
+            "worker_initial-r000-a001",
+            "review.yaml",
+        ),
+        ("live-shadow-report", "run"),
+        ("abort-live-shadow", "run", "--reason", "operator stop"),
+    ),
+)
+@pytest.mark.parametrize("json_mode", (False, True))
+def test_every_stage4_cli_failure_redacts_current_authentication_forms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+    json_mode: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+
+    unique = hashlib.sha256(os.urandom(32)).hexdigest()
+    secret = f'AUTH-{unique}/+\\"END'
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    raw = secret.encode()
+    protected = (
+        raw,
+        json.dumps(secret)[1:-1].encode(),
+        base64.b64encode(raw),
+        base64.urlsafe_b64encode(raw),
+        raw.hex().encode("ascii"),
+        quote(secret, safe="").encode("ascii"),
+        f"Bearer {secret}".encode(),
+    )
+    exception_text = "adapter failure " + " ".join(
+        fragment.decode("ascii", errors="ignore")
+        for fragment in protected
+    )
+
+    def protected_failure(*_: object, **__: object) -> object:
+        raise LiveShadowIntegrityError(exception_text)
+
+    target = {
+        "run-live-shadow": "run_live_shadow",
+        "resume-live-shadow": "resume_live_shadow",
+        "live-shadow-status": "live_shadow_status",
+        "record-live-shadow-review": "record_live_shadow_review",
+        "live-shadow-report": "live_shadow_report",
+        "abort-live-shadow": "abort_live_shadow",
+    }[command[0]]
+    monkeypatch.setattr(cli, target, protected_failure)
+    arguments = list(command)
+    if json_mode:
+        arguments.append("--json")
+    result = runner.invoke(app, arguments)
+    assert result.exit_code == 4
+    captured = (result.stdout + result.stderr).encode()
+    for fragment in protected:
+        assert fragment not in captured
+    if json_mode:
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+    else:
+        assert "Live-shadow error:" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("command_name", "json_mode"),
+    (
+        ("live-shadow-status", False),
+        ("live-shadow-status", True),
+        ("live-shadow-report", False),
+        ("live-shadow-report", True),
+    ),
+)
+def test_status_and_report_cli_reject_contaminated_runtime_names_nonsecretly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    json_mode: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    auth = tmp_path / "fake-auth.json"
+    services = replace(services, codex_authentication_file=auth)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    authoritative = Path(str(result.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    secret = f"CLI-RUNTIME-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    codex_home = tmp_path / "cli-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_bytes(auth.read_bytes())
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    (runtime_home / f"Bearer {secret}").write_text(secret, encoding="utf-8")
+    operation = (
+        live_shadow_status
+        if command_name == "live-shadow-status"
+        else live_shadow_report
+    )
+    monkeypatch.setattr(
+        cli,
+        (
+            "live_shadow_status"
+            if command_name == "live-shadow-status"
+            else "live_shadow_report"
+        ),
+        lambda path: operation(path, services=services),
+    )
+    arguments = [command_name, str(run_directory)]
+    if json_mode:
+        arguments.append("--json")
+    captured = runner.invoke(app, arguments)
+    assert captured.exit_code == 4
+    output = (captured.stdout + captured.stderr).encode()
+    for fragment in (
+        secret.encode(),
+        base64.b64encode(secret.encode()),
+        base64.urlsafe_b64encode(secret.encode()),
+        secret.encode().hex().encode("ascii"),
+        quote(secret, safe="").encode("ascii"),
+        f"Bearer {secret}".encode(),
+    ):
+        assert fragment not in output
+    if json_mode:
+        assert json.loads(captured.stdout)["ok"] is False
+    else:
+        assert "Live-shadow error:" in captured.stderr
+    assert (runtime_home / f"Bearer {secret}").exists()
+    authoritative_after = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    assert authoritative_after == authoritative_before
+
+
+@pytest.mark.parametrize("cleanup_failure", (False, True))
+def test_abort_cli_scrubs_authentication_path_or_fails_integrity_nonsecretly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_failure: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    auth = tmp_path / "fake-auth.json"
+    services = replace(services, codex_authentication_file=auth)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    authoritative = Path(str(result.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    secret = f"CLI-ABORT-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    codex_home = tmp_path / "cli-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_bytes(auth.read_bytes())
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    contaminated = runtime_home / secret.encode().hex()
+    contaminated.write_text(secret, encoding="utf-8")
+    journal_before = (run_directory / "journal.jsonl").read_bytes()
+    if cleanup_failure:
+        monkeypatch.setattr(
+            isolation,
+            "_remove_runtime_entry_at",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("cleanup failed with " + secret)
+            ),
+        )
+    monkeypatch.setattr(
+        cli,
+        "abort_live_shadow",
+        lambda path, reason: abort_live_shadow(
+            path,
+            reason,
+            services=services,
+        ),
+    )
+    captured = runner.invoke(
+        app,
+        [
+            "abort-live-shadow",
+            str(run_directory),
+            "--reason",
+            "operator stop",
+            "--json",
+        ],
+    )
+    assert captured.exit_code == (4 if cleanup_failure else 8)
+    payload = json.loads(captured.stdout)
+    if cleanup_failure:
+        assert payload["ok"] is False
+    else:
+        assert payload["status"] == "aborted"
+    output = (captured.stdout + captured.stderr).encode()
+    for fragment in (
+        secret.encode(),
+        base64.b64encode(secret.encode()),
+        base64.urlsafe_b64encode(secret.encode()),
+        secret.encode().hex().encode("ascii"),
+        quote(secret, safe="").encode("ascii"),
+        f"Bearer {secret}".encode(),
+    ):
+        assert fragment not in output
+    if cleanup_failure:
+        assert (run_directory / "journal.jsonl").read_bytes() == journal_before
+    else:
+        assert not contaminated.exists()
+    authoritative_after = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    assert authoritative_after == authoritative_before
+
+
+@pytest.mark.parametrize("json_mode", (False, True))
+def test_status_cli_authentication_parser_failure_is_generic_and_parseable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    json_mode: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    auth = tmp_path / "fake-auth.json"
+    services = replace(services, codex_authentication_file=auth)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    secret = f"INVALID-AUTH-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    auth.write_text(
+        '{"access_token":"' + secret,
+        encoding="utf-8",
+    )
+    codex_home = tmp_path / "cli-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_bytes(auth.read_bytes())
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        cli,
+        "live_shadow_status",
+        lambda path: live_shadow_status(path, services=services),
+    )
+    arguments = ["live-shadow-status", str(run_directory)]
+    if json_mode:
+        arguments.append("--json")
+    captured = runner.invoke(app, arguments)
+    assert captured.exit_code == 3
+    output = (captured.stdout + captured.stderr).encode()
+    assert secret.encode() not in output
+    if json_mode:
+        assert json.loads(captured.stdout)["ok"] is False
+    else:
+        assert "Live-shadow error:" in captured.stderr

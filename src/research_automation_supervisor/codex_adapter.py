@@ -206,6 +206,8 @@ class _EventProcessor:
 VersionProbe = Callable[[str, Mapping[str, str], Path], str | None]
 UtcNow = Callable[[], datetime]
 Monotonic = Callable[[], float]
+ProcessStarted = Callable[[int], None]
+ProcessFinished = Callable[[int], None]
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,8 @@ def run_prepared_codex(
     rejected_confidential_fragments: Sequence[str] = (),
     durable_command_replacements: Mapping[str, str] | None = None,
     process_launch_builder: ProcessLaunchBuilder | None = None,
+    process_started: ProcessStarted | None = None,
+    process_finished: ProcessFinished | None = None,
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
@@ -394,6 +398,8 @@ def run_prepared_codex(
                 started_monotonic,
                 monotonic,
                 rejected_values,
+                process_started,
+                process_finished,
             )
             event_processor.finish()
 
@@ -749,6 +755,8 @@ def _run_process(
     started_monotonic: float,
     monotonic: Monotonic,
     rejected_values: Sequence[bytes],
+    process_started: ProcessStarted | None,
+    process_finished: ProcessFinished | None,
 ) -> None:
     try:
         process = subprocess.Popen(
@@ -766,10 +774,21 @@ def _run_process(
         return
 
     observation.launched = True
+    try:
+        if process_started is not None:
+            process_started(process.pid)
+    except BaseException:
+        _emergency_process_group_cleanup(process, limits)
+        process.wait()
+        if process_finished is not None:
+            process_finished(process.pid)
+        raise
     if process.stdin is None or process.stdout is None or process.stderr is None:
         observation.launch_error = "Codex process pipes were unavailable"
         _emergency_process_group_cleanup(process, limits)
         observation.exit_code = process.wait()
+        if process_finished is not None:
+            process_finished(process.pid)
         return
 
     selector = selectors.DefaultSelector()
@@ -794,6 +813,8 @@ def _run_process(
         selector.close()
         _emergency_process_group_cleanup(process, limits)
         observation.exit_code = process.wait()
+        if process_finished is not None:
+            process_finished(process.pid)
         return
 
     prompt_offset = 0
@@ -946,6 +967,8 @@ def _run_process(
         _emergency_process_group_cleanup(process, limits)
         if observation.exit_code is None:
             observation.exit_code = process.wait()
+        if process_finished is not None:
+            process_finished(process.pid)
         raise
     finally:
         for stream in streams.values():
@@ -955,6 +978,8 @@ def _run_process(
 
     if observation.exit_code is None:
         observation.exit_code = process.wait()
+    if process_finished is not None:
+        process_finished(process.pid)
 
 
 def _write_prompt_chunk(

@@ -4094,16 +4094,24 @@ def _json_compatible(value: object) -> object:
 
 
 def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    primary: OSError | None = None
     try:
         os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
+    except OSError as exc:
+        primary = exc
+    try:
         os.close(descriptor)
+    except OSError:
+        if primary is None:
+            raise
+    if primary is not None:
+        raise primary
 
 
 def _pid_exists(pid: int) -> bool:

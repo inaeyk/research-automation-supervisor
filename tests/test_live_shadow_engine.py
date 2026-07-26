@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from research_automation_supervisor.errors import (
     LiveShadowInputError,
+    LiveShadowIntegrityError,
     LiveShadowStateError,
     WorkflowLockError,
 )
@@ -331,6 +333,154 @@ def test_live_run_preserves_authority_and_quarantines_two_proposals(
     assert live_shadow_status(run_directory) == result
     report = live_shadow_report(run_directory)
     assert report["automation_enabled"] is False
+
+
+def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(
+    tmp_path: Path,
+) -> None:
+    values = {
+        domain: f"{domain}-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+        for domain in (
+            "human-source",
+            "current-output",
+            "workspace-change",
+            "git-evidence",
+            "test-evidence",
+            "audit-evidence",
+            "repair-evidence",
+            "comparison",
+            "review",
+            "future-sentinel",
+        )
+    }
+    first_worker = json.loads(worker_result())
+    first_worker["summary"] = values["current-output"]
+    failed_audit = json.loads(auditor_result("fail_repairable"))
+    failed_audit["summary"] = values["audit-evidence"]
+    failed_audit["findings"][0]["evidence"] = values["audit-evidence"]
+    repair_worker = json.loads(worker_result())
+    repair_worker["summary"] = values["repair-evidence"]
+    first_supervisor = live_supervisor_response("worker_initial")
+    first_proposal = json.loads(str(first_supervisor["final"]))
+    first_proposal["prompt"] = values["comparison"]
+    first_supervisor["final"] = json.dumps(first_proposal, sort_keys=True)
+    first_supervisor["observation_path"] = str(
+        tmp_path / "earlier-supervisor-observation.json"
+    )
+    supervisor_responses = [
+        first_supervisor,
+        live_supervisor_response("auditor", resume=True),
+        live_supervisor_response("worker_audit_repair", resume=True),
+        live_supervisor_response("auditor", resume=True),
+    ]
+    first_stage2_observation = tmp_path / "initial-worker-observation.json"
+    stage2_responses = [
+        codex_response(
+            "worker",
+            SOURCE_WORKER_UUID,
+            json.dumps(first_worker, sort_keys=True),
+            observation_path=str(first_stage2_observation),
+            write_files={
+                f"src/{values['git-evidence']}.txt": (
+                    values["workspace-change"]
+                )
+            },
+        ),
+        codex_response(
+            "auditor",
+            SOURCE_AUDITOR_UUID,
+            json.dumps(failed_audit, sort_keys=True),
+        ),
+        codex_response(
+            "worker",
+            SOURCE_WORKER_UUID,
+            json.dumps(repair_worker, sort_keys=True),
+            expected_resume_thread_id=SOURCE_WORKER_UUID,
+        ),
+        codex_response(
+            "auditor",
+            "55555555-5555-4555-8555-55555555555e",
+            auditor_result(),
+        ),
+    ]
+    spec, _, project, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=supervisor_responses,
+        stage2_responses=stage2_responses,
+    )
+    human_source = (
+        values["human-source"] + "\n"
+    ).encode("utf-8")
+    (project / "control" / "worker-initial.md").write_bytes(human_source)
+    (project / "tools" / "acceptance.py").write_text(
+        f"print({values['test-evidence']!r})\n",
+        encoding="utf-8",
+    )
+    git(project, "add", "control/worker-initial.md", "tools/acceptance.py")
+    git(project, "commit", "-q", "-m", "seed blind-input domain sentinels")
+
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    assert result.status == "awaiting_reviews"
+    assert result.observed_decision_count == 4
+    run_directory = Path(result.artifact_directory)
+    authoritative_run = Path(str(result.authoritative_stage2_run))
+    (project / values["future-sentinel"]).write_text(
+        values["future-sentinel"],
+        encoding="utf-8",
+    )
+    review_path = write_review(
+        tmp_path / "domain-review.yaml",
+        "worker_initial-r000-a001",
+    )
+    review_value = yaml.safe_load(review_path.read_text(encoding="utf-8"))
+    review_value["notes"] = values["review"]
+    review_path.write_text(
+        yaml.safe_dump(review_value, sort_keys=False),
+        encoding="utf-8",
+    )
+    record_live_shadow_review(
+        run_directory,
+        "worker_initial-r000-a001",
+        review_path,
+        services=services,
+    )
+
+    exact_stdin = base64.b64decode(
+        _read_json(tmp_path / "earlier-supervisor-observation.json")[
+            "prompt_base64"
+        ]
+    )
+    exact_authoritative_prompt = base64.b64decode(
+        _read_json(first_stage2_observation)["prompt_base64"]
+    )
+    later_stage2_entries = [
+        json.loads(line)
+        for line in (authoritative_run / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    later_state_transition = str(later_stage2_entries[-1]["entry_hash"])
+    forbidden_exact_values = (
+        human_source.rstrip(b"\n"),
+        hashlib.sha256(exact_authoritative_prompt).hexdigest().encode("ascii"),
+        *(value.encode("utf-8") for value in values.values()),
+        later_state_transition.encode("ascii"),
+    )
+    for value in forbidden_exact_values:
+        assert value
+        assert value not in exact_stdin
+
+    first_envelope = _read_json(
+        run_directory / "decisions/worker_initial-r000-a001/envelope.json"
+    )
+    assert str(first_envelope["source_action_id"]).encode("ascii") in exact_stdin
+    assert str(first_envelope["baseline_commit"]).encode("ascii") in exact_stdin
+    assert b'"proposal_kind":"worker_initial"' in exact_stdin
 
 
 @pytest.mark.parametrize(
@@ -933,7 +1083,7 @@ def test_resume_running_authority_consumes_original_supervisor_completion(
 
     def crash_during_original_supervisor(point: str) -> None:
         nonlocal crashed
-        if crashed or point != "after_state_replacement":
+        if crashed or point != "while_supervisor_in_flight":
             return
         runs = tuple((tmp_path / "live-runs").glob("*"))
         if not runs:
@@ -945,14 +1095,9 @@ def test_resume_running_authority_consumes_original_supervisor_completion(
             return
         entries = [json.loads(line) for line in lines]
         state = _read_json(runs[0] / "state.json")
-        if (
-            state["pending_action"] is not None
-            and any(
-                entry["event_type"] == "shadow_action_intent"
-                for entry in entries
-            )
-            and entries[-1]["reason"]
-            == "authoritative_journal_entry_observed"
+        if state["pending_action"] is not None and any(
+            entry["event_type"] == "shadow_action_intent"
+            for entry in entries
         ):
             crashed = True
             raise RuntimeError("simulated interrupted supervisor collector")
@@ -971,8 +1116,11 @@ def test_resume_running_authority_consumes_original_supervisor_completion(
         )
     assert crashed
     run_directory = next((tmp_path / "live-runs").iterdir())
-    interrupted = live_shadow_status(run_directory)
-    assert interrupted.status == "authoritative_running"
+    with pytest.raises(
+        LiveShadowStateError,
+        match="writer is still active",
+    ):
+        live_shadow_status(run_directory)
     interrupted_state = _read_json(run_directory / "state.json")
     assert interrupted_state["pending_action"]["proposal_id"] == (
         "worker_initial-r000-a001"
@@ -1081,7 +1229,7 @@ def test_interrupted_supervisor_deadline_finalizes_later_envelopes(
 
     def crash_with_pending_supervisor(point: str) -> None:
         nonlocal crashed
-        if crashed or point != "after_state_replacement":
+        if crashed or point != "while_supervisor_in_flight":
             return
         runs = tuple((tmp_path / "live-runs").glob("*"))
         if not runs:
@@ -1090,12 +1238,7 @@ def test_interrupted_supervisor_deadline_finalizes_later_envelopes(
         lines = (runs[0] / "journal.jsonl").read_text(
             encoding="ascii"
         ).splitlines()
-        if (
-            lines
-            and state["pending_action"] is not None
-            and json.loads(lines[-1])["reason"]
-            == "authoritative_journal_entry_observed"
-        ):
+        if lines and state["pending_action"] is not None:
             crashed = True
             raise RuntimeError("simulated unresolved supervisor interruption")
 
@@ -1114,6 +1257,8 @@ def test_interrupted_supervisor_deadline_finalizes_later_envelopes(
             )
         assert crashed
         run_directory = next((tmp_path / "live-runs").iterdir())
+        release_original.set()
+        time.sleep(0.02)
         monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
         recovered = resume_live_shadow(run_directory, services=services)
         assert recovered.status == "shadow_degraded"
@@ -1277,6 +1422,7 @@ def test_abort_stops_only_observation_and_stage2_finishes(
     "crash_point",
     (
         "after_journal_fsync",
+        "after_review_journal_append",
         "before_result_replacement",
         "after_result_replacement",
         "before_state_replacement",
@@ -1546,6 +1692,231 @@ def test_decision_prejournal_contradictions_remain_integrity_failures(
         match="pre-journal|artifact",
     ):
         resume_live_shadow(run_directory, services=services)
+
+
+@pytest.mark.parametrize(
+    "artifact_domain",
+    (
+        "decision",
+        "proposal",
+        "comparison",
+        "comparison_assessment",
+        "unavailable_comparison",
+        "unavailable_comparison_assessment",
+    ),
+)
+@pytest.mark.parametrize("failed_fsync_call", (1, 2, 3, 4))
+def test_required_artifact_directory_fsync_failures_recover_without_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_domain: str,
+    failed_fsync_call: int,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    root = tmp_path / artifact_domain
+    destination = root / "artifact-set"
+    journal = root / "journal.jsonl"
+    root.mkdir()
+    journal.write_bytes(b"semantic-prefix\n")
+    authoritative = tmp_path / "authoritative-stage2"
+    authoritative.mkdir()
+    authoritative_marker = authoritative / "unchanged"
+    authoritative_marker.write_bytes(b"authoritative")
+    expected = {
+        "one.json": b'{"value":1}\n',
+        "two.txt": b"two\n",
+    }
+    original_fsync = engine._fsync_directory
+    calls = 0
+
+    def fail_selected(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == failed_fsync_call:
+            raise OSError("injected directory fsync failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(engine, "_fsync_directory", fail_selected)
+    with pytest.raises(
+        (LiveShadowIntegrityError, LiveShadowStateError),
+    ) as captured:
+        engine._prepare_artifact_set(
+            destination,
+            expected,
+            checkpoint_prefix=artifact_domain,
+        )
+    assert "injected directory fsync failure" not in str(captured.value)
+    assert journal.read_bytes() == b"semantic-prefix\n"
+    assert authoritative_marker.read_bytes() == b"authoritative"
+    matching_before = {
+        path.name: (
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+        )
+        for path in destination.iterdir()
+        if path.is_file() and path.name in expected
+    }
+
+    monkeypatch.setattr(engine, "_fsync_directory", original_fsync)
+    engine._prepare_artifact_set(
+        destination,
+        expected,
+        checkpoint_prefix=artifact_domain,
+    )
+    assert journal.read_bytes() == b"semantic-prefix\n"
+    for name, (content, inode, mtime_ns) in matching_before.items():
+        path = destination / name
+        assert path.read_bytes() == content
+        assert path.stat().st_ino == inode
+        assert path.stat().st_mtime_ns == mtime_ns
+    assert {
+        path.name: path.read_bytes()
+        for path in destination.iterdir()
+        if path.is_file()
+    } == expected
+
+    (destination / "one.json").write_bytes(b"contradiction\n")
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="contradicts",
+    ):
+        engine._prepare_artifact_set(
+            destination,
+            expected,
+            checkpoint_prefix=artifact_domain,
+        )
+    assert journal.read_bytes() == b"semantic-prefix\n"
+    assert authoritative_marker.read_bytes() == b"authoritative"
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ("open", "fsync", "close", "fsync_and_close"),
+)
+def test_required_directory_fsync_helper_never_suppresses_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    original_open = engine.os.open
+    original_fsync = engine.os.fsync
+    original_close = engine.os.close
+
+    if failure_point == "open":
+        monkeypatch.setattr(
+            engine.os,
+            "open",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("open failure")
+            ),
+        )
+    if failure_point in {"fsync", "fsync_and_close"}:
+        monkeypatch.setattr(
+            engine.os,
+            "fsync",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("primary fsync failure")
+            ),
+        )
+    if failure_point in {"close", "fsync_and_close"}:
+        def fail_close(descriptor: int) -> None:
+            original_close(descriptor)
+            raise OSError("close failure")
+
+        monkeypatch.setattr(engine.os, "close", fail_close)
+    try:
+        with pytest.raises(OSError) as captured:
+            engine._fsync_directory(tmp_path)
+        if failure_point == "fsync_and_close":
+            assert str(captured.value) == "primary fsync failure"
+    finally:
+        monkeypatch.setattr(engine.os, "open", original_open)
+        monkeypatch.setattr(engine.os, "fsync", original_fsync)
+        monkeypatch.setattr(engine.os, "close", original_close)
+
+
+@pytest.mark.parametrize("snapshot_name", ("result", "state"))
+def test_snapshot_directory_fsync_failure_replays_one_durable_semantic_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_name: str,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    original_fsync = engine._fsync_directory
+    root_fsync_calls = 0
+    target_call = 1 if snapshot_name == "result" else 2
+
+    def fail_snapshot(path: Path) -> None:
+        nonlocal root_fsync_calls
+        if path == run_directory:
+            root_fsync_calls += 1
+            if root_fsync_calls == target_call:
+                raise OSError("injected snapshot directory fsync failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(engine, "_fsync_directory", fail_snapshot)
+    with pytest.raises(LiveShadowStateError) as captured:
+        record_live_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            review,
+            services=services,
+        )
+    assert "injected snapshot" not in str(captured.value)
+    review_artifact = (
+        run_directory / "reviews/worker_initial-r000-a001.json"
+    )
+    before = (
+        review_artifact.read_bytes(),
+        review_artifact.stat().st_ino,
+        review_artifact.stat().st_mtime_ns,
+    )
+    monkeypatch.setattr(engine, "_fsync_directory", original_fsync)
+    with pytest.raises(LiveShadowInputError, match="already"):
+        record_live_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            review,
+            services=services,
+        )
+    assert (
+        review_artifact.read_bytes(),
+        review_artifact.stat().st_ino,
+        review_artifact.stat().st_mtime_ns,
+    ) == before
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["event_type"] == "review"
+        and entry["decision_id"] == "worker_initial-r000-a001"
+        for entry in entries
+    ) == 1
+    recovered = live_shadow_status(run_directory, services=services)
+    assert recovered.review_count == 1
+    assert _read_json(run_directory / "state.json")["status"] == _read_json(
+        run_directory / "result.json"
+    )["status"]
 
 
 @pytest.mark.parametrize(

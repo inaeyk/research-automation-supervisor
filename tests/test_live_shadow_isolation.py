@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import stat
 import subprocess
 import threading
@@ -34,7 +35,9 @@ from research_automation_supervisor.errors import (
     LiveShadowIntegrityError,
 )
 from research_automation_supervisor.live_shadow_engine import (
+    abort_live_shadow,
     live_shadow_report,
+    live_shadow_status,
     record_live_shadow_review,
     resume_live_shadow,
     run_live_shadow,
@@ -49,9 +52,14 @@ from research_automation_supervisor.live_shadow_isolation import (
     BubblewrapBackendIdentity,
     BubblewrapCapability,
     _Mount,
+    _RuntimeHomeConsistencyError,
+    _RuntimeHomeDisappearanceError,
+    _scan_runtime_home_once,
     _validate_mount_allowlist,
     build_bubblewrap_process_launch,
     preflight_bubblewrap_isolation,
+    scrub_runtime_home_contamination,
+    validate_runtime_home_contents,
 )
 from research_automation_supervisor.live_shadow_models import LiveShadowResult
 from tests.live_shadow_helpers import (
@@ -166,6 +174,558 @@ def test_authentication_derivation_fails_closed_safely(
             forbidden_roots=(forbidden, tmp_path / "runs"),
         )
     assert "unique-secret" not in str(captured.value)
+
+
+def _raw_runtime_tree(root: Path) -> bytes:
+    chunks: list[bytes] = []
+    for current, directories, files in os.walk(os.fsencode(root)):
+        relative = os.path.relpath(current, os.fsencode(root))
+        chunks.append(relative)
+        chunks.extend(directories)
+        chunks.extend(files)
+        for name in files:
+            path = os.path.join(current, name)
+            try:
+                chunks.append(Path(os.fsdecode(path)).read_bytes())
+            except OSError:
+                continue
+    return b"\0".join(chunks)
+
+
+def test_runtime_home_scans_raw_path_components_and_complete_relative_paths(
+    tmp_path: Path,
+) -> None:
+    unique = hashlib.sha256(os.urandom(32)).hexdigest()
+    secret = f'AUTH-{unique}\\"END'
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        auth,
+        forbidden_roots=(tmp_path / "repository", tmp_path / "stage2-runs"),
+    )
+    raw = secret.encode("utf-8")
+    protected = (
+        raw,
+        json.dumps(secret)[1:-1].encode("utf-8"),
+        base64.b64encode(raw),
+        base64.urlsafe_b64encode(raw),
+        raw.hex().encode("ascii"),
+        quote(secret, safe="").encode("ascii"),
+        f"Bearer {secret}".encode(),
+    )
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    runtime_bytes = os.fsencode(runtime_home)
+    for index, fragment in enumerate(protected):
+        target = os.path.join(
+            runtime_bytes,
+            b"nested",
+            str(index).encode("ascii"),
+            fragment,
+        )
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if index % 2:
+            os.makedirs(target, exist_ok=True)
+            with open(os.path.join(target, b"safe"), "wb") as handle:
+                handle.write(b"safe")
+        else:
+            with open(target, "wb") as handle:
+                handle.write(b"safe")
+    non_utf8 = os.path.join(
+        runtime_bytes,
+        b"raw-\xff-" + raw.hex().encode("ascii"),
+    )
+    with open(non_utf8, "wb") as handle:
+        handle.write(b"safe")
+
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="clean-content invariant",
+    ) as captured:
+        validate_runtime_home_contents(
+            runtime_home,
+            authentication_confidentiality=protection,
+        )
+    assert secret not in str(captured.value)
+    findings = scrub_runtime_home_contamination(
+        runtime_home,
+        authentication_confidentiality=protection,
+    )
+    assert findings == ("auth_confidentiality_violation",)
+    raw_tree = _raw_runtime_tree(runtime_home)
+    for fragment in protected:
+        assert fragment not in raw_tree
+    assert raw.hex().encode("ascii") not in raw_tree
+
+
+@pytest.mark.parametrize(
+    "entry_kind",
+    (
+        "symlink",
+        "fifo",
+        "socket",
+        "device",
+        "hard_link",
+        "git_directory",
+        "repository_marker",
+        "forbidden_locator",
+    ),
+)
+def test_runtime_home_rejects_and_scrubs_recursive_boundary_entries(
+    tmp_path: Path,
+    entry_kind: str,
+) -> None:
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    authentication = tmp_path / "auth.json"
+    authentication.write_text(
+        json.dumps({"access_token": "unique-runtime-auth-0123456789"}),
+        encoding="utf-8",
+    )
+    protection = load_authentication_confidentiality(
+        authentication,
+        forbidden_roots=(tmp_path / "repo", tmp_path / "runs"),
+    )
+    forbidden = b"/fixed/authoritative/stage2/run"
+    open_socket: socket.socket | None = None
+    if entry_kind == "symlink":
+        (runtime_home / "entry").symlink_to(authentication)
+    elif entry_kind == "fifo":
+        os.mkfifo(runtime_home / "entry")
+    elif entry_kind == "socket":
+        open_socket = socket.socket(socket.AF_UNIX)
+        try:
+            open_socket.bind(str(runtime_home / "entry"))
+        except OSError:
+            open_socket.close()
+            open_socket = None
+            os.mknod(
+                runtime_home / "entry",
+                stat.S_IFSOCK | stat.S_IRUSR | stat.S_IWUSR,
+            )
+    elif entry_kind == "device":
+        try:
+            os.mknod(
+                runtime_home / "entry",
+                stat.S_IFCHR | stat.S_IRUSR | stat.S_IWUSR,
+                os.makedev(1, 3),
+            )
+        except PermissionError:
+            pytest.skip("creating a device entry requires unavailable permission")
+    elif entry_kind == "hard_link":
+        source = tmp_path / "hard-link-source"
+        source.write_bytes(b"safe")
+        os.link(source, runtime_home / "entry")
+    elif entry_kind == "git_directory":
+        (runtime_home / ".git").mkdir()
+    elif entry_kind == "repository_marker":
+        (runtime_home / "entry").write_bytes(
+            b"repositoryformatversion = 0\n"
+        )
+    else:
+        (runtime_home / "entry").write_bytes(forbidden)
+    try:
+        with pytest.raises(
+            LiveShadowIntegrityError,
+            match="clean-content invariant",
+        ):
+            validate_runtime_home_contents(
+                runtime_home,
+                authentication_confidentiality=protection,
+                forbidden_fragments=(forbidden,),
+            )
+        findings = scrub_runtime_home_contamination(
+            runtime_home,
+            authentication_confidentiality=protection,
+            forbidden_fragments=(forbidden,),
+        )
+        assert findings
+        validate_runtime_home_contents(
+            runtime_home,
+            authentication_confidentiality=protection,
+            forbidden_fragments=(forbidden,),
+        )
+    finally:
+        if open_socket is not None:
+            open_socket.close()
+
+
+@pytest.mark.parametrize(
+    ("bound_name", "value"),
+    (
+        ("MAX_RUNTIME_HOME_DEPTH", 1),
+        ("MAX_RUNTIME_HOME_FILES", 2),
+        ("MAX_RUNTIME_HOME_FILE_BYTES", 3),
+        ("MAX_RUNTIME_HOME_BYTES", 3),
+    ),
+)
+def test_runtime_home_enforces_every_recursive_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bound_name: str,
+    value: int,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    if bound_name == "MAX_RUNTIME_HOME_DEPTH":
+        (runtime_home / "one" / "two").mkdir(parents=True)
+    elif bound_name == "MAX_RUNTIME_HOME_FILES":
+        for index in range(value + 1):
+            (runtime_home / f"entry-{index}").write_bytes(b"x")
+    elif bound_name == "MAX_RUNTIME_HOME_FILE_BYTES":
+        (runtime_home / "entry").write_bytes(b"x" * (value + 1))
+    else:
+        (runtime_home / "one").write_bytes(b"xx")
+        (runtime_home / "two").write_bytes(b"xx")
+    monkeypatch.setattr(isolation, bound_name, value)
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="clean-content invariant",
+    ):
+        validate_runtime_home_contents(runtime_home)
+    findings = scrub_runtime_home_contamination(
+        runtime_home,
+        authentication_confidentiality=(
+            load_authentication_confidentiality(
+                _write_test_authentication(tmp_path),
+                forbidden_roots=(tmp_path / "repo", tmp_path / "runs"),
+            )
+        ),
+    )
+    assert "runtime_home_bound_violation" in findings
+    assert not tuple(runtime_home.iterdir())
+
+
+def _write_test_authentication(tmp_path: Path) -> Path:
+    path = tmp_path / "boundary-auth.json"
+    path.write_text(
+        json.dumps({"access_token": "boundary-auth-0123456789"}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_runtime_home_retries_disappearance_but_rejects_identity_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    (runtime_home / "entry").write_bytes(b"safe")
+    calls = 0
+
+    def disappear_once(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            (runtime_home / "entry").unlink()
+            raise _RuntimeHomeDisappearanceError
+        _scan_runtime_home_once(*args, **kwargs)
+
+    monkeypatch.setattr(
+        isolation,
+        "_scan_runtime_home_once",
+        disappear_once,
+    )
+    validate_runtime_home_contents(runtime_home)
+    assert calls == 2
+
+    replacement = runtime_home / "replacement"
+    replacement.write_bytes(b"safe")
+
+    def changed_identity(*_: object, **__: object) -> None:
+        raise _RuntimeHomeConsistencyError
+
+    monkeypatch.setattr(
+        isolation,
+        "_scan_runtime_home_once",
+        changed_identity,
+    )
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="identity changed",
+    ):
+        validate_runtime_home_contents(runtime_home)
+
+
+def test_review_validates_and_scrubs_authentication_paths_before_mutation(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    services = replace(
+        services,
+        codex_authentication_file=tmp_path / "fake-auth.json",
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    launches_before = (tmp_path / "live-shadow-counter").read_text(
+        encoding="ascii"
+    )
+    authoritative = Path(str(result.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    secret = f"review-auth-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    auth = tmp_path / "fake-auth.json"
+    auth.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    contaminated = runtime_home / secret
+    contaminated.mkdir()
+    (contaminated / "safe").write_bytes(b"safe")
+    review = write_review(
+        tmp_path / "review.yaml",
+        "worker_initial-r000-a001",
+    )
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="confidentiality boundary",
+    ) as captured:
+        record_live_shadow_review(
+            run_directory,
+            "worker_initial-r000-a001",
+            review,
+            services=services,
+        )
+    assert secret not in str(captured.value)
+    assert not (
+        run_directory / "reviews/worker_initial-r000-a001.json"
+    ).exists()
+    assert not contaminated.exists()
+    state = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["supervisor_session_usable"] is False
+    assert state["auth_confidentiality_violation_detected"] is True
+    assert (tmp_path / "live-shadow-counter").read_text(
+        encoding="ascii"
+    ) == launches_before
+    authoritative_after = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    assert authoritative_after == authoritative_before
+    assert secret.encode() not in _raw_runtime_tree(run_directory)
+
+
+def test_abort_scrubs_runtime_authentication_content_and_paths_before_commit(
+    tmp_path: Path,
+) -> None:
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    services = replace(
+        services,
+        codex_authentication_file=tmp_path / "fake-auth.json",
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    secret = f"abort-auth-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    (tmp_path / "fake-auth.json").write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    contaminated = runtime_home / f"Bearer {secret}"
+    contaminated.write_text(secret, encoding="utf-8")
+    aborted = abort_live_shadow(
+        run_directory,
+        "operator stop",
+        services=services,
+    )
+    assert aborted.status == "aborted"
+    assert aborted.authoritative_stage2_status == "completed"
+    assert aborted.supervisor_session_usable is False
+    assert aborted.auth_confidentiality_violation_detected is True
+    assert not contaminated.exists()
+    assert secret.encode() not in _raw_runtime_tree(run_directory)
+    assert live_shadow_status(
+        run_directory,
+        services=services,
+    ).status == "aborted"
+
+
+def test_abort_cleanup_failure_is_integrity_without_abort_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_isolation as isolation
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    services = replace(
+        services,
+        codex_authentication_file=tmp_path / "fake-auth.json",
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    secret = f"cleanup-auth-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    (tmp_path / "fake-auth.json").write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    (runtime_home / secret).write_bytes(b"safe")
+    journal_before = (run_directory / "journal.jsonl").read_bytes()
+
+    def fail_cleanup(*_: object, **__: object) -> None:
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(
+        isolation,
+        "_remove_runtime_entry_at",
+        fail_cleanup,
+    )
+    with pytest.raises(
+        LiveShadowIntegrityError,
+        match="could not be scrubbed",
+    ) as captured:
+        abort_live_shadow(
+            run_directory,
+            "operator stop",
+            services=services,
+        )
+    assert secret not in str(captured.value)
+    assert (run_directory / "journal.jsonl").read_bytes() == journal_before
+    assert json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )["status"] == "awaiting_reviews"
+
+
+def test_abort_in_flight_stops_only_shadow_before_runtime_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            live_supervisor_response("worker_initial", sleep_seconds=10),
+        ],
+        stage2_responses=[
+            codex_response(
+                "worker",
+                SOURCE_WORKER_UUID,
+                worker_result(),
+                sleep_seconds=2,
+            ),
+            codex_response(
+                "auditor",
+                SOURCE_AUDITOR_UUID,
+                auditor_result(),
+            ),
+        ],
+    )
+    services = replace(
+        services,
+        codex_authentication_file=tmp_path / "fake-auth.json",
+    )
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = run_live_shadow(
+                spec,
+                runs_dir=tmp_path / "live-runs",
+                stage2_runs_dir=tmp_path / "stage2-runs",
+                services=services,
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    observer = threading.Thread(target=run, daemon=True)
+    observer.start()
+    process_record: dict[str, object] | None = None
+    run_directory: Path | None = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        candidates = tuple((tmp_path / "live-runs").glob("*"))
+        if candidates:
+            run_directory = candidates[0]
+            process_path = run_directory / "supervisor-process.json"
+            if process_path.is_file():
+                process_record = json.loads(
+                    process_path.read_text(encoding="utf-8")
+                )
+                break
+        time.sleep(0.005)
+    assert run_directory is not None
+    assert process_record is not None
+    launch = json.loads(
+        (run_directory / "authoritative" / "launch.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    shadow_pid = int(process_record["process_id"])
+    shadow_ticks = int(process_record["process_start_ticks"])
+    stage2_pid = int(launch["pid"])
+    stage2_ticks = int(launch["process_start_ticks"])
+    assert engine._process_identity_running(shadow_pid, shadow_ticks)
+    assert engine._process_identity_running(stage2_pid, stage2_ticks)
+
+    secret = f"abort-in-flight-{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    (tmp_path / "fake-auth.json").write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine" / "codex-home"
+    (runtime_home / secret).write_text(secret, encoding="utf-8")
+    scanned = False
+    original_scrub = engine.scrub_runtime_home_contamination
+
+    def assert_writer_stopped(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal scanned
+        scanned = True
+        assert not engine._process_identity_running(shadow_pid, shadow_ticks)
+        assert engine._process_identity_running(stage2_pid, stage2_ticks)
+        return original_scrub(*args, **kwargs)
+
+    monkeypatch.setattr(
+        engine,
+        "scrub_runtime_home_contamination",
+        assert_writer_stopped,
+    )
+    aborted = abort_live_shadow(
+        run_directory,
+        "operator stop",
+        services=services,
+    )
+    assert scanned is True
+    assert aborted.status == "aborted"
+    assert aborted.supervisor_session_usable is False
+    assert aborted.auth_confidentiality_violation_detected is True
+    assert engine._process_identity_running(stage2_pid, stage2_ticks)
+    assert not engine._process_identity_running(shadow_pid, shadow_ticks)
+    assert not (run_directory / "supervisor-process.json").exists()
+    assert secret.encode() not in _raw_runtime_tree(run_directory)
+    observer.join(timeout=10)
+    assert not observer.is_alive()
+    assert "error" not in outcome
 
 
 def _prepared_supervisor(
@@ -665,6 +1225,75 @@ def test_resume_with_missing_backend_degrades_shadow_without_relaunching_stage2(
     assert not (tmp_path / "live-shadow-counter").exists()
 
 
+def test_runtime_validation_ignores_authoritative_atomic_temporary_workload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    authoritative = Path(str(result.authoritative_stage2_run))
+    sentinel = os.urandom(32).hex().encode("ascii")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def write_atomic_temporaries() -> None:
+        counter = 0
+        try:
+            while not stop.is_set():
+                temporary = authoritative / f".ordinary-stage2-{counter}.tmp"
+                destination = authoritative / "ordinary-stage2-volatile.tmp"
+                temporary.write_bytes(sentinel)
+                os.replace(temporary, destination)
+                counter += 1
+        except BaseException as exc:
+            errors.append(exc)
+
+    observed_fragment_sets: list[tuple[bytes, ...]] = []
+    original_validate = engine.validate_runtime_home_contents
+
+    def record_runtime_inputs(
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        fragments = tuple(
+            kwargs.get("forbidden_fragments", ())
+        )
+        observed_fragment_sets.append(fragments)
+        assert all(sentinel not in fragment for fragment in fragments)
+        original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        engine,
+        "validate_runtime_home_contents",
+        record_runtime_inputs,
+    )
+    writer = threading.Thread(target=write_atomic_temporaries, daemon=True)
+    writer.start()
+    try:
+        for _ in range(20):
+            observed = live_shadow_status(
+                run_directory,
+                services=services,
+            )
+            assert observed.status == "awaiting_reviews"
+            assert observed.proposal_count == result.proposal_count
+            assert observed.comparison_count == result.comparison_count
+    finally:
+        stop.set()
+        writer.join(timeout=2)
+    assert not writer.is_alive()
+    assert not errors
+    assert observed_fragment_sets
+
+
 def test_resumed_blind_stdin_excludes_prior_comparison_and_candidate(
     tmp_path: Path,
 ) -> None:
@@ -1074,6 +1703,7 @@ def _write_auth_exfiltration_fake(path: Path) -> None:
     source = f"""#!/usr/bin/python3
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import quote, quote_plus
@@ -1113,6 +1743,21 @@ def main():
         count_path.write_text(str(count), encoding="ascii")
         (home / "auth-read-ok").write_text("yes", encoding="ascii")
         (home / "copied-auth.txt").write_text(forms[2], encoding="utf-8")
+        for index, form in enumerate(forms):
+            target = home / "path-leaks" / str(index) / form
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if index % 2:
+                target.mkdir(parents=True, exist_ok=True)
+                (target / "safe").write_text("safe", encoding="ascii")
+            else:
+                target.write_text("safe", encoding="ascii")
+        raw_name = (
+            os.fsencode("/home/supervisor")
+            + b"/nonutf-\\xff-"
+            + raw.hex().encode("ascii")
+        )
+        with open(raw_name, "wb") as handle:
+            handle.write(b"safe")
         Path("/action/arbitrary-copy.bin").write_bytes(
             ("\\n".join(forms)).encode("utf-8")
         )
@@ -1264,6 +1909,7 @@ def test_real_bubblewrap_rejects_and_scrubs_authentication_exfiltration(
     for fragment in protected:
         assert fragment not in report_bytes
         assert fragment not in captured_bytes
+        assert fragment not in _raw_runtime_tree(run_directory)
         for artifact in run_directory.rglob("*"):
             if artifact.is_file():
                 assert fragment not in artifact.read_bytes(), artifact

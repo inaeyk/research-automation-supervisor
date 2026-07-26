@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Never, cast
 
@@ -50,6 +51,9 @@ from research_automation_supervisor.live_shadow_engine import (
     resume_live_shadow,
     run_live_shadow,
     validate_live_shadow_spec,
+)
+from research_automation_supervisor.live_shadow_isolation import (
+    resolve_authentication_confidentiality,
 )
 from research_automation_supervisor.live_shadow_models import LiveShadowResult
 from research_automation_supervisor.redaction import redact_text
@@ -911,7 +915,10 @@ def _render_live_shadow_error(
     exit_code: int,
 ) -> Never:
     _, _, sensitive_values = build_subprocess_environment()
-    sanitized = redact_text(error, sensitive_values)
+    sanitized = redact_text(
+        error,
+        (*sensitive_values, *_cli_authentication_fragments()),
+    )
     if as_json:
         typer.echo(_stable_json({"error": sanitized, "ok": False}))
     else:
@@ -934,16 +941,31 @@ def _emit_live_shadow_payload(
     as_json: bool,
 ) -> None:
     _, _, sensitive_values = build_subprocess_environment()
+    protected_values = (
+        *sensitive_values,
+        *_cli_authentication_fragments(),
+    )
     try:
         preflight_shadow_confidentiality(
             value,
-            sensitive_values,
+            protected_values,
             label="live-shadow CLI payload",
             integrity=True,
         )
     except ShadowStateError as exc:
         _render_live_shadow_error(str(exc), as_json, 4)
     typer.echo(rendered)
+
+
+def _cli_authentication_fragments() -> tuple[str, ...]:
+    fragments: tuple[str, ...] = ()
+    with suppress(LiveShadowDependencyError, LiveShadowStateError):
+        fragments = resolve_authentication_confidentiality(
+            authentication_file=None,
+            environ=None,
+            forbidden_roots=(),
+        ).text_fragments()
+    return fragments
 
 
 def _emit_shadow_payload(

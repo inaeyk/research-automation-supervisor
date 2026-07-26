@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
-import shutil
 import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
@@ -40,6 +41,12 @@ MAX_RUNTIME_HOME_FILES = 4096
 MAX_RUNTIME_HOME_DEPTH = 16
 MAX_RUNTIME_HOME_BYTES = 64 * 1024 * 1024
 MAX_RUNTIME_HOME_FILE_BYTES = 16 * 1024 * 1024
+MAX_RUNTIME_HOME_SCAN_ATTEMPTS = 3
+
+_RUNTIME_REPOSITORY_MARKERS = (
+    b"gitdir: ",
+    b"repositoryformatversion",
+)
 
 _TRUSTED_EXECUTABLE_DIRECTORIES = (
     Path("/usr/bin"),
@@ -361,6 +368,14 @@ def build_bubblewrap_process_launch(
     validate_runtime_home_contents(
         home,
         authentication_confidentiality=capability.authentication_confidentiality,
+        forbidden_fragments=tuple(
+            os.fsencode(root)
+            for root in (
+                *forbidden_roots,
+                root,
+                workspace,
+            )
+        ),
     )
 
     codex = _canonical_engine_path(
@@ -420,7 +435,25 @@ def write_backend_identity(path: Path, identity: BubblewrapBackendIdentity) -> N
         separators=(",", ":"),
         sort_keys=True,
     )
-    path.write_text(f"{rendered}\n", encoding="ascii")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(f"{rendered}\n".encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        raise LiveShadowIntegrityError(
+            "isolation backend evidence could not be persisted"
+        ) from exc
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 def load_backend_identity(path: Path) -> BubblewrapBackendIdentity:
@@ -961,6 +994,7 @@ def _scan_runtime_home(
     forbidden_fragments: Sequence[bytes],
     scrub: bool,
 ) -> tuple[str, ...]:
+    """Inspect an inactive runtime home through no-follow directory descriptors."""
     try:
         root_status = runtime_home.lstat()
     except OSError as exc:
@@ -982,92 +1016,36 @@ def _scan_runtime_home(
         )
     )
     findings: set[str] = set()
-    file_count = 0
-    total_bytes = 0
-    stack = [runtime_home]
-    try:
-        while stack:
-            directory = stack.pop()
-            depth = len(directory.relative_to(runtime_home).parts)
-            if depth > MAX_RUNTIME_HOME_DEPTH:
-                findings.add("runtime_home_bound_violation")
-                if scrub:
-                    _scrub_runtime_home(runtime_home)
-                    return tuple(sorted(findings))
-                continue
-            with os.scandir(directory) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
-            for entry in entries:
-                path = directory / entry.name
-                file_count += 1
-                if file_count > MAX_RUNTIME_HOME_FILES:
-                    findings.add("runtime_home_bound_violation")
-                    if scrub:
-                        _scrub_runtime_home(runtime_home)
-                        return tuple(sorted(findings))
-                    continue
-                status = entry.stat(follow_symlinks=False)
-                if entry.is_symlink():
-                    findings.add("runtime_home_symlink")
-                    if scrub:
-                        path.unlink()
-                        _fsync_directory(directory)
-                    continue
-                if entry.name == ".git":
-                    findings.add("runtime_home_repository_material")
-                    if scrub:
-                        _remove_runtime_entry(path, status)
-                        _fsync_directory(directory)
-                    continue
-                if stat.S_ISDIR(status.st_mode):
-                    stack.append(path)
-                    continue
-                if not stat.S_ISREG(status.st_mode):
-                    findings.add("runtime_home_nonregular_entry")
-                    if scrub:
-                        _remove_runtime_entry(path, status)
-                        _fsync_directory(directory)
-                    continue
-                if status.st_nlink != 1:
-                    findings.add("runtime_home_hard_link")
-                    if scrub:
-                        path.unlink()
-                        _fsync_directory(directory)
-                    continue
-                total_bytes += status.st_size
-                if (
-                    status.st_size > MAX_RUNTIME_HOME_FILE_BYTES
-                    or total_bytes > MAX_RUNTIME_HOME_BYTES
-                ):
-                    findings.add("runtime_home_bound_violation")
-                    if scrub:
-                        _scrub_runtime_home(runtime_home)
-                        return tuple(sorted(findings))
-                    continue
-                content = _read_runtime_regular_file(path, status)
-                auth_match = (
-                    authentication_confidentiality is not None
-                    and authentication_confidentiality.contains_bytes(content)
-                )
-                forbidden_match = any(fragment in content for fragment in forbidden)
-                if auth_match:
-                    findings.add("auth_confidentiality_violation")
-                if forbidden_match:
-                    findings.add("runtime_home_forbidden_content")
-                if scrub and (auth_match or forbidden_match):
-                    path.unlink()
-                    _fsync_directory(directory)
-    except OSError as exc:
-        if scrub:
-            try:
-                _scrub_runtime_home(runtime_home)
-            except OSError as scrub_exc:
+    for attempt in range(MAX_RUNTIME_HOME_SCAN_ATTEMPTS):
+        try:
+            _scan_runtime_home_once(
+                runtime_home,
+                authentication_confidentiality=authentication_confidentiality,
+                forbidden_fragments=forbidden,
+                scrub=scrub,
+                findings=findings,
+            )
+            break
+        except _RuntimeHomeDisappearanceError as exc:
+            if attempt == MAX_RUNTIME_HOME_SCAN_ATTEMPTS - 1:
                 raise LiveShadowIntegrityError(
-                    "Codex runtime-home contamination could not be scrubbed"
-                ) from scrub_exc
-        raise LiveShadowIntegrityError(
-            "Codex runtime home could not be checked"
-        ) from exc
+                    "Codex runtime home did not remain stable while checked"
+                ) from exc
+        except _RuntimeHomeConsistencyError as exc:
+            raise LiveShadowIntegrityError(
+                "Codex runtime-home entry identity changed while checked"
+            ) from exc
+        except OSError as exc:
+            if scrub:
+                try:
+                    _scrub_runtime_home(runtime_home)
+                except OSError as scrub_exc:
+                    raise LiveShadowIntegrityError(
+                        "Codex runtime-home contamination could not be scrubbed"
+                    ) from scrub_exc
+            raise LiveShadowIntegrityError(
+                "Codex runtime home could not be checked"
+            ) from exc
     if scrub and findings:
         validate_runtime_home_contents(
             runtime_home,
@@ -1077,13 +1055,243 @@ def _scan_runtime_home(
     return tuple(sorted(findings))
 
 
-def _read_runtime_regular_file(path: Path, expected: os.stat_result) -> bytes:
+class _RuntimeHomeConsistencyError(OSError):
+    """An untrusted entry changed identity during a bounded walk."""
+
+
+class _RuntimeHomeDisappearanceError(_RuntimeHomeConsistencyError):
+    """An untrusted entry disappeared and permits a bounded fresh attempt."""
+
+
+@dataclass
+class _RuntimeHomeWalk:
+    entry_count: int = 0
+    total_bytes: int = 0
+    contaminated_parents: set[tuple[bytes, ...]] = field(default_factory=set)
+
+
+def _scan_runtime_home_once(
+    runtime_home: Path,
+    *,
+    authentication_confidentiality: AuthenticationConfidentiality | None,
+    forbidden_fragments: Sequence[bytes],
+    scrub: bool,
+    findings: set[str],
+) -> None:
+    root_descriptor = _open_runtime_directory(runtime_home)
+    try:
+        root_identity = _directory_identity(os.fstat(root_descriptor))
+        walk = _RuntimeHomeWalk()
+        _walk_runtime_directory(
+            root_descriptor,
+            components=(),
+            authentication_confidentiality=authentication_confidentiality,
+            forbidden_fragments=forbidden_fragments,
+            scrub=scrub,
+            findings=findings,
+            walk=walk,
+        )
+        if _directory_identity(os.fstat(root_descriptor)) != root_identity:
+            raise _RuntimeHomeConsistencyError
+        if scrub:
+            _remove_empty_contaminated_parents(
+                root_descriptor,
+                walk.contaminated_parents,
+            )
+    finally:
+        os.close(root_descriptor)
+
+
+def _walk_runtime_directory(
+    directory_descriptor: int,
+    *,
+    components: tuple[bytes, ...],
+    authentication_confidentiality: AuthenticationConfidentiality | None,
+    forbidden_fragments: Sequence[bytes],
+    scrub: bool,
+    findings: set[str],
+    walk: _RuntimeHomeWalk,
+) -> None:
+    over_entry_bound = False
+    try:
+        with os.scandir(directory_descriptor) as iterator:
+            names: list[bytes] = []
+            remaining = MAX_RUNTIME_HOME_FILES - walk.entry_count
+            for entry in iterator:
+                if len(names) >= remaining:
+                    over_entry_bound = True
+                    break
+                names.append(os.fsencode(entry.name))
+            names.sort()
+    except FileNotFoundError as exc:
+        raise _RuntimeHomeDisappearanceError from exc
+    if over_entry_bound:
+        findings.add("runtime_home_bound_violation")
+        if scrub:
+            _scrub_runtime_descriptor(directory_descriptor)
+            walk.contaminated_parents.update(
+                components[:index]
+                for index in range(1, len(components) + 1)
+            )
+        return
+    for name in names:
+        walk.entry_count += 1
+        entry_components = (*components, name)
+        relative_path = b"/".join(entry_components)
+        try:
+            status = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as exc:
+            raise _RuntimeHomeDisappearanceError from exc
+
+        auth_path_match = (
+            authentication_confidentiality is not None
+            and (
+                authentication_confidentiality.contains_bytes(name)
+                or authentication_confidentiality.contains_bytes(relative_path)
+                or any(
+                    authentication_confidentiality.contains_bytes(component)
+                    for component in entry_components
+                )
+            )
+        )
+        forbidden_path_match = any(
+            fragment in name or fragment in relative_path
+            for fragment in forbidden_fragments
+        )
+        repository_path_match = name == b".git"
+        if auth_path_match:
+            findings.add("auth_confidentiality_violation")
+        if forbidden_path_match:
+            findings.add("runtime_home_forbidden_content")
+        if repository_path_match:
+            findings.add("runtime_home_repository_material")
+        if auth_path_match or forbidden_path_match or repository_path_match:
+            if scrub:
+                _remove_runtime_entry_at(
+                    directory_descriptor,
+                    name,
+                    status,
+                )
+                walk.contaminated_parents.update(
+                    entry_components[:index]
+                    for index in range(1, len(entry_components))
+                )
+            continue
+
+        if stat.S_ISLNK(status.st_mode):
+            findings.add("runtime_home_symlink")
+            if scrub:
+                _remove_runtime_entry_at(directory_descriptor, name, status)
+            continue
+        if stat.S_ISDIR(status.st_mode):
+            if len(entry_components) > MAX_RUNTIME_HOME_DEPTH:
+                findings.add("runtime_home_bound_violation")
+                if scrub:
+                    _remove_runtime_entry_at(directory_descriptor, name, status)
+                    walk.contaminated_parents.update(
+                        entry_components[:index]
+                        for index in range(1, len(entry_components))
+                    )
+                continue
+            child_descriptor = _open_runtime_directory_at(
+                directory_descriptor,
+                name,
+                status,
+            )
+            try:
+                _walk_runtime_directory(
+                    child_descriptor,
+                    components=entry_components,
+                    authentication_confidentiality=authentication_confidentiality,
+                    forbidden_fragments=forbidden_fragments,
+                    scrub=scrub,
+                    findings=findings,
+                    walk=walk,
+                )
+            finally:
+                os.close(child_descriptor)
+            _verify_runtime_entry_identity(
+                directory_descriptor,
+                name,
+                status,
+                allow_missing=scrub,
+            )
+            continue
+        if not stat.S_ISREG(status.st_mode):
+            findings.add("runtime_home_nonregular_entry")
+            if scrub:
+                _remove_runtime_entry_at(directory_descriptor, name, status)
+            continue
+        if status.st_nlink != 1:
+            findings.add("runtime_home_hard_link")
+            if scrub:
+                _remove_runtime_entry_at(directory_descriptor, name, status)
+            continue
+        walk.total_bytes += status.st_size
+        if (
+            status.st_size > MAX_RUNTIME_HOME_FILE_BYTES
+            or walk.total_bytes > MAX_RUNTIME_HOME_BYTES
+        ):
+            findings.add("runtime_home_bound_violation")
+            if scrub:
+                _scrub_runtime_descriptor(directory_descriptor)
+                walk.contaminated_parents.update(
+                    components[:index]
+                    for index in range(1, len(components) + 1)
+                )
+                return
+            continue
+        content = _read_runtime_regular_file_at(
+            directory_descriptor,
+            name,
+            status,
+        )
+        auth_content_match = (
+            authentication_confidentiality is not None
+            and authentication_confidentiality.contains_bytes(content)
+        )
+        forbidden_content_match = any(
+            fragment in content for fragment in forbidden_fragments
+        )
+        repository_content_match = any(
+            marker in content for marker in _RUNTIME_REPOSITORY_MARKERS
+        )
+        if auth_content_match:
+            findings.add("auth_confidentiality_violation")
+        if forbidden_content_match:
+            findings.add("runtime_home_forbidden_content")
+        if repository_content_match:
+            findings.add("runtime_home_repository_material")
+        if scrub and (
+            auth_content_match
+            or forbidden_content_match
+            or repository_content_match
+        ):
+            _remove_runtime_entry_at(directory_descriptor, name, status)
+            walk.contaminated_parents.update(
+                entry_components[:index]
+                for index in range(1, len(entry_components))
+            )
+
+
+def _read_runtime_regular_file_at(
+    directory_descriptor: int,
+    name: bytes,
+    expected: os.stat_result,
+) -> bytes:
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+    except FileNotFoundError as exc:
+        raise _RuntimeHomeDisappearanceError from exc
     try:
         before = os.fstat(descriptor)
         if (
@@ -1091,7 +1299,7 @@ def _read_runtime_regular_file(path: Path, expected: os.stat_result) -> bytes:
             or (before.st_dev, before.st_ino, before.st_size)
             != (expected.st_dev, expected.st_ino, expected.st_size)
         ):
-            raise OSError
+            raise _RuntimeHomeConsistencyError
         content = bytearray()
         while len(content) <= MAX_RUNTIME_HOME_FILE_BYTES:
             chunk = os.read(
@@ -1110,34 +1318,216 @@ def _read_runtime_regular_file(path: Path, expected: os.stat_result) -> bytes:
             or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
             != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
         ):
-            raise OSError
+            raise _RuntimeHomeConsistencyError
         return bytes(content)
     finally:
         os.close(descriptor)
 
 
-def _remove_runtime_entry(path: Path, status: os.stat_result) -> None:
-    if stat.S_ISDIR(status.st_mode):
-        shutil.rmtree(path)
+def _open_runtime_directory(path: Path) -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _open_runtime_directory_at(
+    parent_descriptor: int,
+    name: bytes,
+    expected: os.stat_result,
+) -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except FileNotFoundError as exc:
+        raise _RuntimeHomeDisappearanceError from exc
+    if _directory_identity(os.fstat(descriptor)) != _directory_identity(expected):
+        os.close(descriptor)
+        raise _RuntimeHomeConsistencyError
+    return descriptor
+
+
+def _directory_identity(status: os.stat_result) -> tuple[int, int, int]:
+    return (status.st_dev, status.st_ino, status.st_mode)
+
+
+def _verify_runtime_entry_identity(
+    directory_descriptor: int,
+    name: bytes,
+    expected: os.stat_result,
+    *,
+    allow_missing: bool,
+) -> None:
+    try:
+        current = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        if allow_missing:
+            return
+        raise _RuntimeHomeDisappearanceError from None
+    if (
+        current.st_dev,
+        current.st_ino,
+        current.st_mode,
+    ) != (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_mode,
+    ):
+        raise _RuntimeHomeConsistencyError
+
+
+def _remove_runtime_entry_at(
+    directory_descriptor: int,
+    name: bytes,
+    expected: os.stat_result,
+) -> None:
+    if stat.S_ISDIR(expected.st_mode):
+        child_descriptor = _open_runtime_directory_at(
+            directory_descriptor,
+            name,
+            expected,
+        )
+        try:
+            _scrub_runtime_descriptor(child_descriptor)
+        finally:
+            os.close(child_descriptor)
+        _verify_runtime_entry_identity(
+            directory_descriptor,
+            name,
+            expected,
+            allow_missing=False,
+        )
+        os.rmdir(name, dir_fd=directory_descriptor)
     else:
-        path.unlink()
+        _verify_runtime_entry_identity(
+            directory_descriptor,
+            name,
+            expected,
+            allow_missing=False,
+        )
+        os.unlink(name, dir_fd=directory_descriptor)
+    try:
+        os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        _fsync_descriptor(directory_descriptor)
+        return
+    raise OSError(errno.EBUSY, "runtime entry removal was not durable")
+
+
+def _scrub_runtime_descriptor(directory_descriptor: int) -> None:
+    while True:
+        os.lseek(directory_descriptor, 0, os.SEEK_SET)
+        with os.scandir(directory_descriptor) as iterator:
+            names = tuple(
+                os.fsencode(entry.name)
+                for _, entry in zip(range(128), iterator, strict=False)
+            )
+        if not names:
+            break
+        for name in names:
+            try:
+                status = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError as exc:
+                raise _RuntimeHomeDisappearanceError from exc
+            _remove_runtime_entry_at(directory_descriptor, name, status)
+    _fsync_descriptor(directory_descriptor)
+
+
+def _remove_empty_contaminated_parents(
+    root_descriptor: int,
+    parents: set[tuple[bytes, ...]],
+) -> None:
+    for components in sorted(parents, key=lambda item: (-len(item), item)):
+        if not components:
+            continue
+        parent_components = components[:-1]
+        name = components[-1]
+        parent_descriptor = _open_runtime_components(
+            root_descriptor,
+            parent_components,
+        )
+        try:
+            try:
+                os.rmdir(name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                    continue
+                raise
+            _fsync_descriptor(parent_descriptor)
+        finally:
+            if parent_descriptor != root_descriptor:
+                os.close(parent_descriptor)
+
+
+def _open_runtime_components(
+    root_descriptor: int,
+    components: tuple[bytes, ...],
+) -> int:
+    if not components:
+        return root_descriptor
+    current = os.dup(root_descriptor)
+    try:
+        for component in components:
+            status = os.stat(
+                component,
+                dir_fd=current,
+                follow_symlinks=False,
+            )
+            child = _open_runtime_directory_at(current, component, status)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
 
 
 def _scrub_runtime_home(runtime_home: Path) -> None:
-    with os.scandir(runtime_home) as iterator:
-        entries = tuple(iterator)
-    for entry in entries:
-        status = entry.stat(follow_symlinks=False)
-        _remove_runtime_entry(runtime_home / entry.name, status)
-    _fsync_directory(runtime_home)
+    descriptor = _open_runtime_directory(runtime_home)
+    try:
+        _scrub_runtime_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    descriptor = _open_runtime_directory(path)
+    primary: OSError | None = None
     try:
-        os.fsync(descriptor)
-    finally:
+        _fsync_descriptor(descriptor)
+    except OSError as exc:
+        primary = exc
+    try:
         os.close(descriptor)
+    except OSError:
+        if primary is None:
+            raise
+    if primary is not None:
+        raise primary
+
+
+def _fsync_descriptor(descriptor: int) -> None:
+    os.fsync(descriptor)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
