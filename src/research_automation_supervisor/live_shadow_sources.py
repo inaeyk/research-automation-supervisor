@@ -400,6 +400,7 @@ def _triggering_evidence(
     common: dict[str, object] = {
         "repair_round": pending.repair_round,
         "authoritative_state_before_intent": replay.get("status"),
+        "downstream_action": _downstream_action_capabilities(proposal_kind),
         "scope": {
             "allowed_paths": list(prepared.stage2.specification.allowed_paths),
             "protected_paths": list(prepared.stage2.specification.protected_paths),
@@ -449,12 +450,33 @@ def _triggering_evidence(
             "source_content_withheld": True,
             "origin_state": replay.get("status"),
         }
-    if proposal_kind == "auditor":
-        common["instruction"] = (
-            "Plan from this frozen envelope only. Direct inspection of the live "
-            "repository is prohibited."
-        )
     return common
+
+
+def _downstream_action_capabilities(
+    proposal_kind: ProposalKind,
+) -> dict[str, object]:
+    """Describe the authoritative role without copying supervisor isolation."""
+    if proposal_kind == "auditor":
+        return {
+            "role": "auditor",
+            "workspace": "authoritative",
+            "workspace_inspection": True,
+            "complete_diff_inspection": True,
+            "workspace_editing": False,
+            "acceptance_test_execution": "independent_exact_argv",
+            "additional_checks": "read_only_within_frozen_scope",
+            "report": "findings_or_pass",
+        }
+    return {
+        "role": "worker",
+        "workspace": "authoritative",
+        "workspace_inspection": True,
+        "source_tests_contracts_readable": True,
+        "workspace_editing": "allowed_paths_only",
+        "acceptance_test_execution": "exact_argv",
+        "report": "changes_and_results",
+    }
 
 
 def _optional_typed_json(

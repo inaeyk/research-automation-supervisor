@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -348,6 +350,140 @@ def test_live_run_preserves_authority_and_quarantines_two_proposals(
     assert live_shadow_status(run_directory) == result
     report = live_shadow_report(run_directory)
     assert report["automation_enabled"] is False
+
+
+def test_live_candidates_preserve_authoritative_downstream_capabilities(
+    tmp_path: Path,
+) -> None:
+    exact_command = shlex.join((sys.executable, "tools/acceptance.py"))
+    worker_prompt = (
+        "Inspect the authoritative workspace and read the existing source, tests, "
+        "and frozen contract. Modify only allowed paths under src/**. Run exactly "
+        f"`{exact_command}` and report the changed paths and exact result."
+    )
+    auditor_prompt = (
+        "Inspect the authoritative workspace, relevant source, tests, frozen "
+        "contract, and complete diff. Do not edit the workspace. Independently "
+        f"run exactly `{exact_command}` and perform any additional read-only "
+        "checks within the frozen scope. Report concrete findings or PASS."
+    )
+
+    worker_response = live_supervisor_response("worker_initial")
+    worker_value = json.loads(str(worker_response["final"]))
+    worker_value["prompt"] = worker_prompt
+    worker_response["final"] = json.dumps(worker_value, sort_keys=True)
+    worker_response["observation_path"] = str(
+        tmp_path / "worker-shadow-observation.json"
+    )
+    auditor_response = live_supervisor_response("auditor", resume=True)
+    auditor_value = json.loads(str(auditor_response["final"]))
+    auditor_value["prompt"] = auditor_prompt
+    auditor_response["final"] = json.dumps(auditor_value, sort_keys=True)
+    auditor_response["observation_path"] = str(
+        tmp_path / "auditor-shadow-observation.json"
+    )
+
+    spec, _, project, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=[worker_response, auditor_response],
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    candidates = {
+        "worker_initial": (
+            run_directory
+            / "proposals/worker_initial-r000-a001/candidate-prompt.md"
+        ).read_text(encoding="utf-8"),
+        "auditor": (
+            run_directory / "proposals/auditor-r000-a002/candidate-prompt.md"
+        ).read_text(encoding="utf-8"),
+    }
+
+    assert "inspect the authoritative workspace" in candidates["worker_initial"].lower()
+    assert "source, tests, and frozen contract" in candidates["worker_initial"].lower()
+    assert "modify only allowed paths" in candidates["worker_initial"].lower()
+    assert exact_command in candidates["worker_initial"]
+    assert "report the changed paths and exact result" in candidates["worker_initial"]
+    assert "inspect the authoritative workspace" in candidates["auditor"].lower()
+    assert "complete diff" in candidates["auditor"].lower()
+    assert exact_command in candidates["auditor"]
+    assert "independently" in candidates["auditor"].lower()
+    assert "additional read-only checks" in candidates["auditor"].lower()
+    assert "findings or PASS" in candidates["auditor"]
+    assert "do not edit the workspace" in candidates["auditor"].lower()
+
+    supervisor_only_restrictions = (
+        "use only the supplied evidence",
+        "use only the frozen evidence",
+        "without inspecting the live repository",
+        "do not inspect the live repository",
+        "do not request or perform execution",
+        "rely on the recorded passing test",
+    )
+    for candidate in candidates.values():
+        for restriction in supervisor_only_restrictions:
+            assert restriction not in candidate.lower()
+
+    worker_result_value = _read_json(
+        run_directory
+        / "proposals/worker_initial-r000-a001/supervisor-result.json"
+    )
+    auditor_result_value = _read_json(
+        run_directory / "proposals/auditor-r000-a002/supervisor-result.json"
+    )
+    assert worker_result_value["referenced_paths"] == ["src/output.txt"]
+    assert auditor_result_value["referenced_paths"] == []
+    assert auditor_result_value["permission_change_requested"] is False
+
+    worker_envelope = _read_json(
+        run_directory / "decisions/worker_initial-r000-a001/envelope.json"
+    )
+    auditor_envelope = _read_json(
+        run_directory / "decisions/auditor-r000-a002/envelope.json"
+    )
+    worker_action = worker_envelope["triggering_evidence"]["downstream_action"]
+    auditor_action = auditor_envelope["triggering_evidence"]["downstream_action"]
+    assert worker_action["role"] == "worker"
+    assert worker_action["workspace_inspection"] is True
+    assert worker_action["workspace_editing"] == "allowed_paths_only"
+    assert worker_action["acceptance_test_execution"] == "exact_argv"
+    assert auditor_action["role"] == "auditor"
+    assert auditor_action["complete_diff_inspection"] is True
+    assert auditor_action["workspace_editing"] is False
+    assert (
+        auditor_action["acceptance_test_execution"]
+        == "independent_exact_argv"
+    )
+
+    blind_inputs = tuple(
+        base64.b64decode(
+            _read_json(tmp_path / observation)["prompt_base64"]
+        )
+        for observation in (
+            "worker-shadow-observation.json",
+            "auditor-shadow-observation.json",
+        )
+    )
+    authoritative_prompt_bytes = tuple(
+        (project / relative).read_bytes()
+        for relative in (
+            "control/worker-initial.md",
+            "control/worker-repair.md",
+            "control/auditor.md",
+        )
+    )
+    for blind_input in blind_inputs:
+        for authoritative_prompt in authoritative_prompt_bytes:
+            assert authoritative_prompt not in blind_input
+
+    assert result.automation_enabled is False
+    assert "delivery" not in {path.name for path in run_directory.iterdir()}
+    assert "stage5" not in {path.name for path in run_directory.iterdir()}
 
 
 def test_exact_earlier_blind_stdin_excludes_every_later_evidence_domain(

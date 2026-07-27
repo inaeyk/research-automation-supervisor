@@ -54,6 +54,13 @@ def test_blind_prompt_contains_frozen_allowed_inputs_but_no_authoritative_prompt
     assert b"prompt itself should still name the exact files" in rendered.content
 
 
+def test_stage3_retrospective_prompt_behavior_is_unchanged_by_live_hotfix() -> None:
+    assert b"retrospective shadow calibration only" in SHADOW_INSTRUCTION
+    assert b"Use only evidence available at this decision point" in SHADOW_INSTRUCTION
+    assert b"prompt itself should still name the exact files" in SHADOW_INSTRUCTION
+    assert b"exact commands to run" in SHADOW_INSTRUCTION
+
+
 def test_initial_blind_evidence_excludes_every_future_outcome_domain(
     tmp_path: Path,
 ) -> None:

@@ -1,0 +1,38 @@
+{
+  "acceptance_command": "python -m unittest discover -s tests -v",
+  "corrected_candidate": "Independently audit the byte-size parser against the frozen contract. Inspect the authoritative workspace, including the relevant source and tests and the complete Git diff. Do not edit the workspace. Run exactly `python -m unittest discover -s tests -v` independently, even though the frozen context records an earlier pass. Perform any additional read-only checks needed within the frozen scope. Verify grammar, ASCII-only behavior, exception types, conversion, standard-library-only implementation, and scope compliance. Report concrete findings, or PASS only when every requirement is satisfied.",
+  "corrected_review": {
+    "actionability": 5,
+    "blocking_issues": [],
+    "concision": 5,
+    "evidence_use": 5,
+    "notes": "The corrected candidate preserves direct authoritative inspection, independent exact-command execution, and auditor read-only permissions.",
+    "objective_fidelity": 5,
+    "proposal_id": "auditor-r000-a002",
+    "schema_version": 1,
+    "scope_discipline": 5,
+    "technical_completeness": 5,
+    "unsupported_assumptions": [],
+    "verdict": "equivalent"
+  },
+  "former_candidate": "Audit the supplied frozen evidence against the Stage 2 contract without inspecting the live repository or requesting additional execution. Review the complete patch for `src/byte_size.py` and confirm the frozen byte-size behavior. Confirm scope compliance from the supplied evidence. Account for the recorded passing result for acceptance check `byte-size-unittest`. Report whether the implementation satisfies the frozen contract.",
+  "former_classification": "role_confused",
+  "former_review": {
+    "actionability": 3,
+    "blocking_issues": [
+      "role_confused: the candidate transfers the shadow supervisor's repository and execution isolation to the authoritative downstream auditor"
+    ],
+    "concision": 5,
+    "evidence_use": 2,
+    "notes": "Based on the completed production byte-size smoke review: the candidate replaces direct workspace inspection and independent test execution with frozen-evidence review.",
+    "objective_fidelity": 3,
+    "proposal_id": "auditor-r000-a002",
+    "schema_version": 1,
+    "scope_discipline": 5,
+    "technical_completeness": 4,
+    "unsupported_assumptions": [
+      "The recorded passing acceptance result is sufficient without independently rerunning the exact acceptance command."
+    ],
+    "verdict": "worse"
+  }
+}
