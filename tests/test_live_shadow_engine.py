@@ -330,6 +330,21 @@ def test_live_run_preserves_authority_and_quarantines_two_proposals(
     assert str(result.authoritative_stage2_run).encode("utf-8") not in prompt
     assert (run_directory / "decisions/worker_initial-r000-a001/envelope.json").is_file()
     assert (run_directory / "comparisons/auditor-r000-a002/comparison.json").is_file()
+    for proposal_id, resumed in (
+        ("worker_initial-r000-a001", False),
+        ("auditor-r000-a002", True),
+    ):
+        stage1 = run_directory / "proposals" / proposal_id / "stage1-run"
+        normalized = _read_json(stage1 / "request.normalized.json")
+        metadata = _read_json(stage1 / "metadata.json")
+        command = metadata["command"]
+        exec_index = command.index("exec")
+        assert normalized["skip_git_repo_check"] is True
+        assert command.count("--skip-git-repo-check") == 1
+        assert command.index("--skip-git-repo-check") == exec_index + 1
+        assert ("resume" in command) is resumed
+        if resumed:
+            assert command.index("resume") == exec_index + 2
     assert live_shadow_status(run_directory) == result
     report = live_shadow_report(run_directory)
     assert report["automation_enabled"] is False
@@ -1007,6 +1022,62 @@ def test_supervisor_session_failure_is_isolated_from_authoritative_stage2(
                 b"QUARANTINED-SHADOW-ONLY-SENTINEL"
                 not in artifact.read_bytes()
             ), artifact
+
+
+def test_pre_thread_process_failure_is_typed_without_auth_contamination(
+    tmp_path: Path,
+) -> None:
+    from tests.live_shadow_helpers import live_supervisor_response
+
+    failed_start = live_supervisor_response("worker_initial")
+    failed_start.update(
+        {
+            "exit_code": 1,
+            "stdout_lines": [],
+            "stderr": (
+                "Not inside a trusted directory and "
+                "--skip-git-repo-check was not specified."
+            ),
+            "write_final": False,
+        }
+    )
+    spec, _, _, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=[failed_start],
+    )
+
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+
+    assert result.status == "shadow_degraded"
+    assert result.authoritative_stage2_status == "completed"
+    assert result.supervisor_session_id is None
+    assert result.supervisor_session_usable is False
+    assert result.auth_confidentiality_violation_detected is False
+    assert (tmp_path / "live-shadow-counter").read_text(encoding="ascii") == "1"
+    run_directory = Path(result.artifact_directory)
+    state = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    reasons = {
+        failure["reason"] for failure in state["shadow_failures"]
+    }
+    assert "supervisor_startup_transport_failure" in reasons
+    assert "supervisor_session_unavailable" in reasons
+    assert "auth_confidentiality_violation" not in reasons
+    assert "runtime_home_contamination" not in reasons
+    assert state["runtime_confidentiality_violation_intent_recorded"] is False
+    assert state["runtime_home_cleanup_completed"] is False
+    unlaunched_stage1 = (
+        run_directory
+        / "proposals/auditor-r000-a002/stage1-run"
+    )
+    assert not (unlaunched_stage1 / "metadata.json").exists()
+    assert not (unlaunched_stage1 / "stage2-completion.json").exists()
 
 
 @pytest.mark.parametrize(

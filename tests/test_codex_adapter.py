@@ -206,6 +206,58 @@ def test_build_command_has_no_prompt_and_only_role_owned_policy(tmp_path: Path) 
     assert command[-2:] == ["--ephemeral", "-"]
 
 
+def test_repository_free_fake_requires_opt_in_skip_git_flag(tmp_path: Path) -> None:
+    without_flag = prepared_request(tmp_path / "without", "supervisor")
+    configure(
+        without_flag,
+        refuse_repository_free_without_skip=True,
+        stdout_lines=['{"thread_id":"thread-123","type":"thread.started"}'],
+        final="completed",
+    )
+    failed = run_prepared_codex(
+        without_flag,
+        runs_dir=tmp_path / "without-runs",
+        codex_executable=str(FAKE_CODEX),
+        environ=fake_environment(),
+    )
+
+    with_flag = prepared_request(tmp_path / "with", "supervisor")
+    configure(
+        with_flag,
+        refuse_repository_free_without_skip=True,
+        stdout_lines=['{"thread_id":"thread-123","type":"thread.started"}'],
+        final="completed",
+    )
+    succeeded = run_prepared_codex(
+        with_flag,
+        runs_dir=tmp_path / "with-runs",
+        codex_executable=str(FAKE_CODEX),
+        environ=fake_environment(),
+        skip_git_repo_check=True,
+    )
+    metadata = json.loads(
+        (
+            Path(succeeded.artifact_directory) / "metadata.json"
+        ).read_text(encoding="utf-8")
+    )
+    normalized = json.loads(
+        (
+            Path(succeeded.artifact_directory) / "request.normalized.json"
+        ).read_text(encoding="utf-8")
+    )
+    command = metadata["command"]
+    exec_index = command.index("exec")
+
+    assert failed.status == "process_failed"
+    assert failed.event_count == 0
+    assert failed.final_message_present is False
+    assert failed.confidentiality_violation_detected is False
+    assert succeeded.status == "succeeded"
+    assert command.count("--skip-git-repo-check") == 1
+    assert command.index("--skip-git-repo-check") == exec_index + 1
+    assert normalized["skip_git_repo_check"] is True
+
+
 def test_parser_aware_fake_rejects_post_exec_approval_option(tmp_path: Path) -> None:
     rejected = subprocess.run(
         [str(FAKE_CODEX), "exec", "--ask-for-approval", "never", "--help"],

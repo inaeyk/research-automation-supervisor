@@ -95,6 +95,8 @@ def test_run_uses_one_exact_id_read_only_session_and_never_persists_blind_input(
     command = resumed_metadata["command"]
     assert command[command.index("resume") + 1] == SUPERVISOR_UUID
     assert "--last" not in command and "--all" not in command
+    assert "--skip-git-repo-check" not in initial_metadata["command"]
+    assert "--skip-git-repo-check" not in command
     assert not list(run_directory.rglob("*blind*prompt*"))
     assert {
         path.relative_to(source_run): path.read_bytes()

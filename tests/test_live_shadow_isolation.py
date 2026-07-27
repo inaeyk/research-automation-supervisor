@@ -1918,6 +1918,7 @@ def _production_launch(
         final_message,
         output_schema=schema,
         resume_thread_id=SUPERVISOR_UUID if resume else None,
+        skip_git_repo_check=True,
     )
     repository = tmp_path / "authoritative-repository"
     stage2_run = tmp_path / "authoritative-stage2-run"
@@ -2051,11 +2052,59 @@ def test_initial_and_exact_uuid_resume_use_the_same_isolation(
         assert "--dev" in command
         assert "--tmpfs" in command
         assert "--unshare-net" not in command
+        nested = command[command.index("--") + 1 :]
+        exec_index = nested.index("exec")
+        assert nested.count("--skip-git-repo-check") == 1
+        assert nested.index("--skip-git-repo-check") == exec_index + 1
     nested = resumed.command[resumed.command.index("--") + 1 :]
     resume_index = nested.index("resume")
+    assert resume_index == nested.index("exec") + 2
     assert nested[resume_index + 1] == SUPERVISOR_UUID
     assert "--last" not in nested
     assert "--all" not in nested
+
+
+@pytest.mark.parametrize("mutation", ("omit", "duplicate", "misplace"))
+def test_stage4_launch_rejects_invalid_skip_git_repo_check(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    prepared, run_root, runtime_home, schema, action, capability = (
+        _prepared_supervisor(tmp_path)
+    )
+    final_message = action / "last-message.md"
+    semantic = build_codex_command(
+        prepared,
+        str(tmp_path / "codex"),
+        final_message,
+        output_schema=schema,
+        skip_git_repo_check=True,
+    )
+    flag_index = semantic.index("--skip-git-repo-check")
+    if mutation == "omit":
+        semantic.pop(flag_index)
+    elif mutation == "duplicate":
+        semantic.insert(flag_index + 1, "--skip-git-repo-check")
+    else:
+        semantic.pop(flag_index)
+        semantic.insert(semantic.index("--json") + 1, "--skip-git-repo-check")
+    repository = tmp_path / "repository"
+    stage2_run = tmp_path / "stage2-run"
+    repository.mkdir()
+    stage2_run.mkdir()
+
+    with pytest.raises(LiveShadowIntegrityError, match="skip-git-repo-check"):
+        build_bubblewrap_process_launch(
+            semantic,
+            prepared,
+            {},
+            final_message,
+            schema,
+            capability=capability,
+            stage4_run_root=run_root,
+            runtime_home=runtime_home,
+            forbidden_roots=(repository, stage2_run),
+        )
 
 
 def test_mount_rejects_symlink_into_authoritative_repository(
@@ -2075,6 +2124,7 @@ def test_mount_rejects_symlink_into_authoritative_repository(
         str(tmp_path / "codex"),
         action / "last-message.md",
         output_schema=schema,
+        skip_git_repo_check=True,
     )
     with pytest.raises(LiveShadowIntegrityError, match="symlink"):
         build_bubblewrap_process_launch(

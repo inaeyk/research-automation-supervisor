@@ -94,6 +94,8 @@ def create_live_shadow_tree(
             {
                 "counter_path": str(tmp_path / "live-shadow-counter"),
                 "observation_path": str(tmp_path / "live-shadow-observation.json"),
+                "require_stage4_policy": True,
+                "refuse_repository_free_without_skip": True,
                 "responses": supervisor_responses
                 or [
                     live_supervisor_response("worker_initial"),

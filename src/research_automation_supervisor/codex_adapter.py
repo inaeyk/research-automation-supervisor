@@ -299,6 +299,7 @@ def run_prepared_codex(
     version_probe: VersionProbe | None = None,
     output_schema: Path | None = None,
     resume_thread_id: str | None = None,
+    skip_git_repo_check: bool = False,
     confidential_fragments: Sequence[str] = (),
     rejected_confidential_fragments: Sequence[str] = (),
     durable_command_replacements: Mapping[str, str] | None = None,
@@ -345,7 +346,12 @@ def run_prepared_codex(
             key=lambda item: (-len(item), item),
         )
     )
-    _initialize_artifacts(artifact_directory, prepared, redaction_values)
+    _initialize_artifacts(
+        artifact_directory,
+        prepared,
+        redaction_values,
+        skip_git_repo_check=skip_git_repo_check,
+    )
 
     executable_path = str(Path(codex_executable).resolve())
     probe = version_probe or probe_codex_version
@@ -365,6 +371,7 @@ def run_prepared_codex(
             temporary_final,
             output_schema=resolved_output_schema,
             resume_thread_id=resume_thread_id,
+            skip_git_repo_check=skip_git_repo_check,
         )
         launch = (
             process_launch_builder(
@@ -645,6 +652,7 @@ def build_codex_command(
     *,
     output_schema: Path | None = None,
     resume_thread_id: str | None = None,
+    skip_git_repo_check: bool = False,
 ) -> list[str]:
     """Construct the fixed shell-free Codex argument vector."""
     request = prepared.request
@@ -662,6 +670,7 @@ def build_codex_command(
             "--ask-for-approval",
             prepared.policy.approval,
             "exec",
+            *(["--skip-git-repo-check"] if skip_git_repo_check else []),
             "--json",
             "--output-last-message",
             str(final_message_path),
@@ -695,6 +704,7 @@ def build_codex_command(
             "--cd",
             str(prepared.workspace),
             "exec",
+            *(["--skip-git-repo-check"] if skip_git_repo_check else []),
             "resume",
             resume_thread_id,
             "--json",
@@ -1178,10 +1188,15 @@ def _initialize_artifacts(
     artifact_directory: Path,
     prepared: PreparedCodexRequest,
     sensitive_values: Sequence[str],
+    *,
+    skip_git_repo_check: bool,
 ) -> None:
+    normalized_request = prepared.normalized_dict()
+    if skip_git_repo_check:
+        normalized_request["skip_git_repo_check"] = True
     _atomic_write_json(
         artifact_directory / "request.normalized.json",
-        redact_json(prepared.normalized_dict(), sensitive_values),
+        redact_json(normalized_request, sensitive_values),
     )
     _write_text(artifact_directory / "prompt.sha256", f"{prepared.prompt_sha256}\n")
     _write_text(artifact_directory / "events.jsonl", "")

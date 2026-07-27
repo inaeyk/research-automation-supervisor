@@ -133,6 +133,7 @@ def test_failed_fixed_test_repairs_on_exact_worker_thread_then_audits(tmp_path: 
     resume_index = command.index("resume")
     assert command[resume_index + 1] == "persistent-worker"
     assert "--last" not in command and "--all" not in command
+    assert "--skip-git-repo-check" not in command
     assert repair_metadata["resume_thread_id"] == "persistent-worker"
 
 

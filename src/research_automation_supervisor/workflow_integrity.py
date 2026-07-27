@@ -86,6 +86,7 @@ class NormalizedCodexRequest(BaseModel):
     reasoning_effort: ReasoningEffort
     timeout_seconds: Annotated[int, Field(ge=30, le=14_400)]
     policy: NormalizedRolePolicy
+    skip_git_repo_check: bool = False
 
 
 class CodexMetadata(BaseModel):

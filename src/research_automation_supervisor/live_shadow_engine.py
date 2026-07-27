@@ -178,6 +178,7 @@ class SupervisorInvoker(Protocol):
         environ: Mapping[str, str] | None,
         output_schema: Path,
         resume_thread_id: str | None,
+        skip_git_repo_check: bool,
         confidential_fragments: Sequence[str],
         process_started: Callable[[int], None] | None = None,
         process_finished: Callable[[int], None] | None = None,
@@ -1924,13 +1925,24 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
         return
     decision_id = remaining[0]
     if not context.state.supervisor_session_usable:
+        cleanup_reason = context.state.runtime_home_cleanup_reason
+        auth_violation = cleanup_reason == "auth_confidentiality_violation"
         _finalize_unlaunchable_decision(
             context,
             decision_id,
-            "auth_confidentiality_violation",
+            (
+                "auth_confidentiality_violation"
+                if auth_violation
+                else "supervisor_session_unavailable"
+            ),
             (
                 "The persistent supervisor session is unusable after a typed "
                 "authentication-confidentiality violation."
+                if auth_violation
+                else (
+                    "The first supervisor turn failed before a session UUID "
+                    "was established; no replacement or retry was launched."
+                )
             ),
         )
         return
@@ -2064,6 +2076,7 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
                     environ=context.services.environ,
                     output_schema=schema_path,
                     resume_thread_id=pending.resume_session_id,
+                    skip_git_repo_check=True,
                     confidential_fragments=(
                         confidentiality.text_fragments()
                     ),
@@ -2107,6 +2120,7 @@ def _launch_next_supervisor_if_ready(context: _LiveContext) -> None:
                     environ=context.services.environ,
                     output_schema=schema_path,
                     resume_thread_id=pending.resume_session_id,
+                    skip_git_repo_check=True,
                     confidential_fragments=(
                         confidentiality.text_fragments()
                     ),
@@ -2195,19 +2209,18 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
         return
     if not context.state.supervisor_session_usable:
         context.supervisor_task = None
+        cleanup_reason = context.state.runtime_home_cleanup_reason
         _record_failed_proposal(
             context,
             pending,
-            context.state.runtime_home_cleanup_reason
-            or "auth_confidentiality_violation",
+            cleanup_reason or "supervisor_startup_transport_failure",
             (
                 "The persistent supervisor session was durably invalidated; "
                 "the action was rejected."
             ),
             session_unusable=True,
             auth_violation=(
-                context.state.runtime_home_cleanup_reason
-                == "auth_confidentiality_violation"
+                cleanup_reason == "auth_confidentiality_violation"
             ),
             failure_already_recorded=True,
         )
@@ -2249,6 +2262,7 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
                 if context.services.supervisor_invoker is None
                 else None
             ),
+            require_skip_git_repo_check=True,
         )
         if (
             task is not None
@@ -2286,6 +2300,22 @@ def _finish_supervisor_if_ready(context: _LiveContext) -> None:
             ),
             session_unusable=True,
             auth_violation=True,
+        )
+        return
+    if (
+        proof.adapter_result.status != "succeeded"
+        and not proof.session_ids
+    ):
+        context.supervisor_task = None
+        _record_failed_proposal(
+            context,
+            pending,
+            "supervisor_startup_transport_failure",
+            (
+                "The supervisor process failed before thread.started; its "
+                "session is unusable and authoritative Stage 2 was unaffected."
+            ),
+            session_unusable=True,
         )
         return
     result_path = proposal_directory / "supervisor-result.json"
@@ -2752,6 +2782,7 @@ def _finalize_comparison(context: _LiveContext, proposal_id: str) -> None:
                     if context.services.supervisor_invoker is None
                     else None
                 ),
+                require_skip_git_repo_check=True,
             )
         except Exception:
             proof = None

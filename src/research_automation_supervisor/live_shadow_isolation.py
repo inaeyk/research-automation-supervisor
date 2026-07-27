@@ -323,6 +323,7 @@ def build_bubblewrap_process_launch(
     forbidden_roots: Sequence[Path],
 ) -> CodexProcessLaunch:
     """Wrap one exact semantic Codex command in a verified synthetic filesystem."""
+    _verify_stage4_skip_git_repo_check(semantic_command)
     if output_schema is None:
         raise LiveShadowIntegrityError(
             "isolated Stage 4 supervisor requires an output schema"
@@ -483,6 +484,7 @@ def verify_recorded_bubblewrap_command(
         raise LiveShadowIntegrityError(
             "supervisor command lacks the Bubblewrap command separator"
         ) from exc
+    _verify_stage4_skip_git_repo_check(command[separator + 1 :])
     mount_arguments = command[:separator]
     action_sources = [
         Path(mount_arguments[index + 1])
@@ -556,6 +558,7 @@ def verify_recorded_bubblewrap_command(
             "--ask-for-approval",
             "never",
             "exec",
+            "--skip-git-repo-check",
             "--json",
             "--output-last-message",
             "<FINAL_MESSAGE_TEMP>",
@@ -580,6 +583,7 @@ def verify_recorded_bubblewrap_command(
             "--cd",
             ISOLATED_WORKSPACE_PATH,
             "exec",
+            "--skip-git-repo-check",
             "resume",
             pending.resume_session_id,
             "--json",
@@ -603,6 +607,32 @@ def verify_recorded_bubblewrap_command(
     if tuple(expected) != command or "--unshare-net" in command:
         raise LiveShadowIntegrityError(
             "supervisor command does not preserve Bubblewrap isolation and policy"
+        )
+
+
+def _verify_stage4_skip_git_repo_check(command: Sequence[str]) -> None:
+    """Require the one installed-CLI parser position used by both Stage 4 turns."""
+    indexes = [
+        index
+        for index, item in enumerate(command)
+        if item == "--skip-git-repo-check"
+    ]
+    try:
+        exec_index = command.index("exec")
+    except ValueError as exc:
+        raise LiveShadowIntegrityError(
+            "semantic Stage 4 command lacks the Codex exec subcommand"
+        ) from exc
+    if indexes != [exec_index + 1]:
+        raise LiveShadowIntegrityError(
+            "semantic Stage 4 command has an invalid --skip-git-repo-check position"
+        )
+    resume_indexes = [
+        index for index, item in enumerate(command) if item == "resume"
+    ]
+    if resume_indexes and resume_indexes != [exec_index + 2]:
+        raise LiveShadowIntegrityError(
+            "semantic Stage 4 resume command changed its parser position"
         )
 
 

@@ -35,10 +35,18 @@ def _validate_exec_arguments(
         return "approval policy must be a global option before exec"
     if "--ask-for-approval" in arguments[exec_index + 1 :]:
         return "approval policy is not accepted after exec"
-    if exec_index + 1 < len(arguments) and arguments[exec_index + 1] == "resume":
-        if exec_index + 2 >= len(arguments):
+    skip_indexes = [
+        index
+        for index, item in enumerate(arguments)
+        if item == "--skip-git-repo-check"
+    ]
+    if skip_indexes and skip_indexes != [exec_index + 1]:
+        return "skip-git-repo-check must occur exactly once immediately after exec"
+    next_index = exec_index + 1 + bool(skip_indexes)
+    if next_index < len(arguments) and arguments[next_index] == "resume":
+        if next_index + 1 >= len(arguments):
             return "resume requires one explicit thread ID"
-        thread_id = arguments[exec_index + 2]
+        thread_id = arguments[next_index + 1]
         if not thread_id or thread_id in {"--last", "--all", "-"}:
             return "resume requires one explicit thread ID"
         if uuid_resume_required and not _canonical_non_nil_uuid(thread_id):
@@ -106,6 +114,14 @@ def _validate_stage2_policy(arguments: list[str], configuration: dict[str, objec
     expected_ephemeral = bool(configuration.get("expected_ephemeral", False))
     if ("--ephemeral" in arguments) != expected_ephemeral:
         return "Stage 2 ephemeral policy mismatch"
+    if configuration.get("require_stage4_policy"):
+        exec_index = arguments.index("exec")
+        if [
+            index
+            for index, item in enumerate(arguments)
+            if item == "--skip-git-repo-check"
+        ] != [exec_index + 1]:
+            return "Stage 4 requires one correctly placed --skip-git-repo-check"
     return None
 
 
@@ -144,6 +160,16 @@ def main() -> int:
     if policy_error is not None:
         print(f"fake codex policy error: {policy_error}", file=sys.stderr)
         return 2
+    if (
+        configuration.get("refuse_repository_free_without_skip")
+        and not (workspace / ".git").exists()
+        and "--skip-git-repo-check" not in sys.argv[1:]
+    ):
+        print(
+            "Not inside a trusted directory and --skip-git-repo-check was not specified.",
+            file=sys.stderr,
+        )
+        return 1
     arguments = sys.argv[1:]
     if "resume" in arguments:
         resume_index = arguments.index("resume")

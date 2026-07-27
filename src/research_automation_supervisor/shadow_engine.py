@@ -1307,6 +1307,7 @@ def _verify_supervisor_artifacts(
         [PendingSupervisorAction, CodexMetadata], None
     ]
     | None = None,
+    require_skip_git_repo_check: bool = False,
 ) -> _SupervisorProof:
     directory = Path(pending.stage1_artifact_directory)
     _require_exact_directory(directory, STAGE2_STAGE1_ARTIFACT_NAMES)
@@ -1364,6 +1365,7 @@ def _verify_supervisor_artifacts(
         or request.policy.sandbox != "read-only"
         or request.policy.approval != "never"
         or request.policy.ephemeral
+        or request.skip_git_repo_check != require_skip_git_repo_check
     ):
         raise ShadowStateError(
             "normalized supervisor request contradicts its intent"
