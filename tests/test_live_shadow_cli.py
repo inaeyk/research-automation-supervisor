@@ -27,7 +27,10 @@ from research_automation_supervisor.live_shadow_engine import (
     resume_live_shadow,
     run_live_shadow,
 )
-from tests.live_shadow_helpers import create_live_shadow_tree
+from tests.live_shadow_helpers import (
+    create_live_shadow_tree,
+    live_supervisor_response,
+)
 from tests.shadow_helpers import write_review
 from tests.workflow_helpers import auditor_result, codex_response, worker_result
 
@@ -249,6 +252,203 @@ def test_all_stage4_cli_commands_execute_real_boundaries_and_exit_codes(
 
 
 @pytest.mark.parametrize("json_mode", (False, True))
+def test_review_cli_refuses_active_writer_before_every_runtime_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    json_mode: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    spec, _, _, _, services = create_live_shadow_tree(
+        tmp_path,
+        supervisor_responses=[
+            live_supervisor_response(
+                "worker_initial",
+                sleep_seconds=1,
+            ),
+            live_supervisor_response("auditor", resume=True),
+        ],
+        stage2_responses=[
+            codex_response(
+                "worker",
+                "11111111-1111-4111-8111-111111111111",
+                worker_result(),
+                sleep_seconds=2,
+            ),
+            codex_response(
+                "auditor",
+                "22222222-2222-4222-8222-222222222222",
+                auditor_result(),
+            ),
+        ],
+    )
+    outcome: dict[str, object] = {}
+
+    def observe() -> None:
+        try:
+            outcome["result"] = run_live_shadow(
+                spec,
+                runs_dir=tmp_path / "live-runs",
+                stage2_runs_dir=tmp_path / "stage2-runs",
+                services=services,
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    observer = threading.Thread(target=observe, daemon=True)
+    observer.start()
+    run_directory: Path | None = None
+    process_record: dict[str, object] | None = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        candidates = tuple((tmp_path / "live-runs").glob("*"))
+        if candidates:
+            run_directory = candidates[0]
+            process_path = run_directory / "supervisor-process.json"
+            if process_path.is_file():
+                process_record = json.loads(
+                    process_path.read_text(encoding="utf-8")
+                )
+                break
+        time.sleep(0.005)
+    assert run_directory is not None
+    assert process_record is not None
+    counter_paths = (
+        tmp_path / "live-shadow-counter",
+        tmp_path / "stage2/fake-counter",
+    )
+    deadline = time.monotonic() + 5
+    while (
+        not all(path.is_file() for path in counter_paths)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+    assert all(path.is_file() for path in counter_paths)
+    monkeypatch.setattr(
+        cli,
+        "record_live_shadow_review",
+        lambda path, proposal_id, review_path: record_live_shadow_review(
+            path,
+            proposal_id,
+            review_path,
+            services=services,
+        ),
+    )
+    scanner_names = (
+        "validate_runtime_home_contents",
+        "inspect_runtime_home_contents",
+        "_validate_quarantine_workspace",
+        "_validate_run",
+        "_load_reconciled_run",
+        "_stable_runtime_home_validation",
+    )
+    scan_calls = dict.fromkeys(scanner_names, 0)
+    for scanner_name in scanner_names:
+        original = getattr(engine, scanner_name)
+
+        def instrument(
+            *args: object,
+            _name: str = scanner_name,
+            _original: object = original,
+            **kwargs: object,
+        ) -> object:
+            scan_calls[_name] += 1
+            assert callable(_original)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, scanner_name, instrument)
+    review = write_review(
+        tmp_path / "review-active.yaml",
+        "worker_initial-r000-a001",
+    )
+    command = [
+        "record-live-shadow-review",
+        str(run_directory),
+        "worker_initial-r000-a001",
+        str(review),
+    ]
+    if json_mode:
+        command.append("--json")
+    durable_paths = tuple(
+        run_directory / name
+        for name in ("journal.jsonl", "state.json", "result.json")
+    )
+    durable_hashes = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in durable_paths
+    }
+    state_before = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    launch_counts_before = (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    )
+    deadline = time.monotonic() + 2
+    while True:
+        refused = runner.invoke(app, command)
+        if refused.exit_code == 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+            continue
+        break
+    assert refused.exit_code == 2
+    assert "still in flight" in (refused.stdout + refused.stderr)
+    assert scan_calls == dict.fromkeys(scanner_names, 0)
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in durable_paths
+    } == durable_hashes
+    state_after = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    assert (
+        state_after["reviewed_proposal_ids"]
+        == state_before["reviewed_proposal_ids"]
+    )
+    assert not (
+        run_directory / "reviews/worker_initial-r000-a001.json"
+    ).exists()
+    assert (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    ) == launch_counts_before
+    shadow_pid = int(process_record["process_id"])
+    shadow_ticks = int(process_record["process_start_ticks"])
+    launch = json.loads(
+        (run_directory / "authoritative/launch.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert engine._process_identity_running(shadow_pid, shadow_ticks)
+    assert engine._process_identity_running(
+        int(launch["pid"]),
+        int(launch["process_start_ticks"]),
+    )
+
+    observer.join(timeout=15)
+    assert not observer.is_alive()
+    assert "error" not in outcome
+    for scanner_name in scanner_names:
+        scan_calls[scanner_name] = 0
+    launch_counts_after_observation = (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    )
+    recorded = runner.invoke(app, command)
+    assert recorded.exit_code == 5
+    if json_mode:
+        assert json.loads(recorded.stdout)["review_count"] == 1
+    else:
+        assert "Proposals/comparisons/reviews: 2/2/1" in recorded.stdout
+    assert scan_calls == dict.fromkeys(scanner_names, 1)
+    assert (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    ) == launch_counts_after_observation
+
+
+@pytest.mark.parametrize("json_mode", (False, True))
 def test_abort_cli_leaves_authoritative_stage2_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -389,6 +589,150 @@ def test_resume_cli_recovers_without_duplicate_authoritative_launch(
         json.loads(line)["reason"] == "authoritative_stage2_launched"
         for line in journal
     ) == 1
+
+
+@pytest.mark.parametrize("json_mode", (False, True))
+def test_completed_contamination_cli_stays_readable_and_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    json_mode: bool,
+) -> None:
+    import research_automation_supervisor.cli as cli
+
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    authentication_file = tmp_path / "fake-auth.json"
+    services = replace(
+        services,
+        codex_authentication_file=authentication_file,
+    )
+    completed = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(completed.artifact_directory)
+    for index, proposal_id in enumerate(
+        ("worker_initial-r000-a001", "auditor-r000-a002"),
+        start=1,
+    ):
+        completed = record_live_shadow_review(
+            run_directory,
+            proposal_id,
+            write_review(
+                tmp_path / f"completed-review-{index}.yaml",
+                proposal_id,
+            ),
+            services=services,
+        )
+    assert completed.status == "completed"
+    launch_counts_before = (
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii"),
+        (tmp_path / "stage2/fake-counter").read_text(encoding="ascii"),
+    )
+    secret = (
+        "CLI-COMPLETED-CONTAMINATION-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    authentication_file.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    protected_name = secret.encode("utf-8").hex()
+    (
+        run_directory / "quarantine/codex-home" / protected_name
+    ).write_text(secret, encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "resume_live_shadow",
+        lambda path: resume_live_shadow(path, services=services),
+    )
+    monkeypatch.setattr(
+        cli,
+        "live_shadow_status",
+        lambda path: live_shadow_status(path, services=services),
+    )
+    monkeypatch.setattr(
+        cli,
+        "live_shadow_report",
+        lambda path: live_shadow_report(path, services=services),
+    )
+    mode = ["--json"] if json_mode else []
+    resumed = runner.invoke(
+        app,
+        ["resume-live-shadow", str(run_directory), *mode],
+    )
+    assert resumed.exit_code == 5
+    assert secret not in (resumed.stdout + resumed.stderr)
+    assert protected_name not in (resumed.stdout + resumed.stderr)
+    if json_mode:
+        resume_payload = json.loads(resumed.stdout)
+        assert resume_payload["status"] == "shadow_degraded"
+        assert resume_payload["authoritative_stage2_status"] == "completed"
+        assert resume_payload["readiness"] == "not_ready"
+    else:
+        assert "Status: shadow_degraded" in resumed.stdout
+        assert "Authoritative Stage 2: completed" in resumed.stdout
+        assert "Readiness: not_ready" in resumed.stdout
+
+    files_before_reads = {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    }
+    status_result = runner.invoke(
+        app,
+        ["live-shadow-status", str(run_directory), *mode],
+    )
+    report_result = runner.invoke(
+        app,
+        ["live-shadow-report", str(run_directory), *mode],
+    )
+    assert status_result.exit_code == 0
+    assert report_result.exit_code == 0
+    for output in (
+        status_result.stdout + status_result.stderr,
+        report_result.stdout + report_result.stderr,
+    ):
+        assert secret not in output
+        assert protected_name not in output
+        assert "shadow_degraded" in output
+        assert "completed" in output
+        assert "not_ready" in output
+    assert {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    } == files_before_reads
+
+    journal_before_second = (run_directory / "journal.jsonl").read_bytes()
+    second = runner.invoke(
+        app,
+        ["resume-live-shadow", str(run_directory), *mode],
+    )
+    assert second.exit_code == 5
+    assert "shadow_degraded" in second.stdout
+    assert (run_directory / "journal.jsonl").read_bytes() == (
+        journal_before_second
+    )
+    entries = [
+        json.loads(line)
+        for line in journal_before_second.decode("ascii").splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in entries
+    ) == 1
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in entries
+    ) == 1
+    assert (
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii"),
+        (tmp_path / "stage2/fake-counter").read_text(encoding="ascii"),
+    ) == launch_counts_before
 
 
 def test_run_live_shadow_human_mode_executes_one_authoritative_launch(

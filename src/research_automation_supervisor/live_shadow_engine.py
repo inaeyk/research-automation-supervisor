@@ -425,7 +425,9 @@ def resume_live_shadow(
         services,
     )
     if isinstance(prepared_boundary, LiveShadowResult):
-        return prepared_boundary
+        if (resolved / ABORT_INTENT_FILE).is_file():
+            return prepared_boundary
+        return _validated_resume_result(resolved, services)
     state, prepared, launch = prepared_boundary
     codex_executable = services.codex_executable or launch.codex_executable
     capability: BubblewrapCapability | None = None
@@ -496,7 +498,29 @@ def resume_live_shadow(
                 detail=isolation_failure,
                 temporal_or_integrity=True,
             )
-    return _drive(context)
+    _drive(context)
+    return _validated_resume_result(resolved, services)
+
+
+def _validated_resume_result(
+    run_directory: Path,
+    services: LiveShadowServices,
+) -> LiveShadowResult:
+    """Return only a durable result accepted by the trusted read path."""
+    with _supervisor_lifecycle_gate(
+        run_directory,
+    ), _live_lock(run_directory, services.utc_now):
+        state, prepared = _load_stable_run(
+            run_directory,
+            services,
+        )
+        _validate_runtime_home_for_read(
+            run_directory,
+            state,
+            prepared,
+            services,
+        )
+        return _result_for_state(state, prepared)
 
 
 def _prepare_resume_runtime_boundary(
@@ -510,7 +534,9 @@ def _prepare_resume_runtime_boundary(
     ]
     | LiveShadowResult
 ):
-    with _supervisor_lifecycle_gate(run_directory), _live_lock(run_directory, services.utc_now):
+    with _supervisor_lifecycle_gate(
+        run_directory,
+    ), _live_lock(run_directory, services.utc_now):
         state, prepared = _load_reconciled_run(
             run_directory,
             services,
@@ -626,7 +652,9 @@ def live_shadow_status(
     sensitive_values = _sensitive_values(services.environ)
     raw_run = _preflight_locator(run_directory, sensitive_values, "live-shadow run")
     resolved = _resolve_run_directory(Path(raw_run))
-    with _supervisor_lifecycle_gate(resolved), _live_lock(resolved, services.utc_now):
+    with _supervisor_lifecycle_gate(
+        resolved,
+    ), _live_lock(resolved, services.utc_now):
         state, prepared = _load_stable_run(
             resolved,
             services,
@@ -660,7 +688,11 @@ def record_live_shadow_review(
     except ShadowInputError as exc:
         raise LiveShadowInputError(str(exc)) from exc
     resolved = _resolve_run_directory(Path(raw_run))
-    with _supervisor_lifecycle_gate(resolved), _live_lock(resolved, services.utc_now):
+    with _live_lock(
+        resolved,
+        services.utc_now,
+    ), _supervisor_lifecycle_gate(resolved):
+        _review_writer_preflight(resolved)
         state, prepared = _load_reconciled_run(resolved, services)
         confidentiality = _runtime_boundary_inputs(
             resolved,
@@ -710,6 +742,16 @@ def record_live_shadow_review(
             _complete_runtime_confidentiality_cleanup(context)
             raise LiveShadowIntegrityError(
                 "Codex runtime home failed its confidentiality boundary"
+            )
+        if (
+            _runtime_home_writer_is_active(
+                resolved,
+                context.state,
+            )
+            or context.state.pending_action is not None
+        ):
+            raise LiveShadowInputError(
+                "a supervisor action is still in flight"
             )
         state = context.state
         if proposal_id not in state.comparison_ids:
@@ -788,7 +830,9 @@ def live_shadow_report(
     sensitive_values = _sensitive_values(services.environ)
     raw_run = _preflight_locator(run_directory, sensitive_values, "live-shadow run")
     resolved = _resolve_run_directory(Path(raw_run))
-    with _supervisor_lifecycle_gate(resolved), _live_lock(resolved, services.utc_now):
+    with _supervisor_lifecycle_gate(
+        resolved,
+    ), _live_lock(resolved, services.utc_now):
         state, prepared = _load_stable_run(
             resolved,
             services,
@@ -3478,6 +3522,10 @@ def _record_runtime_confidentiality_intent(
         )
         return
     auth_violation = reason == "auth_confidentiality_violation"
+    if context.state.status == "completed":
+        reason = (
+            "runtime_confidentiality_violation_after_completion"
+        )
     decision_id = (
         context.state.pending_action.proposal_id
         if context.state.pending_action is not None
@@ -3494,7 +3542,7 @@ def _record_runtime_confidentiality_intent(
         recorded_at=_utc_string(context.services.utc_now()),
     )
     status = context.state.status
-    if status == "awaiting_reviews":
+    if status in {"awaiting_reviews", "completed"}:
         status = "shadow_degraded"
     context.state = _journal_event(
         context.run_directory,
@@ -3527,6 +3575,9 @@ def _record_runtime_confidentiality_intent(
         post_journal_checkpoint=(
             "after_runtime_confidentiality_violation_journal_append"
         ),
+    )
+    _snapshot_checkpoint(
+        "after_runtime_confidentiality_session_invalidation_state"
     )
 
 
@@ -3661,6 +3712,7 @@ def _transition(
             "failed",
         },
         "awaiting_reviews": {"completed", "aborted", "failed"},
+        "completed": {"shadow_degraded"},
         "shadow_degraded": {"aborted", "failed"},
         "human_paused": {"aborted", "failed"},
     }
@@ -3811,6 +3863,8 @@ def _validate_live_journal(
 
 def _read_live_journal(
     run_directory: Path,
+    *,
+    verify_artifacts: bool = True,
 ) -> tuple[LiveShadowJournalEntry, ...]:
     path = run_directory / JOURNAL_FILE
     try:
@@ -3844,12 +3898,13 @@ def _read_live_journal(
             or _canonical_json(entry.model_dump(mode="json")).rstrip(b"\n") != raw
         ):
             raise LiveShadowStateError("Stage 4 journal hash chain is invalid")
-        try:
-            verify_hash_mapping(entry.artifact_hashes)
-        except WorkflowStateError as exc:
-            raise LiveShadowStateError(
-                "Stage 4 journal references replaced evidence"
-            ) from exc
+        if verify_artifacts:
+            try:
+                verify_hash_mapping(entry.artifact_hashes)
+            except WorkflowStateError as exc:
+                raise LiveShadowStateError(
+                    "Stage 4 journal references replaced evidence"
+                ) from exc
         previous_hash = entry.entry_hash
         entries.append(entry)
     return tuple(entries)
@@ -4013,6 +4068,10 @@ def _result_for_state(
     state: LiveShadowState,
     prepared: PreparedLiveShadowSpecification,
 ) -> LiveShadowResult:
+    _assert_completed_state_invariants(
+        Path(state.artifact_directory),
+        state,
+    )
     readiness = _readiness_for_state(state, prepared)
     return LiveShadowResult(
         live_shadow_id=state.live_shadow_id,
@@ -4089,6 +4148,39 @@ def _readiness_for_state(
         authoritative_status=state.authoritative_status,
         shadow_failures=state.shadow_failures,
     )
+
+
+def _assert_completed_state_invariants(
+    run_directory: Path,
+    state: LiveShadowState,
+) -> None:
+    """Centralize evidence rules for every persisted or returned completion."""
+    if state.status != "completed":
+        return
+    comparable_ids = {
+        proposal_id
+        for proposal_id in state.comparison_ids
+        if _load_comparison(
+            run_directory,
+            proposal_id,
+        ).comparison_available
+    }
+    if (
+        state.authoritative_status is None
+        or not comparable_ids.issubset(state.reviewed_proposal_ids)
+        or state.shadow_failures
+        or state.pending_action is not None
+        or not state.supervisor_session_usable
+        or state.auth_confidentiality_violation_detected
+        or state.runtime_confidentiality_violation_intent_recorded
+        or state.runtime_home_cleanup_required
+        or state.runtime_home_cleanup_completed
+        or state.runtime_home_cleanup_reason is not None
+        or state.runtime_confidentiality_rejected_action_id is not None
+    ):
+        raise LiveShadowStateError(
+            "completed live-shadow state contradicts its evidence"
+        )
 
 
 def _validate_run(
@@ -4262,23 +4354,7 @@ def _validate_run(
         raise LiveShadowStateError("review history cites an absent comparison")
     if not set(state.disqualified_proposal_ids).issubset(state.comparison_ids):
         raise LiveShadowStateError("disqualification history cites an absent assessment")
-    if state.status == "completed":
-        comparable_ids = {
-            proposal_id
-            for proposal_id in state.comparison_ids
-            if _load_comparison(
-                run_directory,
-                proposal_id,
-            ).comparison_available
-        }
-        if (
-            state.authoritative_status is None
-            or not comparable_ids.issubset(state.reviewed_proposal_ids)
-            or state.shadow_failures
-        ):
-            raise LiveShadowStateError(
-                "completed live-shadow state contradicts its evidence"
-            )
+    _assert_completed_state_invariants(run_directory, state)
     for decision_id in state.observed_decision_ids:
         _load_envelope(run_directory, decision_id)
         decision_directory = run_directory / "decisions" / decision_id
@@ -4495,55 +4571,91 @@ def _load_stable_run(
     raise LiveShadowStateError("live-shadow snapshot did not stabilize")
 
 
+def _load_effective_journal_state(
+    run_directory: Path,
+    *,
+    verify_artifacts: bool = True,
+) -> tuple[LiveShadowState, LiveShadowState]:
+    """Verify state/journal and derive an unpersisted journal-head snapshot."""
+    persisted = _load_state(run_directory)
+    entries = _read_live_journal(
+        run_directory,
+        verify_artifacts=verify_artifacts,
+    )
+    if persisted.journal_sequence > len(entries):
+        raise LiveShadowStateError(
+            "live-shadow state is ahead of its durable journal"
+        )
+    if (
+        persisted.journal_sequence
+        and entries[persisted.journal_sequence - 1].entry_hash
+        != persisted.journal_hash
+    ) or (
+        persisted.journal_sequence == 0
+        and persisted.journal_hash != ZERO_HASH
+    ):
+        raise LiveShadowStateError(
+            "live-shadow state journal prefix does not match"
+        )
+    _validate_live_journal_replay(
+        entries[: persisted.journal_sequence],
+        persisted,
+    )
+    if persisted.journal_sequence == len(entries):
+        return persisted, persisted
+    values = persisted.model_dump(mode="json")
+    for entry in entries[persisted.journal_sequence :]:
+        values.update(entry.state_updates)
+        values.update(
+            {
+                "status": entry.new_state,
+                "journal_sequence": entry.sequence,
+                "journal_hash": entry.entry_hash,
+                "updated_at": entry.timestamp,
+            }
+        )
+    try:
+        effective = LiveShadowState.model_validate(values)
+    except ValidationError as exc:
+        raise LiveShadowStateError(
+            "live-shadow journal recovery produced invalid state"
+        ) from exc
+    _validate_live_journal_replay(entries, effective)
+    return persisted, effective
+
+
+def _review_writer_preflight(run_directory: Path) -> None:
+    """Reject review from verified durable lifecycle evidence without scanning."""
+    _, effective = _load_effective_journal_state(
+        run_directory,
+        verify_artifacts=False,
+    )
+    _runtime_lifecycle_identity(run_directory, effective)
+    if (
+        _runtime_home_writer_is_active(run_directory, effective)
+        or effective.pending_action is not None
+    ):
+        raise LiveShadowInputError(
+            "a supervisor action is still in flight"
+        )
+
+
 def _load_reconciled_run(
     run_directory: Path,
     services: LiveShadowServices,
 ) -> tuple[LiveShadowState, PreparedLiveShadowSpecification]:
     """Reconcile only a trustworthy journal-ahead snapshot under the run lock."""
     with _live_lock(run_directory, services.utc_now):
-        state = _load_state(run_directory)
-        prepared = _reload_prepared(state, services)
-        entries = _read_live_journal(run_directory)
-        persisted_result = _load_result(run_directory)
-        if state.journal_sequence > len(entries):
-            raise LiveShadowStateError(
-                "live-shadow state is ahead of its durable journal"
-            )
-        if (
-            state.journal_sequence
-            and entries[state.journal_sequence - 1].entry_hash
-            != state.journal_hash
-        ) or (
-            state.journal_sequence == 0
-            and state.journal_hash != ZERO_HASH
-        ):
-            raise LiveShadowStateError(
-                "live-shadow state journal prefix does not match"
-            )
-        _validate_live_journal_replay(
-            entries[: state.journal_sequence],
-            state,
+        persisted_state, state = _load_effective_journal_state(
+            run_directory
         )
-        if state.journal_sequence < len(entries):
-            pre_recovery_result = _result_for_state(state, prepared)
-            values = state.model_dump(mode="json")
-            for entry in entries[state.journal_sequence :]:
-                values.update(entry.state_updates)
-                values.update(
-                    {
-                        "status": entry.new_state,
-                        "journal_sequence": entry.sequence,
-                        "journal_hash": entry.entry_hash,
-                        "updated_at": entry.timestamp,
-                    }
-                )
-            try:
-                state = LiveShadowState.model_validate(values)
-            except ValidationError as exc:
-                raise LiveShadowStateError(
-                    "live-shadow journal recovery produced invalid state"
-                ) from exc
-            _validate_live_journal_replay(entries, state)
+        prepared = _reload_prepared(persisted_state, services)
+        persisted_result = _load_result(run_directory)
+        if state != persisted_state:
+            pre_recovery_result = _result_for_state(
+                persisted_state,
+                prepared,
+            )
             recovered_result = _result_for_state(state, prepared)
             if persisted_result not in (
                 pre_recovery_result,

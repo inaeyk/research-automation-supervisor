@@ -37,7 +37,9 @@ from research_automation_supervisor.errors import (
     LiveShadowStateError,
 )
 from research_automation_supervisor.live_shadow_engine import (
+    LiveShadowServices,
     abort_live_shadow,
+    live_shadow_exit_code,
     live_shadow_report,
     live_shadow_status,
     record_live_shadow_review,
@@ -193,6 +195,41 @@ def _raw_runtime_tree(root: Path) -> bytes:
             except OSError:
                 continue
     return b"\0".join(chunks)
+
+
+def _completed_live_shadow_run(
+    tmp_path: Path,
+) -> tuple[Path, Path, LiveShadowServices, LiveShadowResult]:
+    spec, _, _, _, services = create_live_shadow_tree(tmp_path)
+    authentication_file = tmp_path / "fake-auth.json"
+    services = replace(
+        services,
+        codex_authentication_file=authentication_file,
+    )
+    result = run_live_shadow(
+        spec,
+        runs_dir=tmp_path / "live-runs",
+        stage2_runs_dir=tmp_path / "stage2-runs",
+        services=services,
+    )
+    run_directory = Path(result.artifact_directory)
+    for index, proposal_id in enumerate(
+        ("worker_initial-r000-a001", "auditor-r000-a002"),
+        start=1,
+    ):
+        result = record_live_shadow_review(
+            run_directory,
+            proposal_id,
+            write_review(
+                tmp_path / f"completed-review-{index}.yaml",
+                proposal_id,
+            ),
+            services=services,
+        )
+    assert result.status == "completed"
+    assert result.authoritative_stage2_status == "completed"
+    assert result.review_count == 2
+    return run_directory, authentication_file, services, result
 
 
 def test_runtime_home_scans_raw_path_components_and_complete_relative_paths(
@@ -918,6 +955,340 @@ def test_confidentiality_cleanup_crash_boundaries_recover_exactly_once(
     assert authoritative_after == authoritative_before
 
 
+def test_completed_runtime_contamination_recovers_to_stable_shadow_degraded(
+    tmp_path: Path,
+) -> None:
+    (
+        run_directory,
+        authentication_file,
+        services,
+        completed,
+    ) = _completed_live_shadow_run(tmp_path)
+    authoritative = Path(str(completed.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    immutable_before = {
+        path.relative_to(run_directory): path.read_bytes()
+        for directory_name in (
+            "decisions",
+            "proposals",
+            "comparisons",
+            "reviews",
+        )
+        for path in (run_directory / directory_name).rglob("*")
+        if path.is_file()
+    }
+    launch_counts_before = (
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii"),
+        (tmp_path / "stage2/fake-counter").read_text(encoding="ascii"),
+    )
+    secret = (
+        "COMPLETED-CONTAMINATION-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    authentication_file.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine/codex-home"
+    protected_name = hashlib.sha256(
+        secret.encode("utf-8")
+    ).hexdigest()
+    (runtime_home / protected_name).write_text(
+        secret,
+        encoding="utf-8",
+    )
+
+    recovered = resume_live_shadow(
+        run_directory,
+        services=services,
+    )
+    assert recovered.status == "shadow_degraded"
+    assert live_shadow_exit_code(recovered.status) == 5
+    assert recovered.authoritative_stage2_status == "completed"
+    assert (
+        recovered.authoritative_result_sha256
+        == completed.authoritative_result_sha256
+    )
+    assert recovered.authoritative_pause_reason == (
+        completed.authoritative_pause_reason
+    )
+    assert recovered.supervisor_session_usable is False
+    assert recovered.runtime_confidentiality_violation_intent_recorded is True
+    assert recovered.runtime_home_cleanup_required is False
+    assert recovered.runtime_home_cleanup_completed is True
+    assert recovered.readiness == "not_ready"
+    assert recovered.automation_enabled is False
+    assert recovered.shadow_failure_count == (
+        completed.shadow_failure_count + 1
+    )
+    assert (
+        recovered.proposal_count,
+        recovered.comparison_count,
+        recovered.review_count,
+    ) == (
+        completed.proposal_count,
+        completed.comparison_count,
+        completed.review_count,
+    )
+    state = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    result_value = json.loads(
+        (run_directory / "result.json").read_text(encoding="utf-8")
+    )
+    assert state["status"] == result_value["status"] == "shadow_degraded"
+    assert state["runtime_home_cleanup_reason"] == (
+        "runtime_confidentiality_violation_after_completion"
+    )
+    assert state["shadow_failures"][-1]["reason"] == (
+        "runtime_confidentiality_violation_after_completion"
+    )
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in entries
+    ) == 1
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in entries
+    ) == 1
+    assert not tuple(runtime_home.iterdir())
+    raw_run = _raw_runtime_tree(run_directory)
+    assert secret.encode("utf-8") not in raw_run
+    assert protected_name.encode("ascii") not in raw_run
+
+    files_before_reads = {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    }
+    status = live_shadow_status(run_directory, services=services)
+    report = live_shadow_report(run_directory, services=services)
+    assert status == recovered
+    assert report["status"] == status.status
+    assert report["authoritative"]["status"] == "completed"
+    assert report["readiness"]["status"] == status.readiness
+    assert (
+        report["authentication_confidentiality"][
+            "supervisor_session_usable"
+        ]
+        is False
+    )
+    assert len(report["shadow_failures"]) == status.shadow_failure_count
+    assert len(report["assessments"]) == status.comparison_count
+    assert len(report["comparisons"]) == status.comparison_count
+    assert (
+        report["readiness"]["reviewed_proposal_count"]
+        == status.review_count
+    )
+    assert report["readiness"]["proposal_count"] == status.proposal_count
+    rendered_reads = json.dumps(
+        {
+            "status": status.model_dump(mode="json"),
+            "report": report,
+        },
+        sort_keys=True,
+    )
+    assert secret not in rendered_reads
+    assert protected_name not in rendered_reads
+    assert {
+        path.relative_to(run_directory): path.read_bytes()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    } == files_before_reads
+
+    journal_before_second = (run_directory / "journal.jsonl").read_bytes()
+    second = resume_live_shadow(
+        run_directory,
+        services=services,
+    )
+    assert second == recovered
+    assert (run_directory / "journal.jsonl").read_bytes() == (
+        journal_before_second
+    )
+    second_entries = [
+        json.loads(line)
+        for line in journal_before_second.decode("ascii").splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in second_entries
+    ) == 1
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in second_entries
+    ) == 1
+    assert second.shadow_failure_count == recovered.shadow_failure_count
+    assert (
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii"),
+        (tmp_path / "stage2/fake-counter").read_text(encoding="ascii"),
+    ) == launch_counts_before
+    assert {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    } == authoritative_before
+    assert {
+        path.relative_to(run_directory): path.read_bytes()
+        for directory_name in (
+            "decisions",
+            "proposals",
+            "comparisons",
+            "reviews",
+        )
+        for path in (run_directory / directory_name).rglob("*")
+        if path.is_file()
+    } == immutable_before
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    (
+        "after_runtime_confidentiality_violation_journal_append",
+        "after_runtime_confidentiality_session_invalidation_state",
+        "after_runtime_home_scrub_before_cleanup_completion",
+        "after_runtime_cleanup_completion_journal_append",
+        "after_result_replacement",
+    ),
+)
+def test_completed_contamination_crash_boundaries_recover_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    import research_automation_supervisor.live_shadow_engine as engine
+
+    (
+        run_directory,
+        authentication_file,
+        services,
+        completed,
+    ) = _completed_live_shadow_run(tmp_path)
+    authoritative = Path(str(completed.authoritative_stage2_run))
+    authoritative_before = {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    }
+    launch_counts_before = (
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii"),
+        (tmp_path / "stage2/fake-counter").read_text(encoding="ascii"),
+    )
+    secret = (
+        f"COMPLETED-CRASH-{crash_point}-"
+        f"{hashlib.sha256(os.urandom(32)).hexdigest()}"
+    )
+    authentication_file.write_text(
+        json.dumps({"access_token": secret}),
+        encoding="utf-8",
+    )
+    runtime_home = run_directory / "quarantine/codex-home"
+    protected_name = hashlib.sha256(
+        secret.encode("utf-8")
+    ).hexdigest()
+    (runtime_home / protected_name).write_text(
+        secret,
+        encoding="utf-8",
+    )
+    crashed = False
+
+    def inject(point: str) -> None:
+        nonlocal crashed
+        if not crashed and point == crash_point:
+            crashed = True
+            raise RuntimeError(f"crash at {point}")
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", inject)
+    with pytest.raises(RuntimeError, match="crash at"):
+        resume_live_shadow(run_directory, services=services)
+    assert crashed is True
+    with pytest.raises(
+        (LiveShadowIntegrityError, LiveShadowStateError)
+    ):
+        live_shadow_status(run_directory, services=services)
+    with pytest.raises(
+        (LiveShadowIntegrityError, LiveShadowStateError)
+    ):
+        live_shadow_report(run_directory, services=services)
+
+    monkeypatch.setattr(engine, "_snapshot_checkpoint", lambda _: None)
+    recovered = resume_live_shadow(
+        run_directory,
+        services=services,
+    )
+    assert recovered.status == "shadow_degraded"
+    assert recovered.authoritative_stage2_status == "completed"
+    assert recovered.supervisor_session_usable is False
+    assert recovered.runtime_home_cleanup_required is False
+    assert recovered.runtime_home_cleanup_completed is True
+    assert recovered.shadow_failure_count == (
+        completed.shadow_failure_count + 1
+    )
+    assert live_shadow_status(
+        run_directory,
+        services=services,
+    ) == recovered
+    assert live_shadow_report(
+        run_directory,
+        services=services,
+    )["status"] == "shadow_degraded"
+    entries = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl")
+        .read_text(encoding="ascii")
+        .splitlines()
+    ]
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_violation_intent"
+        for entry in entries
+    ) == 1
+    assert sum(
+        entry["event_type"]
+        == "runtime_confidentiality_cleanup_completion"
+        for entry in entries
+    ) == 1
+    assert sum(
+        failure["reason"]
+        == "runtime_confidentiality_violation_after_completion"
+        for failure in json.loads(
+            (run_directory / "state.json").read_text(encoding="utf-8")
+        )["shadow_failures"]
+    ) == 1
+    journal_before_second = (run_directory / "journal.jsonl").read_bytes()
+    assert resume_live_shadow(
+        run_directory,
+        services=services,
+    ) == recovered
+    assert (run_directory / "journal.jsonl").read_bytes() == (
+        journal_before_second
+    )
+    assert not tuple(runtime_home.iterdir())
+    assert secret.encode("utf-8") not in _raw_runtime_tree(run_directory)
+    assert (
+        (tmp_path / "live-shadow-counter").read_text(encoding="ascii"),
+        (tmp_path / "stage2/fake-counter").read_text(encoding="ascii"),
+    ) == launch_counts_before
+    assert {
+        path.relative_to(authoritative): path.read_bytes()
+        for path in authoritative.rglob("*")
+        if path.is_file()
+    } == authoritative_before
+
+
 def test_review_validates_and_scrubs_authentication_paths_before_mutation(
     tmp_path: Path,
 ) -> None:
@@ -1302,9 +1673,22 @@ def test_review_never_scans_across_active_supervisor_writer(
         supervisor_responses=[
             live_supervisor_response(
                 "worker_initial",
-                sleep_seconds=2,
+                sleep_seconds=1,
             ),
             live_supervisor_response("auditor", resume=True),
+        ],
+        stage2_responses=[
+            codex_response(
+                "worker",
+                SOURCE_WORKER_UUID,
+                worker_result(),
+                sleep_seconds=2,
+            ),
+            codex_response(
+                "auditor",
+                SOURCE_AUDITOR_UUID,
+                auditor_result(),
+            ),
         ],
     )
     outcome: dict[str, object] = {}
@@ -1338,23 +1722,68 @@ def test_review_never_scans_across_active_supervisor_writer(
         time.sleep(0.005)
     assert run_directory is not None
     assert process_record is not None
-    scanned = False
-    original_inspect = engine.inspect_runtime_home_contents
-
-    def record_scan(*args: object, **kwargs: object) -> tuple[str, ...]:
-        nonlocal scanned
-        scanned = True
-        return original_inspect(*args, **kwargs)
-
-    monkeypatch.setattr(
-        engine,
-        "inspect_runtime_home_contents",
-        record_scan,
+    counter_paths = (
+        tmp_path / "live-shadow-counter",
+        tmp_path / "stage2/fake-counter",
     )
+    deadline = time.monotonic() + 5
+    while (
+        not all(path.is_file() for path in counter_paths)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+    assert all(path.is_file() for path in counter_paths)
+    scanner_names = (
+        "validate_runtime_home_contents",
+        "inspect_runtime_home_contents",
+        "_validate_quarantine_workspace",
+        "_validate_run",
+        "_load_reconciled_run",
+        "_stable_runtime_home_validation",
+    )
+    scan_calls = dict.fromkeys(scanner_names, 0)
+    for scanner_name in scanner_names:
+        original = getattr(engine, scanner_name)
+
+        def instrument(
+            *args: object,
+            _name: str = scanner_name,
+            _original: object = original,
+            **kwargs: object,
+        ) -> object:
+            scan_calls[_name] += 1
+            assert callable(_original)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, scanner_name, instrument)
     review = write_review(
         tmp_path / "review-active.yaml",
         "worker_initial-r000-a001",
     )
+    durable_paths = tuple(
+        run_directory / name
+        for name in ("journal.jsonl", "state.json", "result.json")
+    )
+    durable_hashes = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in durable_paths
+    }
+    state_before = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    review_count_before = len(state_before["reviewed_proposal_ids"])
+    launch_counts_before = (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    )
+    launch = json.loads(
+        (run_directory / "authoritative/launch.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    stage2_pid = int(launch["pid"])
+    stage2_ticks = int(launch["process_start_ticks"])
+    assert engine._process_identity_running(stage2_pid, stage2_ticks)
     deadline = time.monotonic() + 2
     while True:
         try:
@@ -1373,13 +1802,47 @@ def test_review_never_scans_across_active_supervisor_writer(
             assert "still in flight" in str(exc)
             break
         raise AssertionError("review unexpectedly crossed the active writer")
-    assert scanned is False
+    assert scan_calls == dict.fromkeys(scanner_names, 0)
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in durable_paths
+    } == durable_hashes
+    state_after = json.loads(
+        (run_directory / "state.json").read_text(encoding="utf-8")
+    )
+    assert len(state_after["reviewed_proposal_ids"]) == review_count_before
+    assert not (
+        run_directory / "reviews/worker_initial-r000-a001.json"
+    ).exists()
+    assert (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    ) == launch_counts_before
     pid = int(process_record["process_id"])
     ticks = int(process_record["process_start_ticks"])
     assert engine._process_identity_running(pid, ticks)
+    assert engine._process_identity_running(stage2_pid, stage2_ticks)
     observer.join(timeout=15)
     assert not observer.is_alive()
     assert "error" not in outcome
+    for scanner_name in scanner_names:
+        scan_calls[scanner_name] = 0
+    launch_counts_after_observation = (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    )
+    reviewed = record_live_shadow_review(
+        run_directory,
+        "worker_initial-r000-a001",
+        review,
+        services=services,
+    )
+    assert reviewed.review_count == review_count_before + 1
+    assert scan_calls == dict.fromkeys(scanner_names, 1)
+    assert (
+        counter_paths[0].read_text(encoding="ascii"),
+        counter_paths[1].read_text(encoding="ascii"),
+    ) == launch_counts_after_observation
 
 
 def _prepared_supervisor(

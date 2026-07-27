@@ -814,6 +814,10 @@ def live_shadow_report_command(
             (
                 f"Live shadow: {report['live_shadow_id']}",
                 f"Status: {report['status']}",
+                (
+                    "Authoritative Stage 2: "
+                    f"{cast(dict[str, object], report['authoritative'])['status']}"
+                ),
                 f"Readiness: {readiness['status']}",
                 "Readiness is informational only; automation remains disabled.",
             )

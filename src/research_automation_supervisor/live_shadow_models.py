@@ -383,6 +383,7 @@ class LiveShadowState(BaseModel):
     runtime_home_cleanup_completed: bool = False
     runtime_home_cleanup_reason: Literal[
         "auth_confidentiality_violation",
+        "runtime_confidentiality_violation_after_completion",
         "runtime_home_contamination",
         "runtime_home_instability",
     ] | None = None
