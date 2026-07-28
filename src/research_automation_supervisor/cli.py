@@ -32,6 +32,10 @@ from research_automation_supervisor.errors import (
     LiveShadowInputError,
     LiveShadowLockError,
     LiveShadowStateError,
+    ReplayCampaignDependencyError,
+    ReplayCampaignInputError,
+    ReplayCampaignLockError,
+    ReplayCampaignStateError,
     ShadowDependencyError,
     ShadowInputError,
     ShadowLockError,
@@ -57,6 +61,14 @@ from research_automation_supervisor.live_shadow_isolation import (
 )
 from research_automation_supervisor.live_shadow_models import LiveShadowResult
 from research_automation_supervisor.redaction import redact_text
+from research_automation_supervisor.replay_campaign_engine import (
+    DEFAULT_REPLAY_RUNS_DIRECTORY,
+    replay_campaign_exit_code,
+    replay_campaign_status,
+    resume_replay_campaign,
+    run_replay_campaign,
+)
+from research_automation_supervisor.replay_campaign_models import ReplayCampaignState
 from research_automation_supervisor.shadow_confidentiality import (
     preflight_shadow_confidentiality,
 )
@@ -409,6 +421,78 @@ def abort_substage_command(
     except Exception:
         _render_workflow_internal_error(as_json)
     _render_workflow_result_and_exit(result, as_json)
+
+
+@app.command("run-replay-campaign")
+def run_replay_campaign_command(
+    path: Annotated[Path, typer.Argument(help="Replay campaign specification.")],
+    runs_dir: Annotated[
+        Path,
+        typer.Option(
+            "--runs-dir",
+            help="Directory under which the exclusive campaign run is created.",
+        ),
+    ] = DEFAULT_REPLAY_RUNS_DIRECTORY,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Run an ordered historical replay campaign synchronously."""
+    try:
+        result = run_replay_campaign(path, runs_dir=runs_dir)
+    except ReplayCampaignInputError as exc:
+        _render_replay_error(str(exc), as_json, 2)
+    except ReplayCampaignDependencyError as exc:
+        _render_replay_error(str(exc), as_json, 3)
+    except (ReplayCampaignLockError, ReplayCampaignStateError) as exc:
+        _render_replay_error(str(exc), as_json, 4)
+    except Exception:
+        _render_replay_internal_error(as_json)
+    _render_replay_result_and_exit(result, as_json)
+
+
+@app.command("resume-replay-campaign")
+def resume_replay_campaign_command(
+    run_directory: Annotated[Path, typer.Argument(help="Existing campaign run directory.")],
+    decision: Annotated[
+        Path,
+        typer.Option("--decision", help="Exact schema-version-1 human decision YAML."),
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Apply one immutable decision and resume exact campaign sessions."""
+    try:
+        result = resume_replay_campaign(run_directory, decision_path=decision)
+    except ReplayCampaignInputError as exc:
+        _render_replay_error(str(exc), as_json, 2)
+    except ReplayCampaignDependencyError as exc:
+        _render_replay_error(str(exc), as_json, 3)
+    except (ReplayCampaignLockError, ReplayCampaignStateError) as exc:
+        _render_replay_error(str(exc), as_json, 4)
+    except Exception:
+        _render_replay_internal_error(as_json)
+    _render_replay_result_and_exit(result, as_json)
+
+
+@app.command("replay-campaign-status")
+def replay_campaign_status_command(
+    run_directory: Annotated[Path, typer.Argument(help="Existing campaign run directory.")],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Read replay campaign status without mutation."""
+    try:
+        result = replay_campaign_status(run_directory)
+    except ReplayCampaignInputError as exc:
+        _render_replay_error(str(exc), as_json, 2)
+    except (ReplayCampaignLockError, ReplayCampaignStateError) as exc:
+        _render_replay_error(str(exc), as_json, 4)
+    except Exception:
+        _render_replay_internal_error(as_json)
+    _render_replay_result_and_exit(result, as_json)
 
 
 @app.command("validate-shadow-spec")
@@ -1097,6 +1181,66 @@ def _render_workflow_error(error: str, as_json: bool, exit_code: int) -> Never:
 
 def _render_workflow_internal_error(as_json: bool) -> Never:
     message = "Unexpected internal workflow engine failure."
+    if as_json:
+        typer.echo(_stable_json({"error": message, "error_kind": "internal", "ok": False}))
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
+
+
+def _render_replay_result_and_exit(
+    result: ReplayCampaignState,
+    as_json: bool,
+) -> None:
+    if as_json:
+        typer.echo(_stable_json(result.to_dict()))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    f"Campaign: {result.campaign_id}",
+                    f"Status: {result.status}",
+                    f"Current task index: {result.current_task_index}",
+                    f"Completed tasks: {len(result.completed_task_ids)}",
+                    f"Supervisor session: "
+                    f"{result.supervisor_session_id or 'not available'}",
+                    f"Human assisted tasks: "
+                    f"{', '.join(result.human_assisted_task_ids) or 'none'}",
+                    f"Pause reason: {result.pause_reason or 'none'}",
+                )
+            )
+        )
+    code = replay_campaign_exit_code(result.status)
+    if code:
+        raise typer.Exit(code=code)
+
+
+def _render_replay_error(error: str, as_json: bool, exit_code: int) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized = redact_text(error, sensitive_values)
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {
+                    "error": sanitized,
+                    "error_kind": (
+                        "input"
+                        if exit_code == 2
+                        else "dependency"
+                        if exit_code == 3
+                        else "campaign"
+                    ),
+                    "ok": False,
+                }
+            )
+        )
+    else:
+        typer.echo(f"Replay campaign error: {sanitized}", err=True)
+    raise typer.Exit(code=exit_code)
+
+
+def _render_replay_internal_error(as_json: bool) -> Never:
+    message = "Unexpected internal replay campaign failure."
     if as_json:
         typer.echo(_stable_json({"error": message, "error_kind": "internal", "ok": False}))
     else:

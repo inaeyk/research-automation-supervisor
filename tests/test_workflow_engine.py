@@ -8,6 +8,7 @@ import pytest
 
 from research_automation_supervisor.codex_adapter import run_prepared_codex
 from research_automation_supervisor.errors import WorkflowInputError, WorkflowLockError
+from research_automation_supervisor.git_evidence import record_git_baseline
 from research_automation_supervisor.test_runner import run_test_attempt
 from research_automation_supervisor.workflow_engine import (
     WorkflowServices,
@@ -18,6 +19,8 @@ from research_automation_supervisor.workflow_engine import (
     run_substage,
     substage_status,
 )
+from research_automation_supervisor.workflow_models import load_substage_specification
+from research_automation_supervisor.workflow_prompts import build_initial_worker_prompt
 from tests.workflow_helpers import (
     auditor_result,
     codex_response,
@@ -80,6 +83,42 @@ def test_direct_pass_uses_persistent_worker_fresh_auditor_and_equal_snapshots(
         project / "control/auditor.md",
     ):
         assert human_file.read_bytes() not in artifact_bytes
+
+
+def test_default_prompt_source_seam_preserves_frozen_worker_prompt_bytes(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path)
+    prepared = load_substage_specification(spec)
+    expected = build_initial_worker_prompt(
+        prepared,
+        record_git_baseline(prepared.workspace),
+    )
+
+    result = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=WorkflowServices(
+            codex_executable=str(fake),
+            prompt_source=None,
+        ),
+    )
+
+    metadata = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "worker/codex/worker-r000/metadata.json"
+        ).read_text(encoding="utf-8")
+    )
+    handoff = json.loads(
+        (
+            Path(result.artifact_directory)
+            / "handoffs/worker-r000.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert metadata["prompt_sha256"] == expected.rendered_sha256
+    assert metadata["prompt_byte_count"] == expected.byte_count
+    assert handoff == expected.manifest()
 
 
 def test_checkpoint_pass_returns_frozen_checkpoint_exit_state(tmp_path: Path) -> None:

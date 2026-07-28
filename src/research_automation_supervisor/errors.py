@@ -53,6 +53,10 @@ class WorkflowLockError(WorkflowError):
     """A workflow run cannot be locked safely for mutation."""
 
 
+class WorkflowPromptSourceError(WorkflowError):
+    """An optional Stage 2 prompt source could not provide an authorized action."""
+
+
 class ShadowError(SupervisorError):
     """Base class for expected Stage 3 shadow-calibration errors."""
 
@@ -107,3 +111,23 @@ class LiveShadowRuntimeHomeInstabilityError(LiveShadowIntegrityError):
 
 class LiveShadowLockError(LiveShadowError):
     """A live-shadow run cannot be locked safely."""
+
+
+class ReplayCampaignError(SupervisorError):
+    """Base class for Stage 5A replay campaign errors."""
+
+
+class ReplayCampaignInputError(ReplayCampaignError):
+    """A replay manifest, decision, or path is invalid."""
+
+
+class ReplayCampaignDependencyError(ReplayCampaignError):
+    """A required replay campaign dependency is unavailable."""
+
+
+class ReplayCampaignStateError(ReplayCampaignError):
+    """Durable replay campaign evidence violates an invariant."""
+
+
+class ReplayCampaignLockError(ReplayCampaignError):
+    """A replay campaign cannot be locked safely."""

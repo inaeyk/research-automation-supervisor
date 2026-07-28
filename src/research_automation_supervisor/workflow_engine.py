@@ -17,7 +17,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Protocol, cast
+from typing import IO, Any, Literal, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -27,6 +27,7 @@ from research_automation_supervisor.codex_adapter import (
     run_prepared_codex,
 )
 from research_automation_supervisor.codex_models import (
+    MAX_PROMPT_BYTES,
     ROLE_POLICIES,
     CodexRunRequest,
     CodexRunResult,
@@ -37,6 +38,7 @@ from research_automation_supervisor.errors import (
     WorkflowDependencyError,
     WorkflowInputError,
     WorkflowLockError,
+    WorkflowPromptSourceError,
     WorkflowStateError,
 )
 from research_automation_supervisor.git_evidence import (
@@ -170,6 +172,17 @@ def _build_journal_semantic_forms() -> frozenset[JournalSemanticForm]:
         "human_paused",
         "worker_running",
         "human_continuation_requested",
+        "prompt_source_human_resume",
+    )
+    transition(
+        "human_paused",
+        "auditor_running",
+        "prompt_source_human_resume",
+    )
+    transition(
+        "human_paused",
+        "repair_pending",
+        "prompt_source_human_resume",
     )
     transition(
         "repair_limit_paused",
@@ -238,6 +251,17 @@ def _build_journal_semantic_forms() -> frozenset[JournalSemanticForm]:
         "human_paused",
         "missing_worker_thread_id",
     )
+    for previous in (
+        "worker_running",
+        "auditor_running",
+        "repair_pending",
+    ):
+        transition(
+            previous,
+            "human_paused",
+            "prompt_source_human_pause",
+            "prompt_source_invalid",
+        )
 
     evidence_reasons = {
         "worker_running": (
@@ -349,6 +373,49 @@ class TestInvoker(Protocol):
     ) -> TestAttemptResult: ...
 
 
+PromptBoundary = Literal[
+    "worker_prompt",
+    "auditor_prompt",
+    "repair_prompt",
+    "finish",
+    "human_pause",
+]
+
+
+@dataclass(frozen=True)
+class WorkflowPromptRequest:
+    """One optional Stage 2 prompt/action boundary exposed to a controller."""
+
+    action: PromptBoundary
+    default_prompt: RenderedWorkflowPrompt | None
+    run_directory: Path
+    workspace: Path
+    substage_id: str
+    title: str
+    repair_round: int
+    repair_trigger: str | None
+    worker_thread_id: str | None
+    latest_worker_result_path: Path | None
+    latest_audit_result_path: Path | None
+    latest_git_evidence_path: Path | None
+    latest_tests_path: Path | None
+
+
+@dataclass(frozen=True)
+class WorkflowPromptDecision:
+    """Supervisor-approved bytes or terminal action returned at a boundary."""
+
+    action: PromptBoundary
+    prompt: bytes | None
+    summary: str
+
+
+class WorkflowPromptSource(Protocol):
+    """Optional replay-only prompt/action source; Stage 2 remains authoritative."""
+
+    def __call__(self, request: WorkflowPromptRequest) -> WorkflowPromptDecision: ...
+
+
 @dataclass(frozen=True)
 class WorkflowServices:
     """Injectable process and identity boundaries used by offline tests."""
@@ -359,6 +426,7 @@ class WorkflowServices:
     environ: Mapping[str, str] | None = None
     token_factory: Callable[[], str] = lambda: secrets.token_hex(16)
     utc_now: Callable[[], datetime] = lambda: datetime.now(UTC)
+    prompt_source: WorkflowPromptSource | None = None
 
 
 DEFAULT_WORKFLOW_SERVICES = WorkflowServices()
@@ -628,6 +696,59 @@ def continue_substage(
         return _drive(context)
 
 
+def resume_prompt_source_substage(
+    run_directory: Path,
+    *,
+    services: WorkflowServices,
+) -> WorkflowResult:
+    """Re-enter the exact replay prompt boundary after an immutable human decision."""
+    if services.prompt_source is None:
+        raise WorkflowInputError("prompt-source resume requires an explicit prompt source")
+    resolved = _resolve_run_directory(run_directory)
+    with _WorkflowLock(resolved, services.utc_now):
+        state = _load_state(resolved)
+        state = _reconcile_state_with_journal(resolved, state)
+        _validate_normalized_action_intents(resolved, state)
+        if state.status != "human_paused" or state.pause_reason not in {
+            "prompt_source_human_pause",
+            "prompt_source_invalid",
+        }:
+            raise WorkflowInputError(
+                "prompt-source resume is allowed only from a replay prompt-source pause"
+            )
+        entries = _read_valid_journal(resolved)
+        pause_entry = next(
+            (
+                entry
+                for entry in reversed(entries)
+                if entry.event_type == "transition"
+                and entry.new_state == "human_paused"
+                and entry.reason
+                in {"prompt_source_human_pause", "prompt_source_invalid"}
+            ),
+            None,
+        )
+        if pause_entry is None or pause_entry.previous_state not in {
+            "worker_running",
+            "auditor_running",
+            "repair_pending",
+        }:
+            raise WorkflowStateError("prompt-source pause origin is unavailable")
+        context = _load_context(resolved, state, services)
+        if not _frozen_inputs_match(context) or not _repository_matches(context):
+            raise WorkflowInputError(
+                "frozen inputs and repository identity must match before replay resume"
+            )
+        context.state = _transition(
+            context,
+            cast(Any, pause_entry.previous_state),
+            "prompt_source_human_resume",
+            pause_reason=None,
+            summary="Human decision resumed the exact replay prompt boundary.",
+        )
+        return _drive(context)
+
+
 def substage_status(run_directory: Path) -> WorkflowResult:
     """Read and integrity-check durable state without writes or launches."""
     resolved = _resolve_run_directory(run_directory)
@@ -827,7 +948,15 @@ def _handle_worker(context: _WorkflowContext) -> None:
     action_id = f"worker-r{context.state.repair_round:03d}"
     record = _read_action_record(context.run_directory, action_id)
     if record is None:
-        prompt = _worker_prompt(context)
+        default_prompt = _worker_prompt(context)
+        boundary: Literal["worker_prompt", "repair_prompt"] = (
+            "worker_prompt"
+            if context.state.repair_round == 0
+            else "repair_prompt"
+        )
+        prompt = _source_prompt(context, boundary, default_prompt)
+        if prompt is None:
+            return
         handoff_path = context.run_directory / "handoffs" / f"{action_id}.json"
         _write_json(handoff_path, prompt.manifest())
         role = "worker"
@@ -1118,7 +1247,7 @@ def _handle_auditor(context: _WorkflowContext) -> None:
                 "Incomplete patch evidence cannot be sent to an auditor.",
             )
             return
-        prompt = build_auditor_prompt(
+        default_prompt = build_auditor_prompt(
             context.prepared,
             context.baseline,
             git_evidence,
@@ -1127,6 +1256,9 @@ def _handle_auditor(context: _WorkflowContext) -> None:
             tests,
             prior,
         )
+        prompt = _source_prompt(context, "auditor_prompt", default_prompt)
+        if prompt is None:
+            return
         handoff_path = context.run_directory / "handoffs" / f"{action_id}.json"
         _write_json(handoff_path, prompt.manifest())
         request = _prepared_codex_request(context, action_id, "auditor", prompt)
@@ -1212,6 +1344,8 @@ def _consume_auditor_record(
         },
     )
     if audit.verdict == "escalate":
+        if not _source_terminal_action(context, "human_pause"):
+            return
         context.state = _pause(
             context,
             "human_paused",
@@ -1228,6 +1362,8 @@ def _consume_auditor_record(
             "Auditor pass conflicted with deterministic test or scope state.",
         )
     else:
+        if not _source_terminal_action(context, "finish"):
+            return
         final_state = "checkpoint_paused" if context.state.checkpoint_after else "completed"
         reason = "auditor_passed_checkpoint" if context.state.checkpoint_after else "auditor_passed"
         context.state = _transition(
@@ -1271,6 +1407,146 @@ def _worker_prompt(context: _WorkflowContext) -> RenderedWorkflowPrompt:
         _optional_latest_tests(context),
         _latest_git(context),
     )
+
+
+def _prompt_source_request(
+    context: _WorkflowContext,
+    action: PromptBoundary,
+    default_prompt: RenderedWorkflowPrompt | None,
+) -> WorkflowPromptRequest:
+    def optional_path(value: str | None) -> Path | None:
+        return None if value is None else Path(value)
+
+    return WorkflowPromptRequest(
+        action=action,
+        default_prompt=default_prompt,
+        run_directory=context.run_directory,
+        workspace=context.prepared.workspace,
+        substage_id=context.prepared.specification.substage_id,
+        title=context.prepared.specification.title,
+        repair_round=context.state.repair_round,
+        repair_trigger=context.state.repair_trigger,
+        worker_thread_id=context.state.worker_thread_id,
+        latest_worker_result_path=optional_path(
+            context.state.latest_worker_result_path
+        ),
+        latest_audit_result_path=optional_path(
+            context.state.latest_audit_result_path
+        ),
+        latest_git_evidence_path=optional_path(
+            context.state.latest_git_evidence_path
+        ),
+        latest_tests_path=optional_path(context.state.latest_tests_path),
+    )
+
+
+def _call_prompt_source(
+    context: _WorkflowContext,
+    action: PromptBoundary,
+    default_prompt: RenderedWorkflowPrompt | None,
+) -> WorkflowPromptDecision | None:
+    source = context.services.prompt_source
+    if source is None:
+        return None
+    try:
+        decision = source(_prompt_source_request(context, action, default_prompt))
+    except WorkflowPromptSourceError as exc:
+        context.state = _pause(
+            context,
+            "human_paused",
+            "prompt_source_invalid",
+            str(exc) or "The replay prompt source rejected the supervisor action.",
+        )
+        return WorkflowPromptDecision(
+            action="human_pause",
+            prompt=None,
+            summary="Prompt source rejected the supervisor action.",
+        )
+    except Exception:
+        context.state = _pause(
+            context,
+            "human_paused",
+            "prompt_source_invalid",
+            "The replay prompt source failed safely.",
+        )
+        return WorkflowPromptDecision(
+            action="human_pause",
+            prompt=None,
+            summary="Prompt source failed safely.",
+        )
+    if decision.action == "human_pause":
+        context.state = _pause(
+            context,
+            "human_paused",
+            "prompt_source_human_pause",
+            decision.summary,
+        )
+        return decision
+    if decision.action != action:
+        context.state = _pause(
+            context,
+            "human_paused",
+            "prompt_source_invalid",
+            "The replay prompt source returned an unauthorized action.",
+        )
+        return WorkflowPromptDecision(
+            action="human_pause",
+            prompt=None,
+            summary="Prompt source returned an unauthorized action.",
+        )
+    return decision
+
+
+def _source_prompt(
+    context: _WorkflowContext,
+    action: Literal["worker_prompt", "auditor_prompt", "repair_prompt"],
+    default_prompt: RenderedWorkflowPrompt,
+) -> RenderedWorkflowPrompt | None:
+    decision = _call_prompt_source(context, action, default_prompt)
+    if decision is None:
+        return default_prompt
+    if decision.action == "human_pause":
+        return None
+    prompt = decision.prompt
+    if prompt is None or not prompt.strip() or len(prompt) > MAX_PROMPT_BYTES:
+        context.state = _pause(
+            context,
+            "human_paused",
+            "prompt_source_invalid",
+            "The replay prompt source returned invalid prompt bytes.",
+        )
+        return None
+    rendered_hash = hashlib.sha256(prompt).hexdigest()
+    return RenderedWorkflowPrompt(
+        content=prompt,
+        source_path=default_prompt.source_path,
+        source_sha256=default_prompt.source_sha256,
+        contract_sha256=default_prompt.contract_sha256,
+        evidence_sha256=dict(default_prompt.evidence_sha256),
+        rendered_sha256=rendered_hash,
+        byte_count=len(prompt),
+        kind=default_prompt.kind,
+    )
+
+
+def _source_terminal_action(
+    context: _WorkflowContext,
+    action: Literal["finish", "human_pause"],
+) -> bool:
+    decision = _call_prompt_source(context, action, None)
+    if decision is None:
+        return True
+    if decision.action == "human_pause":
+        return False
+    if decision.prompt not in {None, b""}:
+        context.state = _pause(
+            context,
+            "human_paused",
+            "prompt_source_invalid",
+            "A terminal replay action unexpectedly contained prompt bytes.",
+        )
+        return False
+    return True
 
 
 def _queue_or_limit_repair(

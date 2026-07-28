@@ -1,0 +1,1371 @@
+"""Thin autonomous Stage 5A historical-replay campaign controller."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol, cast
+from uuid import UUID
+
+from pydantic import ValidationError
+
+from research_automation_supervisor.codex_adapter import (
+    CodexProcessLaunch,
+    run_prepared_codex,
+)
+from research_automation_supervisor.codex_models import (
+    ROLE_POLICIES,
+    CodexRunRequest,
+    CodexRunResult,
+    PreparedCodexRequest,
+)
+from research_automation_supervisor.errors import (
+    LiveShadowDependencyError,
+    ReplayCampaignDependencyError,
+    ReplayCampaignInputError,
+    ReplayCampaignLockError,
+    ReplayCampaignStateError,
+    WorkflowInputError,
+    WorkflowLockError,
+    WorkflowPromptSourceError,
+    WorkflowStateError,
+)
+from research_automation_supervisor.live_shadow_engine import SupervisorInvoker
+from research_automation_supervisor.live_shadow_isolation import (
+    RECORDED_AUTH_SOURCE,
+    BubblewrapCapability,
+    IsolationPreflight,
+    build_bubblewrap_process_launch,
+    preflight_bubblewrap_isolation,
+)
+from research_automation_supervisor.redaction import redact_text
+from research_automation_supervisor.replay_campaign_models import (
+    ReplayCampaignState,
+    SupervisorAction,
+)
+from research_automation_supervisor.replay_campaign_prompts import (
+    SUPERVISOR_ACTION_SCHEMA,
+    build_supervisor_request,
+)
+from research_automation_supervisor.replay_campaign_sources import (
+    PreparedReplayCampaign,
+    PreparedReplayTask,
+    load_human_replay_decision,
+    load_replay_campaign_specification,
+)
+from research_automation_supervisor.test_runner import (
+    TestAttemptResult,
+    TestSuiteResult,
+    run_test_attempt,
+)
+from research_automation_supervisor.workflow_engine import (
+    WorkflowPromptDecision,
+    WorkflowPromptRequest,
+    WorkflowServices,
+    _canonical_json,
+    _resolve_codex_executable,
+    _utc_string,
+    _WorkflowLock,
+    _write_json,
+    resume_prompt_source_substage,
+    run_substage,
+)
+from research_automation_supervisor.workflow_integrity import sha256_regular_file
+from research_automation_supervisor.workflow_models import WorkflowResult
+
+ZERO_HASH = "0" * 64
+STATE_FILE = "state.json"
+JOURNAL_FILE = "journal.jsonl"
+REPORT_FILE = "campaign-report.json"
+DEFAULT_REPLAY_RUNS_DIRECTORY = (
+    Path(tempfile.gettempdir()) / "research-automation-supervisor-replay-campaigns"
+)
+
+
+class GoldTestInvoker(Protocol):
+    def __call__(
+        self,
+        prepared_test: Any,
+        artifact_directory: Path,
+        action_id: str,
+        *,
+        environ: Mapping[str, str] | None,
+    ) -> TestAttemptResult: ...
+
+
+class NotificationInvoker(Protocol):
+    def __call__(self, payload: Mapping[str, str]) -> None: ...
+
+
+@dataclass(frozen=True)
+class ReplayCampaignServices:
+    """Injectable process boundaries for fake-Codex campaign tests."""
+
+    codex_executable: str | None = None
+    supervisor_invoker: SupervisorInvoker | None = None
+    workflow_services: WorkflowServices | None = None
+    gold_test_invoker: GoldTestInvoker = run_test_attempt
+    notification_invoker: NotificationInvoker | None = None
+    isolation_preflight: IsolationPreflight = preflight_bubblewrap_isolation
+    bubblewrap_executable: str | None = None
+    codex_authentication_file: Path | None = None
+    environ: Mapping[str, str] | None = None
+    token_factory: Callable[[], str] = lambda: secrets.token_hex(16)
+    utc_now: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+
+DEFAULT_REPLAY_CAMPAIGN_SERVICES = ReplayCampaignServices()
+
+
+@dataclass
+class _CampaignContext:
+    prepared: PreparedReplayCampaign
+    run_directory: Path
+    state: ReplayCampaignState
+    services: ReplayCampaignServices
+    codex_executable: str
+    isolation_capability: BubblewrapCapability | None
+
+
+def run_replay_campaign(
+    path: Path,
+    *,
+    runs_dir: Path = DEFAULT_REPLAY_RUNS_DIRECTORY,
+    services: ReplayCampaignServices = DEFAULT_REPLAY_CAMPAIGN_SERVICES,
+) -> ReplayCampaignState:
+    """Create and synchronously drive one ordered historical replay campaign."""
+    prepared = load_replay_campaign_specification(
+        path,
+        environ=None if services.environ is None else dict(services.environ),
+    )
+    executable = _resolve_campaign_codex(services)
+    token = services.token_factory()
+    if (
+        not token
+        or len(token) > 80
+        or not token.replace("-", "").replace("_", "").isalnum()
+    ):
+        raise ReplayCampaignInputError("replay campaign run token is invalid")
+    try:
+        root = runs_dir.resolve(strict=False)
+        root.mkdir(parents=True, exist_ok=True)
+        run_directory = root / f"{prepared.specification.campaign_id}-{token}"
+        run_directory.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        raise ReplayCampaignInputError(
+            "exclusive replay campaign run directory already exists"
+        ) from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ReplayCampaignInputError(
+            "replay campaign run directory could not be created"
+        ) from exc
+    capability = _prepare_isolation(
+        prepared,
+        run_directory,
+        executable,
+        services,
+    )
+    now = _utc_string(services.utc_now())
+    state = ReplayCampaignState(
+        campaign_id=prepared.specification.campaign_id,
+        run_token=token,
+        specification_path=str(prepared.specification_path),
+        specification_sha256=prepared.specification_sha256,
+        current_task_index=0,
+        completed_task_ids=(),
+        current_task_run=None,
+        supervisor_session_id=None,
+        task_worker_session_ids={},
+        human_assisted_task_ids=(),
+        status="initialized",
+        pause_reason=None,
+        journal_sequence=0,
+        journal_hash=ZERO_HASH,
+        started_at=now,
+        updated_at=now,
+    )
+    _persist_state(run_directory, state)
+    context = _CampaignContext(
+        prepared=prepared,
+        run_directory=run_directory,
+        state=state,
+        services=services,
+        codex_executable=executable,
+        isolation_capability=capability,
+    )
+    context.state = _event(
+        context,
+        "campaign_initialized",
+        {"status": "running"},
+        {
+            str(prepared.specification_path): prepared.specification_sha256,
+        },
+    )
+    with _campaign_lock(run_directory, services.utc_now):
+        return _drive(context)
+
+
+def resume_replay_campaign(
+    run_directory: Path,
+    *,
+    decision_path: Path,
+    services: ReplayCampaignServices = DEFAULT_REPLAY_CAMPAIGN_SERVICES,
+) -> ReplayCampaignState:
+    """Apply one immutable decision and resume the exact paused campaign sessions."""
+    resolved = _resolve_run(run_directory)
+    with _campaign_lock(resolved, services.utc_now):
+        state = _load_state(resolved)
+        _validate_journal(resolved, state)
+        if state.status != "human_paused":
+            raise ReplayCampaignInputError("only a human-paused campaign can be resumed")
+        prepared = load_replay_campaign_specification(
+            Path(state.specification_path),
+            environ=None if services.environ is None else dict(services.environ),
+            require_clean=False,
+        )
+        if prepared.specification_sha256 != state.specification_sha256:
+            raise ReplayCampaignStateError("campaign specification changed before resume")
+        decision, decision_bytes, _source = load_human_replay_decision(decision_path)
+        decision_index = len(list((resolved / "human-decisions").glob("*.yaml")))
+        destination = resolved / "human-decisions" / f"decision-{decision_index:03d}.yaml"
+        if destination.exists():
+            raise ReplayCampaignStateError("human decision destination already exists")
+        _atomic_write_bytes(destination, decision_bytes)
+        executable = _resolve_campaign_codex(services)
+        capability = _prepare_isolation(
+            prepared,
+            resolved,
+            executable,
+            services,
+            recovery=True,
+        )
+        context = _CampaignContext(
+            prepared=prepared,
+            run_directory=resolved,
+            state=state,
+            services=services,
+            codex_executable=executable,
+            isolation_capability=capability,
+        )
+        task_id = prepared.tasks[state.current_task_index].specification.task_id
+        assisted = tuple(dict.fromkeys((*state.human_assisted_task_ids, task_id)))
+        context.state = _event(
+            context,
+            "human_decision_recorded",
+            {
+                "status": "aborted" if decision.decision == "abort" else "running",
+                "pause_reason": (
+                    f"Human abort: {decision.note}" if decision.decision == "abort" else None
+                ),
+                "human_assisted_task_ids": assisted,
+            },
+            {
+                str(destination): sha256_regular_file(destination),
+            },
+        )
+        if decision.decision == "abort":
+            _record_notification(context, "failed_safely", task_id)
+            _write_report(context)
+            return context.state
+        return _drive(context, resume_current=True)
+
+
+def replay_campaign_status(run_directory: Path) -> ReplayCampaignState:
+    """Read and verify campaign status without mutation or model launches."""
+    resolved = _resolve_run(run_directory)
+    state = _load_state(resolved)
+    _validate_journal(resolved, state)
+    try:
+        current_hash = sha256_regular_file(Path(state.specification_path))
+    except (OSError, WorkflowStateError) as exc:
+        raise ReplayCampaignStateError("campaign specification is unavailable") from exc
+    if current_hash != state.specification_sha256:
+        raise ReplayCampaignStateError("campaign specification changed")
+    return state
+
+
+def replay_campaign_exit_code(status: str) -> int:
+    """Map Stage 5A states to the CLI contract."""
+    return {
+        "completed": 0,
+        "human_paused": 5,
+        "failed": 4,
+        "aborted": 8,
+        "initialized": 4,
+        "running": 4,
+    }[status]
+
+
+def _drive(
+    context: _CampaignContext,
+    *,
+    resume_current: bool = False,
+) -> ReplayCampaignState:
+    while context.state.current_task_index < len(context.prepared.tasks):
+        task = context.prepared.tasks[context.state.current_task_index]
+        started = context.services.utc_now()
+        source = _CampaignPromptSource(context, task)
+        workflow_services = _workflow_services(context, source)
+        try:
+            if resume_current:
+                if context.state.current_task_run is None:
+                    raise ReplayCampaignStateError(
+                        "paused campaign has no current Stage 2 run"
+                    )
+                workflow = resume_prompt_source_substage(
+                    Path(context.state.current_task_run),
+                    services=workflow_services,
+                )
+                resume_current = False
+            else:
+                workflow = run_substage(
+                    task.stage2.specification_path,
+                    runs_dir=(
+                        context.run_directory
+                        / "tasks"
+                        / task.specification.task_id
+                        / "stage2"
+                    ),
+                    services=workflow_services,
+                )
+        except (WorkflowInputError, WorkflowStateError, WorkflowLockError) as exc:
+            return _pause_campaign(
+                context,
+                "unsafe_workflow_state",
+                str(exc),
+                task,
+            )
+        if context.state.current_task_run != workflow.artifact_directory:
+            context.state = _event(
+                context,
+                "stage2_run_recorded",
+                {"current_task_run": workflow.artifact_directory},
+                {},
+            )
+        if workflow.worker_thread_id is not None:
+            sessions = {
+                **context.state.task_worker_session_ids,
+                task.specification.task_id: workflow.worker_thread_id,
+            }
+            context.state = _event(
+                context,
+                "worker_session_recorded",
+                {"task_worker_session_ids": sessions},
+                {},
+            )
+        if workflow.status != "completed":
+            _write_paused_task_summary(context, task, workflow)
+            category = _workflow_pause_category(workflow)
+            return _pause_campaign(
+                context,
+                category,
+                workflow.pause_reason or workflow.status,
+                task,
+            )
+
+        # Gold is intentionally first opened and executed only after Stage 2 is terminal.
+        gold = _run_gold_evaluations(context, task)
+        elapsed = max(
+            0.0,
+            (context.services.utc_now() - started).total_seconds(),
+        )
+        _write_task_summary(context, task, workflow, gold, elapsed)
+        completed = (*context.state.completed_task_ids, task.specification.task_id)
+        context.state = _event(
+            context,
+            "task_completed",
+            {
+                "completed_task_ids": completed,
+                "current_task_index": context.state.current_task_index + 1,
+                "current_task_run": None,
+            },
+            {},
+        )
+        _write_report(context)
+
+    context.state = _event(
+        context,
+        "campaign_completed",
+        {"status": "completed", "pause_reason": None},
+        {},
+    )
+    _record_notification(context, "campaign_completed", None)
+    _write_report(context)
+    return context.state
+
+
+class _CampaignPromptSource:
+    """Persistent-supervisor bridge used only at Stage 2 action boundaries."""
+
+    def __init__(
+        self,
+        context: _CampaignContext,
+        task: PreparedReplayTask,
+    ) -> None:
+        self.context = context
+        self.task = task
+
+    def __call__(self, request: WorkflowPromptRequest) -> WorkflowPromptDecision:
+        if self.context.state.current_task_run is None:
+            self.context.state = _event(
+                self.context,
+                "stage2_run_recorded",
+                {"current_task_run": str(request.run_directory)},
+                {},
+            )
+        attempt = _human_attempt(self.context.run_directory, self.task.specification.task_id)
+        key = (
+            f"{self.task.specification.task_id}-{request.action}-"
+            f"r{request.repair_round:03d}-h{attempt:03d}"
+        )
+        action_path = self.context.run_directory / "supervisor" / "actions" / f"{key}.json"
+        if action_path.exists():
+            record = _read_json(action_path)
+            try:
+                action = SupervisorAction.model_validate(record["action"])
+            except (KeyError, ValidationError) as exc:
+                raise WorkflowPromptSourceError(
+                    "durable supervisor action is invalid"
+                ) from exc
+            session = record.get("supervisor_session_id")
+            if not isinstance(session, str):
+                raise WorkflowPromptSourceError(
+                    "durable supervisor session UUID is missing"
+                )
+            if self.context.state.supervisor_session_id not in {None, session}:
+                raise WorkflowPromptSourceError(
+                    "durable supervisor session UUID contradicts campaign state"
+                )
+            if self.context.state.supervisor_session_id is None:
+                self.context.state = _event(
+                    self.context,
+                    "supervisor_action_recovered",
+                    {"supervisor_session_id": session},
+                    {str(action_path): sha256_regular_file(action_path)},
+                )
+            return _workflow_decision(action)
+        rendered = build_supervisor_request(
+            self.context.prepared,
+            self.task,
+            request,
+        )
+        turn_index = len(
+            list((self.context.run_directory / "supervisor/requests").glob("*"))
+        )
+        action_id = f"supervisor-{turn_index:04d}"
+        request_directory = (
+            self.context.run_directory / "supervisor" / "requests" / action_id
+        )
+        request_directory.mkdir(parents=True, exist_ok=False)
+        schema_path = request_directory / "output-schema.json"
+        _write_json(schema_path, SUPERVISOR_ACTION_SCHEMA)
+        _write_json(
+            request_directory / "request.json",
+            {
+                "schema_version": 1,
+                "action_id": action_id,
+                "task_id": self.task.specification.task_id,
+                "boundary": request.action,
+                "repair_round": request.repair_round,
+                "prompt_sha256": rendered.sha256,
+                "prompt_byte_count": rendered.byte_count,
+                "visible_evidence": rendered.visible_evidence,
+                "gold_evidence_included": False,
+            },
+        )
+        prepared = _prepared_supervisor_request(
+            self.context,
+            action_id,
+            rendered.content,
+        )
+        resume_id = self.context.state.supervisor_session_id
+        result = _invoke_supervisor(
+            self.context,
+            prepared,
+            schema_path,
+            resume_id,
+        )
+        if result.status != "succeeded":
+            raise WorkflowPromptSourceError(
+                f"supervisor transport failed safely: {result.status}"
+            )
+        session_id = _exact_supervisor_session(result, resume_id)
+        action = _parse_supervisor_action(result)
+        unauthorized = action.requests_authority_change
+        if unauthorized:
+            action = action.model_copy(
+                update={
+                    "action": "human_pause",
+                    "prompt": "",
+                    "summary": "Supervisor requested an unauthorized authority change.",
+                }
+            )
+        elif action.action not in {request.action, "human_pause"}:
+            action = action.model_copy(
+                update={
+                    "action": "human_pause",
+                    "prompt": "",
+                    "summary": (
+                        "Supervisor action contradicted the authoritative Stage 2 boundary."
+                    ),
+                }
+            )
+        record = {
+            "schema_version": 1,
+            "key": key,
+            "action_id": action_id,
+            "task_id": self.task.specification.task_id,
+            "boundary": request.action,
+            "repair_round": request.repair_round,
+            "supervisor_session_id": session_id,
+            "resume_session_id": resume_id,
+            "adapter_result": result.to_dict(),
+            "action": action.model_dump(mode="json"),
+            "unauthorized_change_rejected": unauthorized,
+            "recorded_at": _utc_string(self.context.services.utc_now()),
+        }
+        _write_json(action_path, record)
+        updates: dict[str, object] = {}
+        if self.context.state.supervisor_session_id is None:
+            updates["supervisor_session_id"] = session_id
+        self.context.state = _event(
+            self.context,
+            "supervisor_action_recorded",
+            updates,
+            {
+                str(action_path): sha256_regular_file(action_path),
+                str(request_directory / "request.json"): sha256_regular_file(
+                    request_directory / "request.json"
+                ),
+            },
+        )
+        if unauthorized:
+            raise WorkflowPromptSourceError(
+                "Supervisor requested an unauthorized contract, scope, permission, "
+                "acceptance, or convention change."
+            )
+        return _workflow_decision(action)
+
+
+def _workflow_decision(action: SupervisorAction) -> WorkflowPromptDecision:
+    return WorkflowPromptDecision(
+        action=action.action,
+        prompt=action.prompt.encode("utf-8") if action.prompt else None,
+        summary=action.summary,
+    )
+
+
+def _prepared_supervisor_request(
+    context: _CampaignContext,
+    action_id: str,
+    prompt: bytes,
+) -> PreparedCodexRequest:
+    specification = context.prepared.specification
+    request = CodexRunRequest(
+        schema_version=1,
+        run_id=action_id,
+        role="supervisor",
+        workspace=str(context.run_directory / "quarantine" / "workspace"),
+        prompt_path=str(context.prepared.supervisor_policy.path),
+        model=specification.supervisor_model,
+        reasoning_effort=specification.supervisor_reasoning_effort,
+        timeout_seconds=specification.supervisor_timeout_seconds,
+    )
+    return PreparedCodexRequest(
+        request_path=context.prepared.specification_path,
+        request=request,
+        workspace=context.run_directory / "quarantine" / "workspace",
+        prompt_path=context.prepared.supervisor_policy.path,
+        prompt_bytes=prompt,
+        prompt_sha256=hashlib.sha256(prompt).hexdigest(),
+        policy=ROLE_POLICIES["supervisor"],
+    )
+
+
+def _invoke_supervisor(
+    context: _CampaignContext,
+    request: PreparedCodexRequest,
+    schema_path: Path,
+    resume_id: str | None,
+) -> CodexRunResult:
+    runs = context.run_directory / "supervisor" / "codex"
+    invoker = context.services.supervisor_invoker
+    confidential = (
+        context.prepared.supervisor_policy.content.decode("utf-8"),
+        *(
+            task.stage2.contract.content.decode("utf-8")
+            for task in context.prepared.tasks
+        ),
+    )
+    if invoker is not None:
+        return invoker(
+            request,
+            runs_dir=runs,
+            codex_executable=context.codex_executable,
+            environ=context.services.environ,
+            output_schema=schema_path,
+            resume_thread_id=resume_id,
+            skip_git_repo_check=True,
+            confidential_fragments=confidential,
+            process_started=None,
+            process_finished=None,
+        )
+    capability = context.isolation_capability
+    if capability is None:
+        raise ReplayCampaignDependencyError("supervisor isolation is unavailable")
+
+    def isolated_launch(
+        command: Sequence[str],
+        prepared_request: PreparedCodexRequest,
+        environment: Mapping[str, str],
+        final_message_path: Path,
+        output_schema: Path | None,
+    ) -> CodexProcessLaunch:
+        return build_bubblewrap_process_launch(
+            command,
+            prepared_request,
+            environment,
+            final_message_path,
+            output_schema,
+            capability=capability,
+            stage4_run_root=context.run_directory,
+            runtime_home=context.run_directory / "quarantine" / "codex-home",
+            forbidden_roots=_forbidden_roots(
+                context.prepared,
+                context.run_directory,
+            ),
+        )
+
+    return run_prepared_codex(
+        request,
+        runs_dir=runs,
+        codex_executable=context.codex_executable,
+        environ=context.services.environ,
+        output_schema=schema_path,
+        resume_thread_id=resume_id,
+        skip_git_repo_check=True,
+        confidential_fragments=confidential,
+        rejected_confidential_fragments=(),
+        durable_command_replacements={
+            str(capability.authentication_file): RECORDED_AUTH_SOURCE,
+        },
+        process_launch_builder=isolated_launch,
+        version_probe=lambda _executable, _environment, _workspace: None,
+    )
+
+
+def _exact_supervisor_session(
+    result: CodexRunResult,
+    resume_id: str | None,
+) -> str:
+    metadata = _read_json(Path(result.artifact_directory) / "metadata.json")
+    values = metadata.get("thread_started_ids")
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str):
+        raise WorkflowPromptSourceError(
+            "supervisor turn did not expose one exact session UUID"
+        )
+    value = values[0]
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise WorkflowPromptSourceError("supervisor session ID is not a UUID") from exc
+    if str(parsed) != value:
+        raise WorkflowPromptSourceError("supervisor session UUID is not canonical")
+    if resume_id is not None and value != resume_id:
+        raise WorkflowPromptSourceError("supervisor resume changed the exact session UUID")
+    return value
+
+
+def _parse_supervisor_action(result: CodexRunResult) -> SupervisorAction:
+    path = Path(result.artifact_directory) / "final-message.md"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return SupervisorAction.model_validate(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+        raise WorkflowPromptSourceError(
+            "supervisor structured action is missing or invalid"
+        ) from exc
+
+
+def _workflow_services(
+    context: _CampaignContext,
+    source: _CampaignPromptSource,
+) -> WorkflowServices:
+    base = context.services.workflow_services or WorkflowServices(
+        codex_executable=context.codex_executable,
+        environ=context.services.environ,
+    )
+    return replace(base, prompt_source=source)
+
+
+def _run_gold_evaluations(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+) -> TestSuiteResult:
+    results: list[TestAttemptResult] = []
+    failed = False
+    for index, prepared_test in enumerate(task.gold_evaluations):
+        action_id = f"gold-{index:03d}-{prepared_test.specification.id}"
+        destination = (
+            context.run_directory
+            / "tasks"
+            / task.specification.task_id
+            / "gold"
+            / action_id
+        )
+        result = context.services.gold_test_invoker(
+            prepared_test,
+            destination,
+            action_id,
+            environ=context.services.environ,
+        )
+        results.append(result)
+        failed = failed or not result.passed
+    suite = TestSuiteResult(passed=not failed, results=tuple(results))
+    _write_json(
+        context.run_directory
+        / "tasks"
+        / task.specification.task_id
+        / "gold"
+        / "suite.json",
+        suite.to_dict(),
+    )
+    return suite
+
+
+def _write_task_summary(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    workflow: WorkflowResult,
+    gold: TestSuiteResult,
+    elapsed_seconds: float,
+) -> None:
+    stage2 = Path(workflow.artifact_directory)
+    actions = _supervisor_actions_for_task(context.run_directory, task.specification.task_id)
+    worker_reports = _read_matching(stage2 / "worker", "*.structured.json")
+    auditor_reports = _read_matching(stage2 / "audits", "*.structured.json")
+    state = _read_json(stage2 / "state.json")
+    git_evidence = _read_optional_path(state.get("latest_git_evidence_path"))
+    final_diff = None
+    if isinstance(git_evidence, dict):
+        patch = git_evidence.get("patch_artifact")
+        if isinstance(patch, str):
+            with suppress(OSError):
+                final_diff = Path(patch).read_text(encoding="utf-8", errors="replace")
+    metadata_paths = sorted(stage2.glob("worker/codex/*/metadata.json")) + sorted(
+        stage2.glob("audits/codex/*/metadata.json")
+    )
+    metadata = [_read_json(path) for path in metadata_paths]
+    process_count = sum(1 for item in metadata if item.get("process_launched") is True)
+    supervisor_processes = sum(
+        1
+        for item in actions
+        if isinstance(item.get("adapter_result"), dict)
+        and item["adapter_result"].get("status") == "succeeded"
+    )
+    assisted = task.specification.task_id in context.state.human_assisted_task_ids
+    verdict = (
+        "gold_mismatch"
+        if not gold.passed
+        else "human_assisted"
+        if assisted
+        else "autonomous"
+    )
+    _write_json(
+        context.run_directory
+        / "tasks"
+        / task.specification.task_id
+        / "task-report.json",
+        {
+            "schema_version": 1,
+            "task_id": task.specification.task_id,
+            "title": task.specification.title,
+            "verdict": verdict,
+            "supervisor_instructions_and_actions": actions,
+            "worker_requests": _read_matching(
+                stage2 / "worker/codex", "*/request.normalized.json"
+            ),
+            "worker_reports": worker_reports,
+            "auditor_requests": _read_matching(
+                stage2 / "audits/codex", "*/request.normalized.json"
+            ),
+            "auditor_reports": auditor_reports,
+            "tests": _read_matching(stage2 / "tests", "round-*/suite.json"),
+            "git_scope_evidence": git_evidence,
+            "repair_rounds": workflow.repair_round,
+            "uuids": {
+                "supervisor": context.state.supervisor_session_id,
+                "worker": workflow.worker_thread_id,
+                "auditors": [
+                    item.get("thread_started_ids", [])
+                    for item in metadata
+                    if item.get("role") == "auditor"
+                ],
+            },
+            "human_pauses_and_decisions": _human_records(
+                context.run_directory,
+                task.specification.task_id,
+            ),
+            "notifications": _notifications(context.run_directory),
+            "final_diff": final_diff,
+            "gold_hidden_until_terminal": True,
+            "model_turns_after_gold_reveal": 0,
+            "gold_evaluation": gold.to_dict(),
+            "production_profile": task.specification.production_profile.model_dump(
+                mode="json"
+            ),
+            "build_runtime_evidence": gold.to_dict(),
+            "elapsed_seconds": elapsed_seconds,
+            "process_count": process_count + supervisor_processes + len(gold.results),
+            "model_turn_count": len(metadata) + len(actions),
+            "stage2_result": workflow.to_dict(),
+        },
+    )
+
+
+def _write_paused_task_summary(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    workflow: WorkflowResult,
+) -> None:
+    stage2 = Path(workflow.artifact_directory)
+    state = _read_json(stage2 / "state.json")
+    _write_json(
+        context.run_directory
+        / "tasks"
+        / task.specification.task_id
+        / "task-report.json",
+        {
+            "schema_version": 1,
+            "task_id": task.specification.task_id,
+            "title": task.specification.title,
+            "verdict": "failed",
+            "supervisor_instructions_and_actions": _supervisor_actions_for_task(
+                context.run_directory,
+                task.specification.task_id,
+            ),
+            "worker_requests": _read_matching(
+                stage2 / "worker/codex", "*/request.normalized.json"
+            ),
+            "worker_reports": _read_matching(stage2 / "worker", "*.structured.json"),
+            "auditor_requests": _read_matching(
+                stage2 / "audits/codex", "*/request.normalized.json"
+            ),
+            "auditor_reports": _read_matching(stage2 / "audits", "*.structured.json"),
+            "tests": _read_matching(stage2 / "tests", "round-*/suite.json"),
+            "git_scope_evidence": _read_optional_path(
+                state.get("latest_git_evidence_path")
+            ),
+            "repair_rounds": workflow.repair_round,
+            "uuids": {
+                "supervisor": context.state.supervisor_session_id,
+                "worker": workflow.worker_thread_id,
+            },
+            "human_pauses_and_decisions": _human_records(
+                context.run_directory,
+                task.specification.task_id,
+            ),
+            "notifications": _notifications(context.run_directory),
+            "final_diff": None,
+            "gold_hidden_until_terminal": True,
+            "model_turns_after_gold_reveal": 0,
+            "gold_evaluation": None,
+            "production_profile": task.specification.production_profile.model_dump(
+                mode="json"
+            ),
+            "build_runtime_evidence": None,
+            "elapsed_seconds": 0.0,
+            "process_count": 0,
+            "model_turn_count": len(
+                _supervisor_actions_for_task(
+                    context.run_directory,
+                    task.specification.task_id,
+                )
+            ),
+            "stage2_result": workflow.to_dict(),
+        },
+    )
+
+
+def _pause_campaign(
+    context: _CampaignContext,
+    category: str,
+    detail: str,
+    task: PreparedReplayTask,
+) -> ReplayCampaignState:
+    safe_detail = redact_text(detail, context.prepared.sensitive_values)[:16_384]
+    worker_id = context.state.task_worker_session_ids.get(
+        task.specification.task_id,
+        "not established",
+    )
+    context.state = _event(
+        context,
+        "human_review_required",
+        {
+            "status": "human_paused",
+            "pause_reason": category,
+        },
+        {},
+    )
+    packet = context.run_directory / "human-review-packet.md"
+    _atomic_write_bytes(
+        packet,
+        (
+            "# Human review required\n\n"
+            f"- Campaign: {context.state.campaign_id}\n"
+            f"- Task: {task.specification.task_id}\n"
+            f"- Safe reason category: {category}\n"
+            f"- Detail: {safe_detail}\n"
+            f"- Stage 2 run: {context.state.current_task_run or 'not created'}\n"
+            f"- Supervisor UUID: {context.state.supervisor_session_id or 'not established'}\n"
+            f"- Worker UUID: {worker_id}\n"
+            f"- Resume: resume-replay-campaign {context.run_directory} "
+            "--decision DECISION.yaml\n"
+        ).encode(),
+    )
+    _record_notification(
+        context,
+        "human_review_required",
+        task.specification.task_id,
+    )
+    _write_report(context)
+    return context.state
+
+
+def _record_notification(
+    context: _CampaignContext,
+    category: str,
+    task_id: str | None,
+) -> None:
+    payload = {
+        "campaign_id": context.state.campaign_id,
+        "task_id": task_id or "-",
+        "reason_category": category,
+        "run_directory": str(context.run_directory),
+        "resume_command": (
+            f"resume-replay-campaign {context.run_directory} --decision DECISION.yaml"
+        ),
+    }
+    status = "succeeded"
+    error: str | None = None
+    try:
+        invoker = context.services.notification_invoker or _windows_notification
+        invoker(payload)
+    except Exception as exc:
+        status = "failed"
+        error = type(exc).__name__
+    directory = context.run_directory / "notifications"
+    index = len(list(directory.glob("*.json")))
+    _write_json(
+        directory / f"notification-{index:03d}.json",
+        {
+            "schema_version": 1,
+            "payload": payload,
+            "status": status,
+            "error_category": error,
+            "recorded_at": _utc_string(context.services.utc_now()),
+        },
+    )
+    if task_id is not None:
+        task_report = (
+            context.run_directory / "tasks" / task_id / "task-report.json"
+        )
+        if task_report.is_file():
+            report = _read_json(task_report)
+            report["notifications"] = _notifications(context.run_directory)
+            _write_json(task_report, report)
+
+
+def _windows_notification(payload: Mapping[str, str]) -> None:
+    executable = shutil.which("powershell.exe") or shutil.which("powershell")
+    if executable is None:
+        raise ReplayCampaignDependencyError("Windows PowerShell notification helper is absent")
+    text = "\n".join(
+        (
+            f"Campaign: {payload['campaign_id']}",
+            f"Task: {payload['task_id']}",
+            f"Reason: {payload['reason_category']}",
+            f"Run: {payload['run_directory']}",
+            f"Resume: {payload['resume_command']}",
+        )
+    )
+    command = (
+        executable,
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "param([string]$Message); "
+            "Add-Type -AssemblyName PresentationFramework; "
+            "[System.Windows.MessageBox]::Show($Message, 'Research Replay Campaign') "
+            "| Out-Null"
+        ),
+        text,
+    )
+    completed = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=15,
+        close_fds=True,
+    )
+    if completed.returncode != 0:
+        raise ReplayCampaignDependencyError("Windows notification helper failed")
+
+
+def _prepare_isolation(
+    prepared: PreparedReplayCampaign,
+    run_directory: Path,
+    executable: str,
+    services: ReplayCampaignServices,
+    *,
+    recovery: bool = False,
+) -> BubblewrapCapability | None:
+    resolved_run = run_directory.resolve(strict=False)
+    for root in _forbidden_roots(prepared, run_directory):
+        if _path_contains(root, resolved_run) or _path_contains(resolved_run, root):
+            raise ReplayCampaignInputError(
+                "campaign run directory must be disjoint from replay and gold roots"
+            )
+    quarantine = run_directory / "quarantine"
+    workspace = quarantine / "workspace"
+    runtime_home = quarantine / "codex-home"
+    try:
+        quarantine.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(exist_ok=True)
+        runtime_home.mkdir(exist_ok=True)
+    except OSError as exc:
+        raise ReplayCampaignInputError("supervisor quarantine could not be created") from exc
+    if services.supervisor_invoker is not None:
+        return None
+    try:
+        return services.isolation_preflight(
+            bubblewrap_executable=services.bubblewrap_executable,
+            codex_executable=executable,
+            authentication_file=services.codex_authentication_file,
+            environ=services.environ,
+            forbidden_roots=_forbidden_roots(prepared, run_directory),
+        )
+    except LiveShadowDependencyError as exc:
+        label = "recovery" if recovery else "launch"
+        raise ReplayCampaignDependencyError(
+            f"supervisor isolation unavailable during {label}"
+        ) from exc
+
+
+def _forbidden_roots(
+    prepared: PreparedReplayCampaign,
+    run_directory: Path,
+) -> tuple[Path, ...]:
+    roots = [
+        task.stage2.repository_root for task in prepared.tasks
+    ] + [
+        root for task in prepared.tasks for root in task.gold_roots
+    ]
+    unique: list[Path] = []
+    for root in roots:
+        resolved = root.resolve(strict=False)
+        if resolved not in unique:
+            unique.append(resolved)
+    if len(unique) < 2:
+        raise ReplayCampaignInputError(
+            "campaign isolation requires distinct replay and gold roots"
+        )
+    return tuple(unique)
+
+
+def _path_contains(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_campaign_codex(services: ReplayCampaignServices) -> str:
+    value = services.codex_executable
+    if value is None and services.workflow_services is not None:
+        value = services.workflow_services.codex_executable
+    try:
+        return _resolve_codex_executable(value)
+    except Exception as exc:
+        raise ReplayCampaignDependencyError("Codex executable is required") from exc
+
+
+def _event(
+    context: _CampaignContext,
+    reason: str,
+    updates: Mapping[str, object],
+    artifacts: Mapping[str, str],
+) -> ReplayCampaignState:
+    if context.state.journal_sequence:
+        _validate_journal(context.run_directory, context.state)
+    timestamp = _utc_string(context.services.utc_now())
+    body = {
+        "schema_version": 1,
+        "sequence": context.state.journal_sequence + 1,
+        "previous_state": (
+            None if context.state.journal_sequence == 0 else context.state.status
+        ),
+        "new_state": updates.get("status", context.state.status),
+        "timestamp": timestamp,
+        "reason": reason,
+        "artifact_hashes": dict(sorted(artifacts.items())),
+        "state_updates": _json_compatible(updates),
+        "previous_hash": context.state.journal_hash,
+    }
+    digest = hashlib.sha256(_canonical_json(body)).hexdigest()
+    entry = {**body, "entry_hash": digest}
+    journal = context.run_directory / JOURNAL_FILE
+    try:
+        with journal.open("ab") as handle:
+            handle.write(_canonical_json(entry))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise ReplayCampaignStateError("campaign journal could not be appended") from exc
+    copied = dict(updates)
+    copied.update(
+        {
+            "journal_sequence": context.state.journal_sequence + 1,
+            "journal_hash": digest,
+            "updated_at": timestamp,
+        }
+    )
+    context.state = context.state.model_copy(update=copied)
+    _persist_state(context.run_directory, context.state)
+    return context.state
+
+
+def _validate_journal(run_directory: Path, state: ReplayCampaignState) -> None:
+    try:
+        lines = (run_directory / JOURNAL_FILE).read_bytes().splitlines()
+    except OSError as exc:
+        raise ReplayCampaignStateError("campaign journal is missing") from exc
+    previous = ZERO_HASH
+    replay: dict[str, object] = {
+        "current_task_index": 0,
+        "completed_task_ids": [],
+        "current_task_run": None,
+        "supervisor_session_id": None,
+        "task_worker_session_ids": {},
+        "human_assisted_task_ids": [],
+        "status": "initialized",
+        "pause_reason": None,
+    }
+    last_timestamp: str | None = None
+    for index, line in enumerate(lines, start=1):
+        try:
+            entry = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReplayCampaignStateError("campaign journal is malformed") from exc
+        if (
+            not isinstance(entry, dict)
+            or entry.get("sequence") != index
+            or entry.get("previous_hash") != previous
+        ):
+            raise ReplayCampaignStateError("campaign journal chain is invalid")
+        body = {key: value for key, value in entry.items() if key != "entry_hash"}
+        digest = hashlib.sha256(_canonical_json(body)).hexdigest()
+        if entry.get("entry_hash") != digest:
+            raise ReplayCampaignStateError("campaign journal hash is invalid")
+        updates = entry.get("state_updates")
+        if not isinstance(updates, dict) or any(
+            key not in replay for key in updates
+        ):
+            raise ReplayCampaignStateError("campaign journal state update is invalid")
+        replay.update(updates)
+        if entry.get("new_state") != replay["status"]:
+            raise ReplayCampaignStateError("campaign journal state transition is invalid")
+        timestamp = entry.get("timestamp")
+        if not isinstance(timestamp, str):
+            raise ReplayCampaignStateError("campaign journal timestamp is invalid")
+        last_timestamp = timestamp
+        artifacts = entry.get("artifact_hashes")
+        if not isinstance(artifacts, dict):
+            raise ReplayCampaignStateError("campaign journal artifacts are invalid")
+        for path, expected in artifacts.items():
+            if not isinstance(path, str) or not isinstance(expected, str):
+                raise ReplayCampaignStateError("campaign artifact mapping is invalid")
+            try:
+                actual = sha256_regular_file(Path(path))
+            except (OSError, WorkflowStateError) as exc:
+                raise ReplayCampaignStateError(
+                    "campaign journal evidence is missing"
+                ) from exc
+            if actual != expected:
+                raise ReplayCampaignStateError(
+                    "campaign journal evidence was replaced"
+                )
+        previous = digest
+    if (
+        len(lines) != state.journal_sequence
+        or previous != state.journal_hash
+        or not lines
+        or last_timestamp != state.updated_at
+    ):
+        raise ReplayCampaignStateError("campaign state disagrees with its journal")
+    snapshot = state.model_dump(mode="json")
+    if any(snapshot[key] != value for key, value in replay.items()):
+        raise ReplayCampaignStateError("campaign state contradicts journal replay")
+
+
+def _persist_state(run_directory: Path, state: ReplayCampaignState) -> None:
+    _write_json(run_directory / STATE_FILE, state.to_dict())
+
+
+def _load_state(run_directory: Path) -> ReplayCampaignState:
+    try:
+        return ReplayCampaignState.model_validate(
+            _read_json(run_directory / STATE_FILE)
+        )
+    except ValidationError as exc:
+        raise ReplayCampaignStateError("campaign state snapshot is invalid") from exc
+
+
+def _resolve_run(path: Path) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ReplayCampaignInputError("campaign run directory could not be resolved") from exc
+    if not resolved.is_dir():
+        raise ReplayCampaignInputError("campaign run path is not a directory")
+    return resolved
+
+
+@contextmanager
+def _campaign_lock(
+    run_directory: Path,
+    utc_now: Callable[[], datetime],
+) -> Iterator[None]:
+    try:
+        with _WorkflowLock(run_directory, utc_now):
+            yield
+    except WorkflowLockError as exc:
+        raise ReplayCampaignLockError(str(exc)) from exc
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReplayCampaignStateError("campaign JSON evidence is invalid") from exc
+    if not isinstance(value, dict):
+        raise ReplayCampaignStateError("campaign JSON evidence must be an object")
+    return cast(dict[str, Any], value)
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _json_compatible(value: object) -> object:
+    if hasattr(value, "model_dump"):
+        return cast(Any, value).model_dump(mode="json")
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_compatible(item) for item in value]
+    return value
+
+
+def _workflow_pause_category(result: WorkflowResult) -> str:
+    reason = result.pause_reason or result.status
+    if reason.startswith("worker_"):
+        return "worker_requires_human"
+    if reason.startswith("auditor_"):
+        return "auditor_requires_judgment"
+    if reason.endswith("repair_limit"):
+        return "repair_rounds_exhausted"
+    if reason.startswith("prompt_source"):
+        return "supervisor_requires_human"
+    return "unsafe_workflow_state"
+
+
+def _human_attempt(run_directory: Path, task_id: str) -> int:
+    del task_id
+    directory = run_directory / "human-decisions"
+    return len(list(directory.glob("*.yaml"))) if directory.exists() else 0
+
+
+def _read_optional_path(value: object) -> object:
+    if not isinstance(value, str):
+        return None
+    with suppress(ReplayCampaignStateError):
+        return _read_json(Path(value))
+    return None
+
+
+def _read_matching(root: Path, pattern: str) -> list[dict[str, Any]]:
+    return [_read_json(path) for path in sorted(root.glob(pattern))]
+
+
+def _supervisor_actions_for_task(
+    run_directory: Path,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    actions = _read_matching(run_directory / "supervisor/actions", "*.json")
+    return [action for action in actions if action.get("task_id") == task_id]
+
+
+def _human_records(run_directory: Path, task_id: str) -> list[dict[str, object]]:
+    del task_id
+    records: list[dict[str, object]] = []
+    for path in sorted((run_directory / "human-decisions").glob("*.yaml")):
+        records.append(
+            {
+                "path": str(path),
+                "sha256": sha256_regular_file(path),
+            }
+        )
+    return records
+
+
+def _notifications(run_directory: Path) -> list[dict[str, Any]]:
+    return _read_matching(run_directory / "notifications", "*.json")
+
+
+def _write_report(context: _CampaignContext) -> None:
+    task_reports = _read_matching(context.run_directory / "tasks", "*/task-report.json")
+    _write_json(
+        context.run_directory / REPORT_FILE,
+        {
+            "schema_version": 1,
+            "campaign_id": context.state.campaign_id,
+            "title": context.prepared.specification.title,
+            "status": context.state.status,
+            "current_task_index": context.state.current_task_index,
+            "completed_task_ids": list(context.state.completed_task_ids),
+            "supervisor_session_id": context.state.supervisor_session_id,
+            "task_worker_session_ids": context.state.task_worker_session_ids,
+            "human_assisted_task_ids": list(context.state.human_assisted_task_ids),
+            "pause_reason": context.state.pause_reason,
+            "tasks": task_reports,
+            "notifications": _notifications(context.run_directory),
+            "started_at": context.state.started_at,
+            "updated_at": context.state.updated_at,
+        },
+    )
