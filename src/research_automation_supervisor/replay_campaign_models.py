@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from research_automation_supervisor.codex_models import ModelName, ReasoningEffort
+from research_automation_supervisor.shadow_models import canonical_supervisor_uuid
 from research_automation_supervisor.workflow_models import (
     Identifier,
     WorkflowTest,
@@ -217,6 +218,21 @@ class HumanReplayDecision(BaseModel):
     note: Annotated[str, Field(max_length=16_384)]
 
 
+class PendingHumanDecision(BaseModel):
+    """Prepared human-decision identity between durable intent and completion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    index: Annotated[int, Field(ge=0)]
+    task_id: Identifier
+    decision: Literal["resume", "abort"]
+    prepared_path: str
+    destination_path: str
+    note_path: str
+    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    note_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
 class ReplayCampaignState(BaseModel):
     """Thin durable Stage 5A campaign snapshot."""
 
@@ -237,12 +253,27 @@ class ReplayCampaignState(BaseModel):
     human_assisted_task_ids: Annotated[
         tuple[Identifier, ...], BeforeValidator(_freeze_sequence)
     ]
+    human_decision_count: Annotated[int, Field(ge=0)] = 0
+    pending_human_decision: PendingHumanDecision | None = None
+    continuation_note_path: str | None = None
     status: ReplayCampaignStatus
     pause_reason: str | None
     journal_sequence: Annotated[int, Field(ge=0)]
     journal_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     started_at: str
     updated_at: str
+
+    @field_validator("supervisor_session_id")
+    @classmethod
+    def validate_supervisor_uuid(cls, value: str | None) -> str | None:
+        return None if value is None else canonical_supervisor_uuid(value)
+
+    @field_validator("task_worker_session_ids")
+    @classmethod
+    def validate_worker_uuids(cls, value: dict[str, str]) -> dict[str, str]:
+        for identifier in value.values():
+            canonical_supervisor_uuid(identifier)
+        return value
 
     def to_dict(self) -> dict[str, object]:
         return self.model_dump(mode="json")

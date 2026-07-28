@@ -74,8 +74,9 @@ def build_supervisor_request(
         "The manifest and Stage 2 engine are authoritative and immutable. "
         "Do not request contract, scope, permission, acceptance-test, or convention changes.\n"
         f"Return action {request.action!r}, unless judgment is genuinely required, in which "
-        "case return 'human_pause'. Prompt actions must contain the complete actual prompt "
-        "for the worker or auditor. Terminal actions must use an empty prompt.\n"
+        "case return 'human_pause'. Prompt actions contain only an advisory task body; "
+        "the Stage 2 engine supplies the complete authoritative worker or auditor wrapper. "
+        "Terminal actions must use an empty prompt.\n"
         "Never mention, infer, or request hidden/gold evaluation material.\n\n"
         "[BEGIN SUPERVISOR POLICY]\n"
         + policy

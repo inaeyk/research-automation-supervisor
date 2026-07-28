@@ -455,9 +455,12 @@ def run_replay_campaign_command(
 def resume_replay_campaign_command(
     run_directory: Annotated[Path, typer.Argument(help="Existing campaign run directory.")],
     decision: Annotated[
-        Path,
-        typer.Option("--decision", help="Exact schema-version-1 human decision YAML."),
-    ],
+        Path | None,
+        typer.Option(
+            "--decision",
+            help="Exact decision YAML for a human pause; omit for running recovery.",
+        ),
+    ] = None,
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,

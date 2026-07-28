@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,13 +48,11 @@ from research_automation_supervisor.workflow_models import (
 
 @dataclass(frozen=True)
 class PreparedReplayTask:
-    """Resolved task authority, Stage 2 input, and model-invisible gold inputs."""
+    """Resolved model-visible task authority and Stage 2 input."""
 
     specification: ReplayTaskSpecification
     stage2: PreparedSubstage
     contexts: tuple[FrozenShadowFile, ...]
-    gold_evaluations: tuple[PreparedWorkflowTest, ...]
-    gold_roots: tuple[Path, ...]
 
     def authority_summary(self) -> dict[str, object]:
         stage2 = self.stage2.specification
@@ -84,6 +83,59 @@ class PreparedReplayTask:
 
 
 @dataclass(frozen=True)
+class PreparedReplayEvaluator:
+    """Engine-only hidden evaluator configuration for one replay task."""
+
+    task_id: str
+    evaluations: tuple[PreparedWorkflowTest, ...]
+    gold_roots: tuple[Path, ...]
+
+    def normalized_record(self) -> dict[str, object]:
+        evaluations = []
+        for prepared in self.evaluations:
+            test = prepared.specification
+            command = {
+                "id": test.id,
+                "argv": list(test.argv),
+                "cwd": str(prepared.cwd),
+                "timeout_seconds": test.timeout_seconds,
+                "max_stdout_bytes": test.max_stdout_bytes,
+                "max_stderr_bytes": test.max_stderr_bytes,
+            }
+            rendered = json.dumps(
+                command,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            evaluations.append(
+                {
+                    "id": test.id,
+                    "cwd_locator": str(prepared.cwd),
+                    "cwd_locator_sha256": hashlib.sha256(
+                        str(prepared.cwd).encode("utf-8")
+                    ).hexdigest(),
+                    "command_sha256": hashlib.sha256(rendered).hexdigest(),
+                }
+            )
+        return {
+            "schema_version": 1,
+            "task_id": self.task_id,
+            "gold_roots": [
+                {
+                    "locator": str(root),
+                    "locator_sha256": hashlib.sha256(
+                        str(root).encode("utf-8")
+                    ).hexdigest(),
+                }
+                for root in self.gold_roots
+            ],
+            "evaluations": evaluations,
+        }
+
+
+@dataclass(frozen=True)
 class PreparedReplayCampaign:
     """Resolved immutable campaign manifest."""
 
@@ -94,7 +146,18 @@ class PreparedReplayCampaign:
     specification: ReplayCampaignSpecification
     supervisor_policy: FrozenShadowFile
     tasks: tuple[PreparedReplayTask, ...]
+    evaluators: tuple[PreparedReplayEvaluator, ...]
     sensitive_values: tuple[str, ...]
+
+    def evaluator_for(self, task_id: str) -> PreparedReplayEvaluator:
+        matches = tuple(
+            evaluator for evaluator in self.evaluators if evaluator.task_id == task_id
+        )
+        if len(matches) != 1:
+            raise ReplayCampaignInputError(
+                "engine-only replay evaluator identity is invalid"
+            )
+        return matches[0]
 
     def frozen_hashes(self) -> tuple[FrozenFileHash, ...]:
         values = [
@@ -165,7 +228,7 @@ def load_replay_campaign_specification(
             specification.supervisor_policy_path,
             "replay supervisor policy",
         )
-        tasks = tuple(
+        prepared_pairs = tuple(
             _prepare_task(
                 parent,
                 task,
@@ -174,6 +237,8 @@ def load_replay_campaign_specification(
             )
             for task in specification.tasks
         )
+        tasks = tuple(pair[0] for pair in prepared_pairs)
+        evaluators = tuple(pair[1] for pair in prepared_pairs)
     except (ShadowInputError, WorkflowInputError) as exc:
         raise ReplayCampaignInputError(str(exc)) from exc
     prepared = PreparedReplayCampaign(
@@ -184,14 +249,10 @@ def load_replay_campaign_specification(
         specification=specification,
         supervisor_policy=policy,
         tasks=tasks,
+        evaluators=evaluators,
         sensitive_values=sensitive_values,
     )
-    for task in tasks:
-        for root in task.gold_roots:
-            if _contains(root, policy.path):
-                raise ReplayCampaignInputError(
-                    "supervisor policy must be outside model-invisible gold roots"
-                )
+    _validate_gold_confinement(prepared)
     visible = (
         raw_path,
         content,
@@ -242,7 +303,7 @@ def _prepare_task(
     *,
     sensitive_values: tuple[str, ...],
     require_clean: bool,
-) -> PreparedReplayTask:
+) -> tuple[PreparedReplayTask, PreparedReplayEvaluator]:
     stage2 = load_substage_specification(
         _join_locator(parent, task.stage2_specification_path),
         sensitive_values=sensitive_values,
@@ -268,15 +329,6 @@ def _prepare_task(
         _resolve_directory(parent, value, f"gold artifact root for {task.task_id}")
         for value in task.gold_artifact_roots
     )
-    for root in gold_roots:
-        if _contains(root, stage2.workspace) or _contains(stage2.workspace, root):
-            raise ReplayCampaignInputError(
-                "gold artifact roots must be disjoint from the replay workspace"
-            )
-        if any(_contains(root, context.path) for context in contexts):
-            raise ReplayCampaignInputError(
-                "project context must be outside model-invisible gold roots"
-            )
     evaluations = tuple(
         PreparedWorkflowTest(
             specification=test,
@@ -288,13 +340,88 @@ def _prepare_task(
         )
         for test in task.gold_evaluations
     )
-    return PreparedReplayTask(
-        specification=task,
-        stage2=stage2,
-        contexts=contexts,
-        gold_evaluations=evaluations,
-        gold_roots=gold_roots,
+    return (
+        PreparedReplayTask(
+            specification=task,
+            stage2=stage2,
+            contexts=contexts,
+        ),
+        PreparedReplayEvaluator(
+            task_id=task.task_id,
+            evaluations=evaluations,
+            gold_roots=gold_roots,
+        ),
     )
+
+
+def _validate_gold_confinement(campaign: PreparedReplayCampaign) -> None:
+    """Require hidden evaluator material to be disjoint from every model-visible root."""
+    workspaces = tuple(task.stage2.workspace for task in campaign.tasks)
+    visible_files = (
+        campaign.specification_path,
+        campaign.supervisor_policy.path,
+        *(
+            path
+            for task in campaign.tasks
+            for path in (
+                task.stage2.specification_path,
+                task.stage2.contract.path,
+                task.stage2.worker_initial_prompt.path,
+                task.stage2.worker_repair_prompt.path,
+                task.stage2.auditor_prompt.path,
+                *(context.path for context in task.contexts),
+            )
+        ),
+    )
+    for workspace in workspaces:
+        if _contains(workspace, campaign.specification_path):
+            raise ReplayCampaignInputError(
+                "campaign manifest and gold configuration must be outside every replay workspace"
+            )
+    all_gold_roots = tuple(
+        root for evaluator in campaign.evaluators for root in evaluator.gold_roots
+    )
+    for root in all_gold_roots:
+        for workspace in workspaces:
+            if _contains(root, workspace) or _contains(workspace, root):
+                raise ReplayCampaignInputError(
+                    "gold artifact roots must be disjoint from every replay workspace"
+                )
+        if any(_contains(root, path) for path in visible_files):
+            raise ReplayCampaignInputError(
+                "gold roots must exclude campaign, policy, contract, prompt, and context files"
+            )
+    for evaluator in campaign.evaluators:
+        for evaluation in evaluator.evaluations:
+            for workspace in workspaces:
+                if _contains(workspace, evaluation.cwd) or _contains(
+                    evaluation.cwd, workspace
+                ):
+                    raise ReplayCampaignInputError(
+                        "hidden evaluator roots and gold commands must be outside every "
+                        "replay workspace"
+                    )
+            if not any(_contains(root, evaluation.cwd) for root in evaluator.gold_roots):
+                raise ReplayCampaignInputError(
+                    "hidden evaluator cwd must be contained by its engine-only gold root"
+                )
+            for argument in evaluation.specification.argv:
+                candidate = Path(argument)
+                if not candidate.is_absolute() or not candidate.is_file():
+                    continue
+                try:
+                    resolved = candidate.resolve(strict=False)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise ReplayCampaignInputError(
+                        "gold command locator could not be normalized"
+                    ) from exc
+                if any(
+                    _contains(workspace, resolved) or _contains(resolved, workspace)
+                    for workspace in workspaces
+                ):
+                    raise ReplayCampaignInputError(
+                        "gold command locators must be outside every replay workspace"
+                    )
 
 
 def _resolve_directory(parent: Path, value: str, label: str) -> Path:
