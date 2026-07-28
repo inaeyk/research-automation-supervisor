@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +38,11 @@ from research_automation_supervisor.codex_models import (
     CodexRunRequest,
     CodexRunResult,
     PreparedCodexRequest,
+)
+from research_automation_supervisor.durable_state import (
+    append_hashed_journal_entry,
+    atomic_write_bytes,
+    commit_result_then_state,
 )
 from research_automation_supervisor.errors import (
     LiveShadowDependencyError,
@@ -3837,30 +3842,33 @@ def _journal_event(
             "state_updates": _json_compatible(dict(updates)),
             "previous_hash": state.journal_hash,
         }
-        entry_hash = hashlib.sha256(_canonical_json(body)).hexdigest()
-        entry_value = {**body, "entry_hash": entry_hash}
-        try:
-            preflight_shadow_confidentiality(
-                entry_value,
-                prepared.sensitive_values,
-                label="live-shadow journal structure",
-                integrity=True,
-            )
-        except ShadowStateError as exc:
-            raise LiveShadowIntegrityError(
-                "live-shadow journal structure failed confidentiality preflight"
-            ) from exc
-        try:
-            LiveShadowJournalEntry.model_validate(entry_value)
-        except ValidationError as exc:
-            raise LiveShadowStateError("Stage 4 journal entry is invalid") from exc
-        try:
-            with (run_directory / JOURNAL_FILE).open("ab") as handle:
-                handle.write(_canonical_json(entry_value))
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError as exc:
-            raise LiveShadowStateError("Stage 4 journal could not be appended") from exc
+        def validate_entry(entry_value: Mapping[str, object]) -> None:
+            try:
+                preflight_shadow_confidentiality(
+                    entry_value,
+                    prepared.sensitive_values,
+                    label="live-shadow journal structure",
+                    integrity=True,
+                )
+            except ShadowStateError as exc:
+                raise LiveShadowIntegrityError(
+                    "live-shadow journal structure failed confidentiality preflight"
+                ) from exc
+            try:
+                LiveShadowJournalEntry.model_validate(entry_value)
+            except ValidationError as exc:
+                raise LiveShadowStateError(
+                    "Stage 4 journal entry is invalid"
+                ) from exc
+
+        _entry, entry_hash = append_hashed_journal_entry(
+            run_directory / JOURNAL_FILE,
+            body,
+            validate=validate_entry,
+            error_factory=LiveShadowStateError,
+            error_message="Stage 4 journal could not be appended",
+            fsync_directory_callback=_fsync_directory,
+        )
         _snapshot_checkpoint("after_journal_fsync")
         if post_journal_checkpoint is not None:
             _snapshot_checkpoint(post_journal_checkpoint)
@@ -4087,12 +4095,16 @@ def _persist_state(
         ) from exc
     # The journal is the semantic source of truth.  The public result may be
     # replaced first, but state.json is the final snapshot commit point.
-    _snapshot_checkpoint("before_result_replacement")
-    _write_json(run_directory / RESULT_FILE, result.model_dump(mode="json"))
-    _snapshot_checkpoint("after_result_replacement")
-    _snapshot_checkpoint("before_state_replacement")
-    _write_json(run_directory / STATE_FILE, state.model_dump(mode="json"))
-    _snapshot_checkpoint("after_state_replacement")
+    commit_result_then_state(
+        result_path=run_directory / RESULT_FILE,
+        result_value=result.model_dump(mode="json"),
+        state_path=run_directory / STATE_FILE,
+        state_value=state.model_dump(mode="json"),
+        checkpoint=_snapshot_checkpoint,
+        error_factory=LiveShadowStateError,
+        error_message="Stage 4 state and result could not be committed",
+        fsync_directory_callback=_fsync_directory,
+    )
 
 
 def _result_for_state(
@@ -6040,21 +6052,13 @@ def _snapshot_checkpoint(name: str) -> None:
 
 
 def _atomic_write(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    except OSError as exc:
-        raise LiveShadowStateError("Stage 4 artifact could not be written") from exc
-    finally:
-        with suppress(FileNotFoundError):
-            temporary.unlink()
+    atomic_write_bytes(
+        path,
+        value,
+        error_factory=LiveShadowStateError,
+        error_message="Stage 4 artifact could not be written",
+        fsync_directory_callback=_fsync_directory,
+    )
 
 
 def _render_json_bytes(value: object) -> bytes:

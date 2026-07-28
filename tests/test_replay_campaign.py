@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -9,7 +11,10 @@ from uuid import UUID
 import pytest
 import yaml
 
+import research_automation_supervisor.durable_state as durable_state
+import research_automation_supervisor.live_shadow_engine as live_engine
 import research_automation_supervisor.replay_campaign_engine as replay_engine
+import research_automation_supervisor.workflow_engine as workflow_engine
 from research_automation_supervisor.codex_models import CodexRunResult
 from research_automation_supervisor.errors import ReplayCampaignInputError
 from research_automation_supervisor.live_shadow_isolation import (
@@ -22,6 +27,7 @@ from research_automation_supervisor.replay_campaign_engine import (
     resume_replay_campaign,
     run_replay_campaign,
 )
+from research_automation_supervisor.test_runner import run_test_attempt
 from research_automation_supervisor.workflow_engine import WorkflowServices
 from tests.workflow_helpers import (
     auditor_result,
@@ -600,6 +606,7 @@ def test_worker_needs_human_continues_exact_uuid_with_immutable_note(
         services=services,
     )
     assert paused.status == "human_paused"
+    assert paused.paused_boundary == "worker_continuation"
     note = "Immutable operator note: retain the fixed contract."
     resumed = resume_replay_campaign(
         next((tmp_path / "runs").iterdir()),
@@ -614,6 +621,323 @@ def test_worker_needs_human_continues_exact_uuid_with_immutable_note(
     )
     assert note.encode() in prompt
     assert b"IMMUTABLE HUMAN DECISION NOTE" in prompt
+
+
+@pytest.mark.parametrize(
+    ("boundary", "responses", "actions"),
+    (
+        (
+            "supervisor_worker_prompt",
+            [
+                codex_response("worker", WORKER_ONE_UUID, worker_result()),
+                codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+            ],
+            [
+                supervisor_action("human_pause"),
+                supervisor_action("worker_prompt"),
+                supervisor_action("auditor_prompt"),
+                supervisor_action("finish"),
+            ],
+        ),
+        (
+            "supervisor_auditor_prompt",
+            [
+                codex_response("worker", WORKER_ONE_UUID, worker_result()),
+                codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+            ],
+            [
+                supervisor_action("worker_prompt"),
+                supervisor_action("human_pause"),
+                supervisor_action("auditor_prompt"),
+                supervisor_action("finish"),
+            ],
+        ),
+        (
+            "supervisor_repair_prompt",
+            [
+                codex_response("worker", WORKER_REPAIR_UUID, worker_result()),
+                codex_response(
+                    "worker",
+                    WORKER_REPAIR_UUID,
+                    worker_result(),
+                    expected_resume_thread_id=WORKER_REPAIR_UUID,
+                    write_files={"src/ready.txt": "ready\n"},
+                ),
+                codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+            ],
+            [
+                supervisor_action("worker_prompt"),
+                supervisor_action("human_pause"),
+                supervisor_action("repair_prompt"),
+                supervisor_action("auditor_prompt"),
+                supervisor_action("finish"),
+            ],
+        ),
+        (
+            "supervisor_finish",
+            [
+                codex_response("worker", WORKER_ONE_UUID, worker_result()),
+                codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+            ],
+            [
+                supervisor_action("worker_prompt"),
+                supervisor_action("auditor_prompt"),
+                supervisor_action("human_pause"),
+                supervisor_action("finish"),
+            ],
+        ),
+    ),
+)
+def test_supervisor_pauses_resume_the_exact_prompt_source_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    responses: list[dict[str, object]],
+    actions: list[dict[str, object]],
+) -> None:
+    marker_required = boundary == "supervisor_repair_prompt"
+    manifest, fake = create_campaign(
+        tmp_path,
+        [responses],
+        test_requires_marker=marker_required,
+    )
+    supervisor = FakeSupervisor(actions)
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    assert paused.paused_boundary == boundary
+    if boundary != "supervisor_worker_prompt":
+        assert paused.task_worker_session_ids["replay-task-1"]
+
+    def duplicate_worker_continuation(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("late supervisor pause became a worker continuation")
+
+    monkeypatch.setattr(
+        replay_engine,
+        "continue_substage",
+        duplicate_worker_continuation,
+    )
+    completed = resume_replay_campaign(
+        next((tmp_path / "runs").iterdir()),
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+    assert completed.status == "completed"
+
+
+def test_auditor_escalation_pause_reenters_the_same_supervisor_boundary(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response(
+                "auditor",
+                AUDITOR_ONE_UUID,
+                auditor_result("escalate"),
+            ),
+        ]],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("human_pause"),
+            supervisor_action("human_pause"),
+        ]
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    assert paused.paused_boundary == "auditor_escalation"
+    resumed = resume_replay_campaign(
+        next((tmp_path / "runs").iterdir()),
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+    assert resumed.status == "human_paused"
+    assert resumed.paused_boundary == "auditor_escalation"
+    assert len(supervisor.resume_ids) == 4
+
+
+def test_crash_after_stage2_continuation_acceptance_does_not_duplicate_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result("needs_human"),
+            ),
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result(),
+                expected_resume_thread_id=WORKER_RESUME_UUID,
+            ),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ]
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    assert paused.paused_boundary == "worker_continuation"
+
+    def crash(name: str) -> None:
+        if name == "after_stage2_continuation_accept_before_campaign_cleanup":
+            raise KeyboardInterrupt(name)
+
+    monkeypatch.setattr(replay_engine, "_snapshot_checkpoint", crash)
+    with pytest.raises(KeyboardInterrupt, match="continuation_accept"):
+        resume_replay_campaign(
+            run,
+            decision_path=write_resume_decision(tmp_path),
+            services=services,
+        )
+    monkeypatch.setattr(replay_engine, "_snapshot_checkpoint", lambda _name: None)
+    completed = resume_replay_campaign(run, services=services)
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    assert completed.status == "completed"
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 2
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+    assert len(list((stage2 / "tests").glob("round-*/suite.json"))) == 1
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 4
+
+
+def test_five_tasks_are_model_terminal_before_campaign_wide_gold_reveal(
+    tmp_path: Path,
+) -> None:
+    responses = [
+        [
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]
+        for _index in range(5)
+    ]
+    manifest, fake = create_campaign(tmp_path, responses)
+    supervisor = FakeSupervisor(
+        [
+            action
+            for _index in range(5)
+            for action in (
+                supervisor_action("worker_prompt"),
+                supervisor_action("auditor_prompt"),
+                supervisor_action("finish"),
+            )
+        ]
+    )
+    services = campaign_services(fake, supervisor, [])
+    gold_turn_counts: list[int] = []
+
+    def gold_after_models(
+        prepared_test: object,
+        artifact_directory: Path,
+        action_id: str,
+        **kwargs: object,
+    ) -> object:
+        run = next((tmp_path / "runs").iterdir())
+        assert len(list((run / "tasks").glob("*/model-terminal.json"))) == 5
+        assert len(supervisor.resume_ids) == 15
+        gold_turn_counts.append(len(supervisor.resume_ids))
+        return run_test_attempt(
+            prepared_test,  # type: ignore[arg-type]
+            artifact_directory,
+            action_id,
+            environ=kwargs.get("environ"),  # type: ignore[arg-type]
+        )
+
+    result = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=replace(services, gold_test_invoker=gold_after_models),
+    )
+    run = next((tmp_path / "runs").iterdir())
+    report = json.loads((run / "campaign-report.json").read_text())
+    assert result.status == "completed"
+    assert gold_turn_counts == [15] * 5
+    assert report["gold_reveal_counters"]["model_turn_count_before"] == 25
+    assert report["gold_reveal_counters"]["model_turn_count_after"] == 25
+    assert report["zero_post_gold_turns"] is True
+
+
+def test_report_contains_exact_engine_rendered_worker_and_auditor_prompts(
+    tmp_path: Path,
+) -> None:
+    worker_observation = tmp_path / "worker-prompt.json"
+    auditor_observation = tmp_path / "auditor-prompt.json"
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response(
+                "worker",
+                WORKER_ONE_UUID,
+                worker_result(),
+                observation_path=str(worker_observation),
+            ),
+            codex_response(
+                "auditor",
+                AUDITOR_ONE_UUID,
+                auditor_result(),
+                observation_path=str(auditor_observation),
+            ),
+        ]],
+    )
+    result = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(
+            fake,
+            FakeSupervisor(
+                [
+                    supervisor_action("worker_prompt"),
+                    supervisor_action("auditor_prompt"),
+                    supervisor_action("finish"),
+                ]
+            ),
+            [],
+        ),
+    )
+    assert result.status == "completed"
+    run = next((tmp_path / "runs").iterdir())
+    report = json.loads((run / "campaign-report.json").read_text())
+    evidence = report["tasks"][0]["prompt_evidence"]
+    by_recipient = {item["recipient"]: item for item in evidence}
+    for recipient, observation in (
+        ("worker", worker_observation),
+        ("auditor", auditor_observation),
+    ):
+        exact = base64.b64decode(
+            json.loads(observation.read_text())["prompt_base64"]
+        )
+        recorded = by_recipient[recipient]
+        assert base64.b64decode(recorded["prompt_body_base64"]) == exact
+        assert recorded["prompt_body"].encode() == exact
+        assert recorded["prompt_sha256"] == hashlib.sha256(exact).hexdigest()
+        assert recorded["action_id"]
+        assert recorded["round_id"] == "round-000"
 
 
 def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
@@ -672,6 +996,7 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
         services=services,
     )
     assert paused.pause_reason == "repair_rounds_exhausted"
+    assert paused.paused_boundary == "repair_limit"
 
     completed = resume_replay_campaign(
         next((tmp_path / "runs").iterdir()),
@@ -707,6 +1032,21 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
     assert first["started_at"] <= first["ended_at"]
     assert first["human_assisted"] is True
     assert first["zero_post_gold_turns"] is True
+
+
+def test_campaign_journal_uses_the_stage2_stage4_shared_helper_path() -> None:
+    assert (
+        replay_engine.append_hashed_journal_entry
+        is durable_state.append_hashed_journal_entry
+    )
+    assert (
+        workflow_engine.append_hashed_journal_entry
+        is durable_state.append_hashed_journal_entry
+    )
+    assert (
+        live_engine.append_hashed_journal_entry
+        is durable_state.append_hashed_journal_entry
+    )
 
 
 def test_notification_payload_is_redacted_and_contains_only_safe_fields(

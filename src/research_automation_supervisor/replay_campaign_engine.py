@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
 import shutil
 import subprocess
@@ -28,6 +27,13 @@ from research_automation_supervisor.codex_models import (
     CodexRunResult,
     PreparedCodexRequest,
 )
+from research_automation_supervisor.durable_state import (
+    append_hashed_journal_entry,
+    commit_result_then_state,
+    read_hashed_journal,
+    reconcile_model_snapshot,
+    render_json_bytes,
+)
 from research_automation_supervisor.errors import (
     LiveShadowDependencyError,
     ReplayCampaignDependencyError,
@@ -42,6 +48,7 @@ from research_automation_supervisor.errors import (
 )
 from research_automation_supervisor.live_shadow_engine import (
     SupervisorInvoker,
+    _prepare_artifact_set,
     _snapshot_checkpoint,
 )
 from research_automation_supervisor.live_shadow_isolation import (
@@ -78,7 +85,6 @@ from research_automation_supervisor.workflow_engine import (
     WorkflowPromptDecision,
     WorkflowPromptRequest,
     WorkflowServices,
-    _canonical_json,
     _resolve_codex_executable,
     _utc_string,
     _write_json,
@@ -198,6 +204,11 @@ def run_replay_campaign(
         human_decision_count=0,
         pending_human_decision=None,
         continuation_note_path=None,
+        paused_boundary=None,
+        model_terminal_task_ids=(),
+        gold_evaluated_task_ids=(),
+        gold_reveal_model_turn_count=None,
+        post_gold_model_turn_count=None,
         status="initialized",
         pause_reason=None,
         journal_sequence=0,
@@ -443,6 +454,9 @@ def _complete_human_decision(
             "continuation_note_path": (
                 None if decision.decision == "abort" else str(note_path)
             ),
+            "paused_boundary": (
+                None if decision.decision == "abort" else context.state.paused_boundary
+            ),
         },
         {
             str(destination): pending.sha256,
@@ -515,20 +529,13 @@ def _drive(
                         services=workflow_services,
                     )
                 elif continuation_path is not None:
-                    if (
-                        task.specification.task_id
-                        in context.state.task_worker_session_ids
-                    ):
-                        workflow = continue_substage(
-                            expected_run,
-                            continuation_path,
-                            services=workflow_services,
-                        )
-                    else:
-                        workflow = resume_prompt_source_substage(
-                            expected_run,
-                            services=workflow_services,
-                        )
+                    workflow = _resume_stored_continuation(
+                        context,
+                        task,
+                        expected_run,
+                        continuation_path,
+                        workflow_services,
+                    )
                 else:
                     observed = substage_status(expected_run)
                     if observed.status in {
@@ -575,12 +582,19 @@ def _drive(
                 "unsafe_workflow_state",
                 str(exc),
                 task,
+                context.state.paused_boundary or "worker_continuation",
             )
         if continuation_requested and context.state.continuation_note_path is not None:
+            _snapshot_checkpoint(
+                "after_stage2_continuation_accept_before_campaign_cleanup"
+            )
             context.state = _event(
                 context,
                 "human_continuation_delivered",
-                {"continuation_note_path": None},
+                {
+                    "continuation_note_path": None,
+                    "paused_boundary": None,
+                },
                 {},
             )
         if context.state.current_task_run != workflow.artifact_directory:
@@ -604,29 +618,75 @@ def _drive(
         if workflow.status != "completed":
             _write_paused_task_summary(context, task, workflow)
             category = _workflow_pause_category(workflow)
+            boundary = _paused_boundary(context, task, workflow)
             return _pause_campaign(
                 context,
                 category,
                 workflow.pause_reason or workflow.status,
                 task,
+                boundary,
             )
 
-        # Gold is intentionally first opened and executed only after Stage 2 is terminal.
-        gold = _run_gold_evaluations(context, task)
-        _write_task_summary(context, task, workflow, gold)
-        completed = (*context.state.completed_task_ids, task.specification.task_id)
+        terminal_record = _write_model_terminal_record(context, task, workflow)
+        model_terminal = (
+            *context.state.model_terminal_task_ids,
+            task.specification.task_id,
+        )
         context.state = _event(
             context,
-            "task_completed",
+            "task_model_terminal",
             {
-                "completed_task_ids": completed,
+                "model_terminal_task_ids": model_terminal,
                 "current_task_index": context.state.current_task_index + 1,
                 "current_task_run": None,
+                "paused_boundary": None,
             },
-            {},
+            {str(terminal_record): sha256_regular_file(terminal_record)},
         )
         _write_report(context)
 
+    if context.state.gold_reveal_model_turn_count is None:
+        frozen_turns = _campaign_model_turn_count(context)
+        context.state = _event(
+            context,
+            "campaign_model_turns_frozen",
+            {"gold_reveal_model_turn_count": frozen_turns},
+            {},
+        )
+    for task in context.prepared.tasks:
+        task_id = task.specification.task_id
+        if task_id in context.state.gold_evaluated_task_ids:
+            continue
+        workflow = substage_status(_expected_stage2_run(context, task))
+        if workflow.status != "completed":
+            raise ReplayCampaignStateError(
+                "gold evaluation began before every task was model-terminal"
+            )
+        gold = _run_gold_evaluations(context, task)
+        task_report = _write_task_summary(context, task, workflow, gold)
+        evaluated = (*context.state.gold_evaluated_task_ids, task_id)
+        completed = (*context.state.completed_task_ids, task_id)
+        context.state = _event(
+            context,
+            "task_gold_evaluated",
+            {
+                "gold_evaluated_task_ids": evaluated,
+                "completed_task_ids": completed,
+            },
+            {str(task_report): sha256_regular_file(task_report)},
+        )
+    post_gold_turns = _campaign_model_turn_count(context)
+    if post_gold_turns != context.state.gold_reveal_model_turn_count:
+        raise ReplayCampaignStateError(
+            "a model turn occurred after campaign-wide hidden gold reveal"
+        )
+    if context.state.post_gold_model_turn_count is None:
+        context.state = _event(
+            context,
+            "campaign_gold_turns_verified",
+            {"post_gold_model_turn_count": post_gold_turns},
+            {},
+        )
     context.state = _event(
         context,
         "campaign_completed",
@@ -636,6 +696,99 @@ def _drive(
     _record_notification(context, "campaign_completed", None)
     _write_report(context)
     return context.state
+
+
+_PROMPT_SOURCE_BOUNDARIES = frozenset(
+    {
+        "supervisor_worker_prompt",
+        "supervisor_auditor_prompt",
+        "supervisor_repair_prompt",
+        "supervisor_finish",
+        "auditor_escalation",
+    }
+)
+_ACTIVE_WORKFLOW_STATUSES = frozenset(
+    {
+        "initialized",
+        "worker_running",
+        "scope_checking",
+        "tests_running",
+        "auditor_running",
+        "repair_pending",
+    }
+)
+
+
+def _resume_stored_continuation(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    stage2_run: Path,
+    continuation_path: Path,
+    services: WorkflowServices,
+) -> WorkflowResult:
+    """Reconcile Stage 2 before accepting one stored human continuation."""
+    observed = substage_status(stage2_run)
+    boundary = context.state.paused_boundary
+    if boundary is None:
+        raise ReplayCampaignStateError(
+            "stored human continuation has no exact paused boundary"
+        )
+    if _stage2_accepted_continuation(
+        context,
+        task,
+        stage2_run,
+        continuation_path,
+        boundary,
+    ):
+        if observed.status in _ACTIVE_WORKFLOW_STATUSES:
+            return resume_substage(stage2_run, services=services)
+        return observed
+    if boundary in _PROMPT_SOURCE_BOUNDARIES:
+        return resume_prompt_source_substage(stage2_run, services=services)
+    if boundary in {"worker_continuation", "repair_limit"}:
+        return continue_substage(
+            stage2_run,
+            continuation_path,
+            services=services,
+        )
+    raise ReplayCampaignStateError("stored paused boundary is unsupported")
+
+
+def _stage2_accepted_continuation(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    stage2_run: Path,
+    continuation_path: Path,
+    boundary: str,
+) -> bool:
+    note_sha256 = sha256_regular_file(continuation_path)
+    try:
+        journal_lines = (stage2_run / "journal.jsonl").read_bytes().splitlines()
+        journal = [json.loads(line.decode("ascii")) for line in journal_lines]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReplayCampaignStateError(
+            "verified Stage 2 continuation journal could not be read"
+        ) from exc
+    if any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("state_updates"), dict)
+        and entry["state_updates"].get("continuation_sha256") == note_sha256
+        for entry in journal
+    ):
+        return True
+    if boundary not in _PROMPT_SOURCE_BOUNDARIES:
+        return False
+    attempt = context.state.human_decision_count
+    suffix = f"-h{attempt:03d}"
+    return any(
+        action.get("task_id") == task.specification.task_id
+        and isinstance(action.get("key"), str)
+        and cast(str, action["key"]).endswith(suffix)
+        for action in _supervisor_actions_for_task(
+            context.run_directory,
+            task.specification.task_id,
+        )
+    )
 
 
 class _CampaignPromptSource:
@@ -712,24 +865,29 @@ class _CampaignPromptSource:
         schema_path = decision_directory / "output-schema.json"
         prompt_path = decision_directory / "supervisor-prompt.md"
         request_path = decision_directory / "request.json"
+        request_value = {
+            "schema_version": 1,
+            "action_id": action_id,
+            "task_id": self.task.specification.task_id,
+            "boundary": request.action,
+            "repair_round": request.repair_round,
+            "prompt_sha256": rendered.sha256,
+            "prompt_byte_count": rendered.byte_count,
+            "visible_evidence": rendered.visible_evidence,
+            "gold_evidence_included": False,
+        }
         newly_prepared = not decision_directory.exists()
         if newly_prepared:
-            decision_directory.mkdir(parents=True, exist_ok=False)
-            _write_json(schema_path, SUPERVISOR_ACTION_SCHEMA)
-            _write_bytes(prompt_path, rendered.content)
-            _write_json(
-                request_path,
+            _prepare_artifact_set(
+                decision_directory,
                 {
-                    "schema_version": 1,
-                    "action_id": action_id,
-                    "task_id": self.task.specification.task_id,
-                    "boundary": request.action,
-                    "repair_round": request.repair_round,
-                    "prompt_sha256": rendered.sha256,
-                    "prompt_byte_count": rendered.byte_count,
-                    "visible_evidence": rendered.visible_evidence,
-                    "gold_evidence_included": False,
+                    "output-schema.json": render_json_bytes(
+                        SUPERVISOR_ACTION_SCHEMA
+                    ),
+                    "supervisor-prompt.md": rendered.content,
+                    "request.json": render_json_bytes(request_value),
                 },
+                checkpoint_prefix="campaign_supervisor_intent",
             )
             self.context.state = _event(
                 self.context,
@@ -743,7 +901,7 @@ class _CampaignPromptSource:
             )
             _snapshot_checkpoint("after_supervisor_action_intent")
         elif (
-            _read_json(request_path).get("prompt_sha256") != rendered.sha256
+            _read_json(request_path) != request_value
             or sha256_regular_file(prompt_path) != rendered.sha256
             or _read_json(schema_path) != SUPERVISOR_ACTION_SCHEMA
         ):
@@ -1069,6 +1227,15 @@ def _run_gold_evaluations(
     gold_root = task_root / "gold"
     suite_path = gold_root / "suite.json"
     reveal_path = task_root / "gold-reveal.json"
+    frozen_turns = context.state.gold_reveal_model_turn_count
+    if (
+        frozen_turns is None
+        or len(context.state.model_terminal_task_ids) != len(context.prepared.tasks)
+        or context.state.current_task_index != len(context.prepared.tasks)
+    ):
+        raise ReplayCampaignStateError(
+            "gold evaluation is forbidden before campaign-wide model termination"
+        )
     if suite_path.is_file() and reveal_path.is_file():
         try:
             recovered_suite = TestSuiteResult.model_validate(_read_json(suite_path))
@@ -1077,30 +1244,15 @@ def _run_gold_evaluations(
                 "durable gold evaluation result is invalid"
             ) from exc
         reveal = _read_json(reveal_path)
-        before = reveal.get("model_turn_count_before")
-        if not isinstance(before, int) or isinstance(before, bool):
+        if reveal.get("model_turn_count_before") != frozen_turns:
             raise ReplayCampaignStateError(
                 "durable gold reveal counter is invalid"
             )
-        after = _task_model_turn_count(context, task)
-        post_reveal = after - before
-        if reveal.get("model_turn_count_after") is None:
-            _write_json(
-                reveal_path,
-                {
-                    **reveal,
-                    "completed_at": _utc_string(context.services.utc_now()),
-                    "model_turn_count_after": after,
-                    "model_turns_after_reveal": post_reveal,
-                    "zero_post_gold_turns": post_reveal == 0,
-                },
-            )
-        if post_reveal != 0:
+        if _campaign_model_turn_count(context) != frozen_turns:
             raise ReplayCampaignStateError(
-                "a model turn occurred after hidden gold evaluation was revealed"
+                "a model turn occurred after campaign-wide hidden gold reveal"
             )
         return recovered_suite
-    before_turns = _task_model_turn_count(context, task)
     revealed_at = _utc_string(context.services.utc_now())
     _write_json(
         reveal_path,
@@ -1108,7 +1260,7 @@ def _run_gold_evaluations(
             "schema_version": 1,
             "task_id": task.specification.task_id,
             "revealed_at": revealed_at,
-            "model_turn_count_before": before_turns,
+            "model_turn_count_before": frozen_turns,
             "model_turn_count_after": None,
             "model_turns_after_reveal": None,
             "zero_post_gold_turns": None,
@@ -1135,8 +1287,8 @@ def _run_gold_evaluations(
         failed = failed or not result.passed
     suite = TestSuiteResult(passed=not failed, results=tuple(results))
     _write_json(suite_path, suite.to_dict())
-    after_turns = _task_model_turn_count(context, task)
-    post_reveal = after_turns - before_turns
+    after_turns = _campaign_model_turn_count(context)
+    post_reveal = after_turns - frozen_turns
     completed_at = _utc_string(context.services.utc_now())
     _write_json(
         reveal_path,
@@ -1145,7 +1297,7 @@ def _run_gold_evaluations(
             "task_id": task.specification.task_id,
             "revealed_at": revealed_at,
             "completed_at": completed_at,
-            "model_turn_count_before": before_turns,
+            "model_turn_count_before": frozen_turns,
             "model_turn_count_after": after_turns,
             "model_turns_after_reveal": post_reveal,
             "zero_post_gold_turns": post_reveal == 0,
@@ -1153,7 +1305,7 @@ def _run_gold_evaluations(
     )
     if post_reveal != 0:
         raise ReplayCampaignStateError(
-            "a model turn occurred after hidden gold evaluation was revealed"
+            "a model turn occurred after campaign-wide hidden gold reveal"
         )
     return suite
 
@@ -1209,12 +1361,70 @@ def _task_model_turn_count(
     return stage2_turns + supervisor_turns
 
 
+def _campaign_model_turn_count(context: _CampaignContext) -> int:
+    return sum(
+        _task_model_turn_count(context, task) for task in context.prepared.tasks
+    )
+
+
+def _write_model_terminal_record(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    workflow: WorkflowResult,
+) -> Path:
+    stage2 = Path(workflow.artifact_directory)
+    stage2_state = _read_json(stage2 / "state.json")
+    git_evidence = _read_optional_path(
+        stage2_state.get("latest_git_evidence_path")
+    )
+    final_diff = None
+    if isinstance(git_evidence, dict):
+        patch = git_evidence.get("patch_artifact")
+        if isinstance(patch, str):
+            with suppress(OSError):
+                final_diff = Path(patch).read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+    path = (
+        context.run_directory
+        / "tasks"
+        / task.specification.task_id
+        / "model-terminal.json"
+    )
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "task_id": task.specification.task_id,
+            "recorded_at": workflow.updated_at,
+            "stage2_result": workflow.to_dict(),
+            "final_implementation_diff": final_diff,
+            "fixed_tests": _read_matching(
+                stage2 / "tests",
+                "round-*/suite.json",
+            ),
+            "git_scope_evidence": _read_matching(
+                stage2 / "git",
+                "round-*/evidence.json",
+            ),
+            "model_turn_count": _task_model_turn_count(context, task),
+            "prompt_evidence": _read_matching(
+                stage2 / "prompt-evidence",
+                "*.json",
+            ),
+            "gold_revealed": False,
+        },
+    )
+    return path
+
+
 def _write_task_summary(
     context: _CampaignContext,
     task: PreparedReplayTask,
     workflow: WorkflowResult,
     gold: TestSuiteResult,
-) -> None:
+) -> Path:
     stage2 = Path(workflow.artifact_directory)
     actions = _supervisor_actions_for_task(context.run_directory, task.specification.task_id)
     worker_reports = _read_matching(stage2 / "worker", "*.structured.json")
@@ -1263,11 +1473,14 @@ def _write_task_summary(
         if assisted
         else "autonomous"
     )
-    _write_json(
+    report_path = (
         context.run_directory
         / "tasks"
         / task.specification.task_id
-        / "task-report.json",
+        / "task-report.json"
+    )
+    _write_json(
+        report_path,
         {
             "schema_version": 1,
             "task_id": task.specification.task_id,
@@ -1279,6 +1492,12 @@ def _write_task_summary(
             ),
             "worker_actions": _read_matching(stage2 / "actions", "worker-*.json"),
             "worker_handoffs": _read_matching(stage2 / "handoffs", "worker-*.json"),
+            "prompt_evidence": _read_json(
+                context.run_directory
+                / "tasks"
+                / task.specification.task_id
+                / "model-terminal.json"
+            )["prompt_evidence"],
             "worker_reports": worker_reports,
             "auditor_requests": _read_matching(
                 stage2 / "audits/codex", "*/request.normalized.json"
@@ -1324,6 +1543,7 @@ def _write_task_summary(
             "stage2_result": workflow.to_dict(),
         },
     )
+    return report_path
 
 
 def _write_paused_task_summary(
@@ -1351,6 +1571,9 @@ def _write_paused_task_summary(
             ),
             "worker_actions": _read_matching(stage2 / "actions", "worker-*.json"),
             "worker_handoffs": _read_matching(stage2 / "handoffs", "worker-*.json"),
+            "prompt_evidence": _read_matching(
+                stage2 / "prompt-evidence", "*.json"
+            ),
             "worker_reports": _read_matching(stage2 / "worker", "*.structured.json"),
             "auditor_requests": _read_matching(
                 stage2 / "audits/codex", "*/request.normalized.json"
@@ -1425,6 +1648,7 @@ def _pause_campaign(
     category: str,
     detail: str,
     task: PreparedReplayTask,
+    boundary: str,
 ) -> ReplayCampaignState:
     safe_detail = redact_text(detail, context.prepared.sensitive_values)[:16_384]
     worker_id = context.state.task_worker_session_ids.get(
@@ -1437,6 +1661,7 @@ def _pause_campaign(
         {
             "status": "human_paused",
             "pause_reason": category,
+            "paused_boundary": boundary,
         },
         {},
     )
@@ -1448,6 +1673,7 @@ def _pause_campaign(
             f"- Campaign: {context.state.campaign_id}\n"
             f"- Task: {task.specification.task_id}\n"
             f"- Safe reason category: {category}\n"
+            f"- Exact paused boundary: {boundary}\n"
             f"- Detail: {safe_detail}\n"
             f"- Stage 2 run: {context.state.current_task_run or 'not created'}\n"
             f"- Supervisor UUID: {context.state.supervisor_session_id or 'not established'}\n"
@@ -1690,16 +1916,13 @@ def _event(
         "state_updates": _json_compatible(updates),
         "previous_hash": context.state.journal_hash,
     }
-    digest = hashlib.sha256(_canonical_json(body)).hexdigest()
-    entry = {**body, "entry_hash": digest}
-    journal = context.run_directory / JOURNAL_FILE
-    try:
-        with journal.open("ab") as handle:
-            handle.write(_canonical_json(entry))
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError as exc:
-        raise ReplayCampaignStateError("campaign journal could not be appended") from exc
+    _entry, digest = append_hashed_journal_entry(
+        context.run_directory / JOURNAL_FILE,
+        body,
+        validate=lambda _value: None,
+        error_factory=ReplayCampaignStateError,
+        error_message="campaign journal could not be appended",
+    )
     copied = context.state.model_dump(mode="json")
     copied.update(cast(dict[str, object], _json_compatible(updates)))
     copied.update(
@@ -1743,36 +1966,20 @@ def _validate_journal(run_directory: Path, state: ReplayCampaignState) -> None:
 
 
 def _read_campaign_journal(run_directory: Path) -> list[dict[str, Any]]:
-    try:
-        lines = (run_directory / JOURNAL_FILE).read_bytes().splitlines()
-    except OSError as exc:
-        raise ReplayCampaignStateError("campaign journal is missing") from exc
-    previous = ZERO_HASH
+    entries = read_hashed_journal(
+        run_directory / JOURNAL_FILE,
+        error_factory=ReplayCampaignStateError,
+        malformed_message="campaign journal chain is invalid",
+    )
     mutable = set(_campaign_replay_values())
-    entries: list[dict[str, Any]] = []
-    for index, line in enumerate(lines, start=1):
-        try:
-            entry = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ReplayCampaignStateError("campaign journal is malformed") from exc
-        if (
-            not isinstance(entry, dict)
-            or entry.get("sequence") != index
-            or entry.get("previous_hash") != previous
-        ):
-            raise ReplayCampaignStateError("campaign journal chain is invalid")
-        typed = cast(dict[str, Any], entry)
-        body = {key: value for key, value in typed.items() if key != "entry_hash"}
-        digest = hashlib.sha256(_canonical_json(body)).hexdigest()
-        if typed.get("entry_hash") != digest:
-            raise ReplayCampaignStateError("campaign journal hash is invalid")
-        updates = typed.get("state_updates")
+    for entry in entries:
+        updates = entry.get("state_updates")
         if not isinstance(updates, dict) or any(key not in mutable for key in updates):
             raise ReplayCampaignStateError("campaign journal state update is invalid")
-        timestamp = typed.get("timestamp")
+        timestamp = entry.get("timestamp")
         if not isinstance(timestamp, str):
             raise ReplayCampaignStateError("campaign journal timestamp is invalid")
-        artifacts = typed.get("artifact_hashes")
+        artifacts = entry.get("artifact_hashes")
         if not isinstance(artifacts, dict):
             raise ReplayCampaignStateError("campaign journal artifacts are invalid")
         for path, expected in artifacts.items():
@@ -1788,8 +1995,6 @@ def _read_campaign_journal(run_directory: Path) -> list[dict[str, Any]]:
                 raise ReplayCampaignStateError(
                     "campaign journal evidence was replaced"
                 )
-        previous = digest
-        entries.append(typed)
     return entries
 
 
@@ -1804,6 +2009,11 @@ def _campaign_replay_values() -> dict[str, object]:
         "human_decision_count": 0,
         "pending_human_decision": None,
         "continuation_note_path": None,
+        "paused_boundary": None,
+        "model_terminal_task_ids": [],
+        "gold_evaluated_task_ids": [],
+        "gold_reveal_model_turn_count": None,
+        "post_gold_model_turn_count": None,
         "status": "initialized",
         "pause_reason": None,
     }
@@ -1814,37 +2024,30 @@ def _reconcile_state_with_journal(
     state: ReplayCampaignState,
 ) -> ReplayCampaignState:
     entries = _read_campaign_journal(run_directory)
-    if state.journal_sequence > len(entries):
-        raise ReplayCampaignStateError("campaign state is ahead of its journal")
-    if state.journal_sequence and (
-        entries[state.journal_sequence - 1]["entry_hash"] != state.journal_hash
-    ):
-        raise ReplayCampaignStateError("campaign state journal prefix is invalid")
-    if state.journal_sequence == len(entries):
+    reconciled = reconcile_model_snapshot(
+        state,
+        entries,
+        model=ReplayCampaignState,
+        error_factory=ReplayCampaignStateError,
+        error_message="campaign journal recovery produced invalid state",
+    )
+    if reconciled == state:
         return state
-    values = state.model_dump(mode="json")
-    for entry in entries[state.journal_sequence:]:
-        values.update(cast(dict[str, object], entry["state_updates"]))
-        values.update(
-            {
-                "journal_sequence": entry["sequence"],
-                "journal_hash": entry["entry_hash"],
-                "updated_at": entry["timestamp"],
-            }
-        )
-    try:
-        reconciled = ReplayCampaignState.model_validate(values)
-    except ValidationError as exc:
-        raise ReplayCampaignStateError(
-            "campaign journal recovery produced invalid state"
-        ) from exc
     _persist_state(run_directory, reconciled)
     _validate_journal(run_directory, reconciled)
     return reconciled
 
 
 def _persist_state(run_directory: Path, state: ReplayCampaignState) -> None:
-    _write_json(run_directory / STATE_FILE, state.to_dict())
+    commit_result_then_state(
+        result_path=None,
+        result_value=None,
+        state_path=run_directory / STATE_FILE,
+        state_value=state.to_dict(),
+        checkpoint=_snapshot_checkpoint,
+        error_factory=ReplayCampaignStateError,
+        error_message="campaign state snapshot could not be committed",
+    )
 
 
 def _load_state(run_directory: Path) -> ReplayCampaignState:
@@ -1900,15 +2103,54 @@ def _json_compatible(value: object) -> object:
 
 def _workflow_pause_category(result: WorkflowResult) -> str:
     reason = result.pause_reason or result.status
+    if result.status == "repair_limit_paused" or reason.endswith("repair_limit"):
+        return "repair_rounds_exhausted"
     if reason.startswith("worker_"):
         return "worker_requires_human"
     if reason.startswith("auditor_"):
         return "auditor_requires_judgment"
-    if reason.endswith("repair_limit"):
-        return "repair_rounds_exhausted"
     if reason.startswith("prompt_source"):
         return "supervisor_requires_human"
     return "unsafe_workflow_state"
+
+
+def _paused_boundary(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    result: WorkflowResult,
+) -> str:
+    reason = result.pause_reason or result.status
+    if result.status == "repair_limit_paused" or reason.endswith("repair_limit"):
+        return "repair_limit"
+    if reason == "auditor_escalated":
+        return "auditor_escalation"
+    if reason.startswith("prompt_source"):
+        actions = _supervisor_actions_for_task(
+            context.run_directory,
+            task.specification.task_id,
+        )
+        if not actions:
+            raise ReplayCampaignStateError(
+                "prompt-source pause has no exact supervisor boundary evidence"
+            )
+        source_boundary = actions[-1].get("boundary")
+        if not isinstance(source_boundary, str):
+            raise ReplayCampaignStateError(
+                "prompt-source pause boundary evidence is malformed"
+            )
+        mapped = {
+            "worker_prompt": "supervisor_worker_prompt",
+            "auditor_prompt": "supervisor_auditor_prompt",
+            "repair_prompt": "supervisor_repair_prompt",
+            "finish": "supervisor_finish",
+            "human_pause": "auditor_escalation",
+        }.get(source_boundary)
+        if mapped is None:
+            raise ReplayCampaignStateError(
+                "prompt-source pause boundary is unsupported"
+            )
+        return mapped
+    return "worker_continuation"
 
 
 def _human_attempt(run_directory: Path, task_id: str) -> int:
@@ -1934,7 +2176,16 @@ def _supervisor_actions_for_task(
     task_id: str,
 ) -> list[dict[str, Any]]:
     actions = _read_matching(run_directory / "supervisor/actions", "*.json")
-    return [action for action in actions if action.get("task_id") == task_id]
+    selected = [
+        action for action in actions if action.get("task_id") == task_id
+    ]
+    return sorted(
+        selected,
+        key=lambda action: (
+            str(action.get("recorded_at", "")),
+            str(action.get("action_id", "")),
+        ),
+    )
 
 
 def _human_records(run_directory: Path, task_id: str) -> list[dict[str, object]]:
@@ -1996,6 +2247,26 @@ def _write_report(context: _CampaignContext) -> None:
             "status": context.state.status,
             "current_task_index": context.state.current_task_index,
             "completed_task_ids": list(context.state.completed_task_ids),
+            "model_terminal_task_ids": list(
+                context.state.model_terminal_task_ids
+            ),
+            "gold_evaluated_task_ids": list(
+                context.state.gold_evaluated_task_ids
+            ),
+            "paused_boundary": context.state.paused_boundary,
+            "gold_reveal_counters": {
+                "model_turn_count_before": (
+                    context.state.gold_reveal_model_turn_count
+                ),
+                "model_turn_count_after": (
+                    context.state.post_gold_model_turn_count
+                ),
+            },
+            "zero_post_gold_turns": (
+                context.state.gold_reveal_model_turn_count is not None
+                and context.state.post_gold_model_turn_count
+                == context.state.gold_reveal_model_turn_count
+            ),
             "supervisor_session_id": context.state.supervisor_session_id,
             "task_worker_session_ids": context.state.task_worker_session_ids,
             "human_assisted_task_ids": list(context.state.human_assisted_task_ids),
@@ -2021,6 +2292,24 @@ def _write_report(context: _CampaignContext) -> None:
 
 
 def _verify_completed_gold_boundaries(context: _CampaignContext) -> None:
+    frozen = context.state.gold_reveal_model_turn_count
+    if frozen is None:
+        if context.state.gold_evaluated_task_ids:
+            raise ReplayCampaignStateError(
+                "gold task evidence exists before the campaign-wide turn freeze"
+            )
+        return
+    if _campaign_model_turn_count(context) != frozen:
+        raise ReplayCampaignStateError(
+            "campaign gained a model turn after gold reveal"
+        )
+    if (
+        context.state.post_gold_model_turn_count is not None
+        and context.state.post_gold_model_turn_count != frozen
+    ):
+        raise ReplayCampaignStateError(
+            "campaign gold turn counters are not exactly equal"
+        )
     by_id = {
         task.specification.task_id: task for task in context.prepared.tasks
     }
@@ -2037,7 +2326,8 @@ def _verify_completed_gold_boundaries(context: _CampaignContext) -> None:
         if (
             not isinstance(after, int)
             or isinstance(after, bool)
-            or _task_model_turn_count(context, task) != after
+            or reveal.get("model_turn_count_before") != frozen
+            or after != frozen
         ):
             raise ReplayCampaignStateError(
                 "a completed task gained a model turn after gold reveal"

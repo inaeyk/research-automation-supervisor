@@ -119,6 +119,7 @@ def test_default_prompt_source_seam_preserves_frozen_worker_prompt_bytes(
     assert metadata["prompt_sha256"] == expected.rendered_sha256
     assert metadata["prompt_byte_count"] == expected.byte_count
     assert handoff == expected.manifest()
+    assert not (Path(result.artifact_directory) / "prompt-evidence").exists()
 
 
 def test_checkpoint_pass_returns_frozen_checkpoint_exit_state(tmp_path: Path) -> None:

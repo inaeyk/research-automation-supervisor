@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -11,7 +12,6 @@ import secrets
 import shutil
 import socket
 import stat
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -32,6 +32,12 @@ from research_automation_supervisor.codex_models import (
     CodexRunRequest,
     CodexRunResult,
     PreparedCodexRequest,
+)
+from research_automation_supervisor.durable_state import (
+    append_hashed_journal_entry,
+    atomic_write_json,
+    commit_result_then_state,
+    reconcile_model_snapshot,
 )
 from research_automation_supervisor.errors import (
     CodexAdapterError,
@@ -634,13 +640,33 @@ def resume_substage(
             )
             return context.state.to_result()
         if context.state.continuation_path is not None and context.state.pending_action is None:
-            context.state = _pause(
-                context,
-                "human_paused",
-                "continuation_interrupted_before_launch",
-                "Human continuation launch was interrupted and will not be guessed or repeated.",
+            _, _, sensitive_values = build_subprocess_environment(
+                services.environ
             )
-            return context.state.to_result()
+            instruction = load_continuation_instruction(
+                Path(context.state.continuation_path),
+                sensitive_values=sensitive_values,
+                workspace=context.prepared.workspace,
+                protected_paths=context.prepared.specification.protected_paths,
+            )
+            if instruction.sha256 != context.state.continuation_sha256:
+                raise WorkflowStateError(
+                    "accepted continuation bytes changed before action launch"
+                )
+            continuation_entry = next(
+                (
+                    entry
+                    for entry in reversed(_read_valid_journal(resolved))
+                    if entry.reason == "human_continuation_requested"
+                ),
+                None,
+            )
+            if continuation_entry is None:
+                raise WorkflowStateError(
+                    "accepted continuation boundary is unavailable"
+                )
+            context.continuation = instruction
+            context.continuation_from_state = continuation_entry.previous_state
         context.state = _recover_pending_action(context)
         if context.state.status == "human_paused":
             return context.state.to_result()
@@ -961,9 +987,10 @@ def _handle_worker(context: _WorkflowContext) -> None:
         prompt = _source_prompt(context, boundary, default_prompt)
         if prompt is None:
             return
+        role: Literal["worker"] = "worker"
+        _persist_prompt_evidence(context, action_id, role, prompt)
         handoff_path = context.run_directory / "handoffs" / f"{action_id}.json"
         _write_json(handoff_path, prompt.manifest())
-        role = "worker"
         request = _prepared_codex_request(context, action_id, role, prompt)
         stage1_parent = context.run_directory / "worker" / "codex"
         expected_artifact = stage1_parent / action_id
@@ -1269,6 +1296,7 @@ def _handle_auditor(context: _WorkflowContext) -> None:
         prompt = _source_prompt(context, "auditor_prompt", default_prompt)
         if prompt is None:
             return
+        _persist_prompt_evidence(context, action_id, "auditor", prompt)
         handoff_path = context.run_directory / "handoffs" / f"{action_id}.json"
         _write_json(handoff_path, prompt.manifest())
         request = _prepared_codex_request(context, action_id, "auditor", prompt)
@@ -1430,6 +1458,35 @@ def _worker_prompt(context: _WorkflowContext) -> RenderedWorkflowPrompt:
         _optional_latest_tests(context),
         _latest_git(context),
     )
+
+
+def _persist_prompt_evidence(
+    context: _WorkflowContext,
+    action_id: str,
+    recipient: Literal["worker", "auditor"],
+    prompt: RenderedWorkflowPrompt,
+) -> None:
+    """Persist exact campaign prompt bytes at the authoritative action boundary."""
+    if context.services.prompt_source is None:
+        return
+    path = context.run_directory / "prompt-evidence" / f"{action_id}.json"
+    value = {
+        "schema_version": 1,
+        "action_id": action_id,
+        "round_id": f"round-{context.state.repair_round:03d}",
+        "repair_round": context.state.repair_round,
+        "recipient": recipient,
+        "prompt_kind": prompt.kind,
+        "prompt_sha256": prompt.rendered_sha256,
+        "prompt_byte_count": prompt.byte_count,
+        "prompt_body": prompt.content.decode("utf-8"),
+        "prompt_body_base64": base64.b64encode(prompt.content).decode("ascii"),
+    }
+    if path.is_file():
+        if _read_json(path) != value:
+            raise WorkflowStateError("durable exact prompt evidence changed")
+        return
+    _write_json(path, value)
 
 
 def _prompt_source_request(
@@ -2101,7 +2158,12 @@ def _transition(
             "repair_limit_paused",
         },
         "repair_pending": {"worker_running", "human_paused"},
-        "human_paused": {"worker_running", "aborted"},
+        "human_paused": {
+            "worker_running",
+            "auditor_running",
+            "repair_pending",
+            "aborted",
+        },
         "repair_limit_paused": {"worker_running", "aborted"},
     }
     if new_status not in allowed.get(context.state.status, set()):
@@ -2225,18 +2287,16 @@ def _journal_event(
         "state_updates": _json_compatible(dict(updates)),
         "previous_hash": state.journal_hash,
     }
-    entry_hash = hashlib.sha256(_canonical_json(body)).hexdigest()
-    entry = {**body, "entry_hash": entry_hash}
-    parsed_entry = parse_journal_entry(entry)
-    _validate_journal_entry_semantic_form(parsed_entry)
-    journal = run_directory / JOURNAL_FILE
-    try:
-        with journal.open("ab") as handle:
-            handle.write(_canonical_json(entry))
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError as exc:
-        raise WorkflowStateError("workflow journal could not be appended") from exc
+    _entry, entry_hash = append_hashed_journal_entry(
+        run_directory / JOURNAL_FILE,
+        body,
+        validate=lambda value: _validate_journal_entry_semantic_form(
+            parse_journal_entry(value)
+        ),
+        error_factory=WorkflowStateError,
+        error_message="workflow journal could not be appended",
+        fsync_directory_callback=_fsync_directory,
+    )
     copied_updates = dict(updates)
     copied_updates.update(
         {
@@ -3000,27 +3060,14 @@ def _reconcile_state_with_journal(
 ) -> WorkflowState:
     """Replay only hash-validated journal updates omitted by an interrupted snapshot write."""
     entries = _read_valid_journal(run_directory)
-    if state.journal_sequence > len(entries):
-        raise WorkflowStateError("workflow state is ahead of its journal")
-    if state.journal_sequence:
-        recorded_hash = entries[state.journal_sequence - 1].entry_hash
-        if recorded_hash != state.journal_hash:
-            raise WorkflowStateError("workflow state journal position is invalid")
-    current = state
-    for entry in entries[state.journal_sequence :]:
-        candidate = current.model_dump(mode="json")
-        candidate.update(entry.state_updates)
-        candidate.update(
-            {
-                "updated_at": entry.timestamp,
-                "journal_sequence": entry.sequence,
-                "journal_hash": entry.entry_hash,
-            }
-        )
-        try:
-            current = WorkflowState.model_validate(candidate)
-        except ValidationError as exc:
-            raise WorkflowStateError("workflow journal recovery state is invalid") from exc
+    raw_entries = tuple(entry.model_dump(mode="json") for entry in entries)
+    current = reconcile_model_snapshot(
+        state,
+        raw_entries,
+        model=WorkflowState,
+        error_factory=WorkflowStateError,
+        error_message="workflow journal recovery state is invalid",
+    )
     snapshots_disagree = current != state
     if not snapshots_disagree:
         try:
@@ -3828,8 +3875,16 @@ def _load_result(run_directory: Path) -> WorkflowResult:
 
 
 def _persist_state(run_directory: Path, state: WorkflowState) -> None:
-    _write_json(run_directory / STATE_FILE, state.model_dump(mode="json"))
-    _write_json(run_directory / RESULT_FILE, state.to_result().to_dict())
+    commit_result_then_state(
+        result_path=run_directory / RESULT_FILE,
+        result_value=state.to_result().to_dict(),
+        state_path=run_directory / STATE_FILE,
+        state_value=state.model_dump(mode="json"),
+        checkpoint=lambda _name: None,
+        error_factory=WorkflowStateError,
+        error_message="workflow state and result could not be committed",
+        fsync_directory_callback=_fsync_directory,
+    )
 
 
 def _resolve_run_directory(path: Path) -> Path:
@@ -3866,26 +3921,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(
+    atomic_write_json(
+        path,
         value,
-        ensure_ascii=True,
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(rendered)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        with suppress(FileNotFoundError):
-            temporary.unlink()
+        error_factory=WorkflowStateError,
+        error_message="workflow artifact could not be written",
+        fsync_directory_callback=_fsync_directory,
+    )
 
 
 def _write_text(path: Path, value: str) -> None:

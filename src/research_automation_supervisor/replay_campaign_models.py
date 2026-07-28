@@ -32,6 +32,15 @@ ReplayCampaignStatus = Literal[
     "failed",
     "aborted",
 ]
+ReplayPausedBoundary = Literal[
+    "supervisor_worker_prompt",
+    "supervisor_auditor_prompt",
+    "supervisor_repair_prompt",
+    "supervisor_finish",
+    "worker_continuation",
+    "auditor_escalation",
+    "repair_limit",
+]
 ReplayTaskVerdict = Literal[
     "autonomous",
     "human_assisted",
@@ -256,6 +265,15 @@ class ReplayCampaignState(BaseModel):
     human_decision_count: Annotated[int, Field(ge=0)] = 0
     pending_human_decision: PendingHumanDecision | None = None
     continuation_note_path: str | None = None
+    paused_boundary: ReplayPausedBoundary | None = None
+    model_terminal_task_ids: Annotated[
+        tuple[Identifier, ...], BeforeValidator(_freeze_sequence)
+    ] = ()
+    gold_evaluated_task_ids: Annotated[
+        tuple[Identifier, ...], BeforeValidator(_freeze_sequence)
+    ] = ()
+    gold_reveal_model_turn_count: Annotated[int, Field(ge=0)] | None = None
+    post_gold_model_turn_count: Annotated[int, Field(ge=0)] | None = None
     status: ReplayCampaignStatus
     pause_reason: str | None
     journal_sequence: Annotated[int, Field(ge=0)]
