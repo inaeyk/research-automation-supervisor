@@ -240,6 +240,39 @@ def commit_result_then_state(
     checkpoint("after_state_replacement")
 
 
+def commit_state_then_result(
+    *,
+    state_path: Path,
+    state_value: object,
+    result_path: Path | None,
+    result_value: object | None,
+    checkpoint: Callable[[str], None],
+    error_factory: ErrorFactory,
+    error_message: str,
+    fsync_directory_callback: Callable[[Path], None] | None = None,
+) -> None:
+    """Commit state.json first and its derived public result last."""
+    checkpoint("before_state_replacement")
+    atomic_write_json(
+        state_path,
+        state_value,
+        error_factory=error_factory,
+        error_message=error_message,
+        fsync_directory_callback=fsync_directory_callback,
+    )
+    checkpoint("after_state_replacement")
+    if result_path is not None:
+        checkpoint("before_result_replacement")
+        atomic_write_json(
+            result_path,
+            result_value,
+            error_factory=error_factory,
+            error_message=error_message,
+            fsync_directory_callback=fsync_directory_callback,
+        )
+        checkpoint("after_result_replacement")
+
+
 def fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_DIRECTORY", 0)

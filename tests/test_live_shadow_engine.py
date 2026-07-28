@@ -1775,6 +1775,8 @@ def test_every_snapshot_midpoint_recovers_without_duplicate_semantics(
         services=services,
     )
     second = write_review(tmp_path / "review-2.yaml", "auditor-r000-a002")
+    state_before = (run_directory / "state.json").read_bytes()
+    result_before = (run_directory / "result.json").read_bytes()
     authoritative_run = Path(str(result.authoritative_stage2_run))
     authoritative_hashes_before = {
         str(path.relative_to(authoritative_run)): hashlib.sha256(
@@ -1800,6 +1802,30 @@ def test_every_snapshot_midpoint_recovers_without_duplicate_semantics(
             services=services,
         )
     assert crashed
+    state_after = (run_directory / "state.json").read_bytes()
+    result_after = (run_directory / "result.json").read_bytes()
+    if crash_point in {
+        "after_journal_fsync",
+        "after_review_journal_append",
+        "before_result_replacement",
+    }:
+        assert state_after == state_before
+        assert result_after == result_before
+    elif crash_point in {
+        "after_result_replacement",
+        "before_state_replacement",
+    }:
+        assert state_after == state_before
+        assert result_after != result_before
+        assert json.loads(result_after)["review_count"] == 2
+    else:
+        assert state_after != state_before
+        assert result_after != result_before
+        assert json.loads(state_after)["reviewed_proposal_ids"] == [
+            "worker_initial-r000-a001",
+            "auditor-r000-a002",
+        ]
+        assert json.loads(result_after)["review_count"] == 2
     if crash_point == "after_state_replacement":
         assert live_shadow_status(run_directory).review_count == 2
     else:

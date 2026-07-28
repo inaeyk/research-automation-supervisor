@@ -11,7 +11,11 @@ import pytest
 
 import research_automation_supervisor.workflow_engine as workflow_engine
 from research_automation_supervisor.codex_adapter import run_prepared_codex
-from research_automation_supervisor.errors import WorkflowLockError, WorkflowStateError
+from research_automation_supervisor.errors import (
+    WorkflowInputError,
+    WorkflowLockError,
+    WorkflowStateError,
+)
 from research_automation_supervisor.test_runner import run_test_attempt
 from research_automation_supervisor.workflow_engine import (
     WorkflowServices,
@@ -874,6 +878,83 @@ def test_state_journal_head_and_public_result_must_agree(
 
     with pytest.raises(WorkflowStateError):
         substage_status(run_directory)
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    (
+        "before_state_replacement",
+        "after_state_replacement",
+        "after_result_replacement",
+    ),
+)
+def test_stage2_state_first_snapshot_crash_boundaries_recover_historically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    spec, _, fake = create_workflow_tree(
+        tmp_path,
+        responses=[
+            codex_response("worker", "worker", worker_result("needs_human")),
+        ],
+    )
+    paused = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    run_directory = Path(paused.artifact_directory)
+    state_path = run_directory / "state.json"
+    result_path = run_directory / "result.json"
+    state_before = state_path.read_bytes()
+    result_before = result_path.read_bytes()
+    crashed = False
+
+    def crash(point: str) -> None:
+        nonlocal crashed
+        if not crashed and point == crash_point:
+            crashed = True
+            raise KeyboardInterrupt(point)
+
+    monkeypatch.setattr(workflow_engine, "_snapshot_checkpoint", crash)
+    with pytest.raises(KeyboardInterrupt, match=crash_point):
+        abort_substage(run_directory, "stop", services=services(fake))
+    assert crashed
+
+    state_after = state_path.read_bytes()
+    result_after = result_path.read_bytes()
+    if crash_point == "before_state_replacement":
+        assert state_after == state_before
+        assert result_after == result_before
+    elif crash_point == "after_state_replacement":
+        assert state_after != state_before
+        assert result_after == result_before
+        assert json.loads(state_after)["status"] == "aborted"
+    else:
+        assert state_after != state_before
+        assert result_after != result_before
+        assert json.loads(state_after)["status"] == "aborted"
+        assert json.loads(result_after)["status"] == "aborted"
+
+    if crash_point == "after_result_replacement":
+        assert substage_status(run_directory).status == "aborted"
+    else:
+        with pytest.raises(WorkflowStateError):
+            substage_status(run_directory)
+
+    monkeypatch.setattr(workflow_engine, "_snapshot_checkpoint", lambda _name: None)
+    with pytest.raises(WorkflowInputError, match="terminal"):
+        abort_substage(run_directory, "stop", services=services(fake))
+    recovered = substage_status(run_directory)
+    assert recovered.status == "aborted"
+    assert json.loads(state_path.read_bytes())["status"] == "aborted"
+    assert json.loads(result_path.read_bytes())["status"] == "aborted"
+    journal = [
+        json.loads(line)
+        for line in (run_directory / "journal.jsonl").read_bytes().splitlines()
+    ]
+    assert sum(entry["reason"] == "human_abort" for entry in journal) == 1
 
 
 def test_continue_and_abort_reject_altered_prior_action_evidence(tmp_path: Path) -> None:

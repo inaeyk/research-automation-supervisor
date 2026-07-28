@@ -36,7 +36,7 @@ from research_automation_supervisor.codex_models import (
 from research_automation_supervisor.durable_state import (
     append_hashed_journal_entry,
     atomic_write_json,
-    commit_result_then_state,
+    commit_state_then_result,
     reconcile_model_snapshot,
 )
 from research_automation_supervisor.errors import (
@@ -3875,16 +3875,21 @@ def _load_result(run_directory: Path) -> WorkflowResult:
 
 
 def _persist_state(run_directory: Path, state: WorkflowState) -> None:
-    commit_result_then_state(
-        result_path=run_directory / RESULT_FILE,
-        result_value=state.to_result().to_dict(),
+    commit_state_then_result(
         state_path=run_directory / STATE_FILE,
         state_value=state.model_dump(mode="json"),
-        checkpoint=lambda _name: None,
+        result_path=run_directory / RESULT_FILE,
+        result_value=state.to_result().to_dict(),
+        checkpoint=_snapshot_checkpoint,
         error_factory=WorkflowStateError,
         error_message="workflow state and result could not be committed",
         fsync_directory_callback=_fsync_directory,
     )
+
+
+def _snapshot_checkpoint(name: str) -> None:
+    """Deterministic no-op boundary used by crash-ordering regression tests."""
+    del name
 
 
 def _resolve_run_directory(path: Path) -> Path:
