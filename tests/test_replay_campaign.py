@@ -2611,7 +2611,11 @@ inner = [translate(value) for value in inner]
 cwd = translate(chdir) if chdir is not None else None
 if cwd is not None:
     os.chdir(cwd)
-os.execve(inner[0], inner, os.environ)
+environment = dict(os.environ)
+for name in ("HOME", "CODEX_HOME", "TMPDIR"):
+    if name in environment:
+        environment[name] = translate(environment[name])
+os.execve(inner[0], inner, environment)
 """,
         encoding="utf-8",
     )
@@ -2632,6 +2636,7 @@ os.execve(inner[0], inner, os.environ)
                         "require_stage4_policy": True,
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
+                        "write_codex_home_workspace_locator": True,
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2648,6 +2653,7 @@ os.execve(inner[0], inner, os.environ)
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
                         "expected_resume_thread_id": SUPERVISOR_UUID,
+                        "write_codex_home_workspace_locator": True,
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2664,6 +2670,7 @@ os.execve(inner[0], inner, os.environ)
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
                         "expected_resume_thread_id": SUPERVISOR_UUID,
+                        "write_codex_home_workspace_locator": True,
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2726,3 +2733,21 @@ os.execve(inner[0], inner, os.environ)
         "auditor_prompt": SUPERVISOR_UUID,
         "finish": SUPERVISOR_UUID,
     }
+    assert (
+        run / "quarantine/codex-home/cache/workspace-locator.txt"
+    ).read_text(encoding="utf-8") == str(run / "quarantine/workspace")
+
+
+def test_campaign_supervisor_runtime_home_is_recreated(tmp_path: Path) -> None:
+    quarantine = tmp_path / "quarantine"
+    runtime_home = quarantine / "codex-home"
+    (quarantine / "workspace").mkdir(parents=True)
+    runtime_home.mkdir()
+    contaminated = runtime_home / "cache" / "workspace-locator.txt"
+    contaminated.parent.mkdir()
+    contaminated.write_text("/forbidden/workspace", encoding="utf-8")
+
+    replay_engine._recreate_campaign_supervisor_runtime_home(runtime_home)
+
+    assert runtime_home.is_dir()
+    assert list(runtime_home.iterdir()) == []

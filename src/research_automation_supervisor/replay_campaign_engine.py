@@ -39,6 +39,7 @@ from research_automation_supervisor.durable_state import (
 )
 from research_automation_supervisor.errors import (
     LiveShadowDependencyError,
+    LiveShadowIntegrityError,
     ReplayCampaignDependencyError,
     ReplayCampaignInputError,
     ReplayCampaignLockError,
@@ -60,6 +61,7 @@ from research_automation_supervisor.live_shadow_isolation import (
     IsolationPreflight,
     build_bubblewrap_process_launch,
     preflight_bubblewrap_isolation,
+    recreate_engine_runtime_home,
 )
 from research_automation_supervisor.redaction import redact_json, redact_text
 from research_automation_supervisor.replay_campaign_models import (
@@ -1516,6 +1518,8 @@ def _invoke_supervisor(
     capability = context.isolation_capability
     if capability is None:
         raise ReplayCampaignDependencyError("supervisor isolation is unavailable")
+    runtime_home = context.run_directory / "quarantine" / "codex-home"
+    _recreate_campaign_supervisor_runtime_home(runtime_home)
 
     def isolated_launch(
         command: Sequence[str],
@@ -1532,29 +1536,48 @@ def _invoke_supervisor(
             output_schema,
             capability=capability,
             stage4_run_root=context.run_directory,
-            runtime_home=context.run_directory / "quarantine" / "codex-home",
+            runtime_home=runtime_home,
             forbidden_roots=_forbidden_roots(
                 context.prepared,
                 context.run_directory,
             ),
         )
 
-    return run_prepared_codex(
-        request,
-        runs_dir=runs,
-        codex_executable=context.codex_executable,
-        environ=context.services.environ,
-        output_schema=schema_path,
-        resume_thread_id=resume_id,
-        skip_git_repo_check=True,
-        confidential_fragments=confidential,
-        rejected_confidential_fragments=(),
-        durable_command_replacements={
-            str(capability.authentication_file): RECORDED_AUTH_SOURCE,
-        },
-        process_launch_builder=isolated_launch,
-        version_probe=lambda _executable, _environment, _workspace: None,
-    )
+    try:
+        return run_prepared_codex(
+            request,
+            runs_dir=runs,
+            codex_executable=context.codex_executable,
+            environ=context.services.environ,
+            output_schema=schema_path,
+            resume_thread_id=resume_id,
+            skip_git_repo_check=True,
+            confidential_fragments=confidential,
+            rejected_confidential_fragments=(),
+            durable_command_replacements={
+                str(capability.authentication_file): RECORDED_AUTH_SOURCE,
+            },
+            process_launch_builder=isolated_launch,
+            version_probe=lambda _executable, _environment, _workspace: None,
+        )
+    except LiveShadowIntegrityError as exc:
+        raise WorkflowPromptSourceError(
+            "supervisor isolation prelaunch failed safely",
+            failure_category="supervisor_isolation_prelaunch_failed",
+            adapter_status="not_started",
+        ) from exc
+
+
+def _recreate_campaign_supervisor_runtime_home(runtime_home: Path) -> None:
+    """Use local Codex state only as disposable transport scratch."""
+    try:
+        recreate_engine_runtime_home(runtime_home)
+    except (LiveShadowIntegrityError, OSError) as exc:
+        raise WorkflowPromptSourceError(
+            "supervisor runtime scratch could not be recreated",
+            failure_category="supervisor_runtime_scratch_recreation_failed",
+            adapter_status="not_started",
+        ) from exc
 
 
 def _exact_supervisor_session(

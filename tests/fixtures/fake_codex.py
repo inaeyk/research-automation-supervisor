@@ -220,6 +220,12 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    if configuration.get("write_codex_home_workspace_locator"):
+        codex_home = Path(os.environ["CODEX_HOME"])
+        locator = codex_home / "cache" / "workspace-locator.txt"
+        locator.parent.mkdir(parents=True, exist_ok=True)
+        locator.write_text(str(workspace), encoding="utf-8")
+
     write_files = configuration.get("write_files", {})
     if isinstance(write_files, dict):
         for relative, content in write_files.items():
