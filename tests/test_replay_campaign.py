@@ -21,6 +21,7 @@ from research_automation_supervisor.codex_models import CodexRunResult
 from research_automation_supervisor.errors import (
     ReplayCampaignInputError,
     WorkflowPromptSourceError,
+    WorkflowStateError,
 )
 from research_automation_supervisor.live_shadow_isolation import (
     BubblewrapBackendIdentity,
@@ -1331,6 +1332,15 @@ def test_supervisor_pauses_resume_the_exact_prompt_source_boundary(
         services=services,
     )
     assert paused.paused_boundary == boundary
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    stage2_state = json.loads((stage2 / "state.json").read_text())
+    assert stage2_state["prompt_source_boundary"] == {
+        "supervisor_worker_prompt": "initial_worker_prompt",
+        "supervisor_repair_prompt": "worker_repair_prompt",
+        "supervisor_auditor_prompt": "auditor_prompt",
+        "supervisor_finish": "post_audit_terminal_decision",
+    }[boundary]
     if boundary != "supervisor_worker_prompt":
         assert paused.task_worker_session_ids["replay-task-1"]
 
@@ -1344,11 +1354,208 @@ def test_supervisor_pauses_resume_the_exact_prompt_source_boundary(
         duplicate_worker_continuation,
     )
     completed = resume_replay_campaign(
-        next((tmp_path / "runs").iterdir()),
+        run,
         decision_path=write_resume_decision(tmp_path),
         services=services,
     )
     assert completed.status == "completed"
+
+
+def test_rejected_initial_worker_prompt_recovers_only_to_new_worker_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt", unauthorized=True),
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ]
+    )
+    services = campaign_services(fake, supervisor, [])
+
+    def forbid_post_audit(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("initial worker recovery entered post-audit routing")
+
+    monkeypatch.setattr(
+        replay_engine,
+        "post_audit_prompt_source_boundary",
+        forbid_post_audit,
+    )
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    paused_stage2 = json.loads((stage2 / "state.json").read_text())
+
+    assert paused.status == "human_paused"
+    assert paused.paused_boundary == "supervisor_worker_prompt"
+    assert paused_stage2["prompt_source_boundary"] == "initial_worker_prompt"
+    assert paused_stage2["latest_worker_action_id"] is None
+    assert paused_stage2["latest_audit_action_id"] is None
+    assert paused_stage2["pending_action"] is None
+    assert paused_stage2["latest_tests_path"] is None
+    assert paused_stage2["latest_git_evidence_path"] is None
+    assert paused.gold_evaluated_task_ids == ()
+    assert not list((stage2 / "actions").glob("worker-*.json"))
+
+    completed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+    report = json.loads((run / "campaign-report.json").read_text())
+    actions = [
+        json.loads(path.read_text())
+        for path in sorted((run / "supervisor/actions").glob("*.json"))
+    ]
+
+    assert completed.status == "completed"
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+    assert sum(action["boundary"] == "worker_prompt" for action in actions) == 2
+    assert sum(action["accepted_action"] is None for action in actions) == 1
+    assert any(
+        isinstance(action["accepted_action"], dict)
+        and action["accepted_action"]["action"] == "worker_prompt"
+        for action in actions
+    )
+    assert report["gold_reveal_counters"]["model_turn_count_before"] == (
+        report["gold_reveal_counters"]["model_turn_count_after"]
+    )
+    assert report["zero_post_gold_turns"] is True
+
+
+def _rewrite_stage2_without_recorded_prompt_boundary(
+    stage2: Path,
+    *,
+    ambiguous_round: bool = False,
+) -> None:
+    journal_path = stage2 / "journal.jsonl"
+    entries = [
+        json.loads(line)
+        for line in journal_path.read_bytes().splitlines()
+    ]
+    for entry in entries:
+        if entry["reason"] in {
+            "prompt_source_human_pause",
+            "prompt_source_invalid",
+        }:
+            entry["state_updates"].pop("prompt_source_boundary", None)
+        if ambiguous_round and entry["reason"] == "initial_worker_requested":
+            entry["state_updates"]["repair_round"] = 1
+    previous = "0" * 64
+    for entry in entries:
+        entry["previous_hash"] = previous
+        body = {key: value for key, value in entry.items() if key != "entry_hash"}
+        previous = hashlib.sha256(
+            (
+                json.dumps(
+                    body,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("ascii")
+        ).hexdigest()
+        entry["entry_hash"] = previous
+    journal_path.write_text(
+        "".join(
+            json.dumps(
+                entry,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+            for entry in entries
+        ),
+        encoding="ascii",
+    )
+    state_path = stage2 / "state.json"
+    state = json.loads(state_path.read_text())
+    state.pop("prompt_source_boundary", None)
+    state["journal_hash"] = previous
+    if ambiguous_round:
+        state["repair_round"] = 1
+        result_path = stage2 / "result.json"
+        result = json.loads(result_path.read_text())
+        result["repair_round"] = 1
+        result_path.write_text(
+            json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("ambiguous_round", (False, True))
+def test_old_prompt_boundary_inference_requires_unambiguous_journal(
+    tmp_path: Path,
+    ambiguous_round: bool,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt", unauthorized=True),
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ]
+    )
+    services = campaign_services(fake, supervisor, [])
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    _rewrite_stage2_without_recorded_prompt_boundary(
+        stage2,
+        ambiguous_round=ambiguous_round,
+    )
+    workflow_services = WorkflowServices(codex_executable=str(fake))
+
+    if ambiguous_round:
+        with pytest.raises(
+            WorkflowStateError,
+            match="cannot be inferred unambiguously",
+        ):
+            workflow_engine.prompt_source_pause_boundary(
+                stage2,
+                services=workflow_services,
+            )
+    else:
+        assert (
+            workflow_engine.prompt_source_pause_boundary(
+                stage2,
+                services=workflow_services,
+            )
+            == "initial_worker_prompt"
+        )
 
 
 def test_auditor_escalation_pause_reenters_the_same_supervisor_boundary(
@@ -1536,9 +1743,13 @@ def test_post_audit_repairable_prompt_failure_recovers_to_repair(
 
     assert completed.status == "completed"
     assert sum(
-        entry["reason"] == "post_audit_repair_recovery"
+        entry["reason"] == "prompt_source_human_resume"
         for entry in journal
     ) == 1
+    assert not any(
+        entry["reason"] == "post_audit_repair_recovery"
+        for entry in journal
+    )
     assert len(list((stage2 / "actions").glob("worker-*.json"))) == 2
     assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 2
     assert len(list((run / "supervisor/actions").glob("*.json"))) == 5

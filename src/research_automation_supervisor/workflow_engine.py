@@ -396,6 +396,12 @@ PromptBoundary = Literal[
     "finish",
     "human_pause",
 ]
+PromptSourcePauseBoundary = Literal[
+    "initial_worker_prompt",
+    "worker_repair_prompt",
+    "auditor_prompt",
+    "post_audit_terminal_decision",
+]
 
 
 @dataclass(frozen=True)
@@ -553,6 +559,7 @@ def run_substage(
             repair_trigger=None,
             continuation_path=None,
             continuation_sha256=None,
+            prompt_source_boundary=None,
             tests_passed=False,
             scope_compliant=False,
             contract_satisfied=False,
@@ -738,6 +745,7 @@ def continue_substage(
             continuation_path=str(instruction.path),
             continuation_sha256=instruction.sha256,
             pause_reason=None,
+            prompt_source_boundary=None,
             summary="Exact human continuation queued for the persistent worker.",
         )
         return _drive(context)
@@ -787,22 +795,22 @@ def resume_prompt_source_substage(
             raise WorkflowInputError(
                 "frozen inputs and repository identity must match before replay resume"
             )
-        proof = (
-            _prove_post_audit_prompt_source_pause(context, entries)
-            if allow_post_audit_recovery
-            else None
-        )
-        if proof is not None:
-            if proof.audit.verdict == "escalate":
-                return context.state.to_result()
-            if proof.audit.verdict == "pass":
+        boundary = _resolve_prompt_source_pause_boundary(context, entries)
+        if boundary == "post_audit_terminal_decision":
+            if not allow_post_audit_recovery:
+                raise WorkflowStateError(
+                    "post-audit prompt-source recovery was not explicitly authorized"
+                )
+            proof = _prove_post_audit_prompt_source_pause(context, entries)
+            if proof.audit.verdict in {"pass", "escalate"}:
                 context.state = _transition(
                     context,
                     "auditor_running",
                     "post_audit_finish_recovery",
                     pause_reason=None,
+                    prompt_source_boundary=None,
                     summary=(
-                        "Durably validated audit resumed at the terminal "
+                        "Durably validated audit resumed at its terminal "
                         "supervisor decision."
                     ),
                 )
@@ -816,6 +824,7 @@ def resume_prompt_source_substage(
                     "worker_running",
                     "post_audit_repair_recovery",
                     pause_reason=None,
+                    prompt_source_boundary=None,
                     summary=(
                         "Durably validated repairable audit resumed at the "
                         "repair-prompt decision."
@@ -823,14 +832,40 @@ def resume_prompt_source_substage(
                 )
             _snapshot_checkpoint("after_post_audit_prompt_source_recovery")
             return _drive(context)
+        resumed_status = {
+            "initial_worker_prompt": "worker_running",
+            "worker_repair_prompt": "worker_running",
+            "auditor_prompt": "auditor_running",
+        }[boundary]
         context.state = _transition(
             context,
-            cast(Any, pause_entry.previous_state),
+            resumed_status,
             "prompt_source_human_resume",
             pause_reason=None,
+            prompt_source_boundary=None,
             summary="Human decision resumed the exact replay prompt boundary.",
         )
         return _drive(context)
+
+
+def prompt_source_pause_boundary(
+    run_directory: Path,
+    *,
+    services: WorkflowServices,
+) -> PromptSourcePauseBoundary:
+    """Return the exact journal-proven semantic boundary for a prompt pause."""
+    resolved = _resolve_run_directory(run_directory)
+    state = _load_state(resolved)
+    _validate_journal(resolved, state)
+    context = _load_context(resolved, state, services)
+    if not _frozen_inputs_match(context) or not _repository_matches(context):
+        raise WorkflowStateError(
+            "prompt-source recovery inputs or repository identity changed"
+        )
+    return _resolve_prompt_source_pause_boundary(
+        context,
+        _read_valid_journal(resolved),
+    )
 
 
 def post_audit_prompt_source_boundary(
@@ -842,20 +877,23 @@ def post_audit_prompt_source_boundary(
     resolved = _resolve_run_directory(run_directory)
     state = _load_state(resolved)
     _validate_journal(resolved, state)
-    if (
-        state.status != "human_paused"
-        or state.pause_reason != "prompt_source_invalid"
-    ):
+    if state.status != "human_paused" or state.pause_reason not in {
+        "prompt_source_human_pause",
+        "prompt_source_invalid",
+    }:
         return None
     context = _load_context(resolved, state, services)
     if not _frozen_inputs_match(context) or not _repository_matches(context):
         raise WorkflowStateError(
             "post-audit recovery inputs or repository identity changed"
         )
-    proof = _prove_post_audit_prompt_source_pause(
-        context,
-        _read_valid_journal(resolved),
-    )
+    entries = _read_valid_journal(resolved)
+    if (
+        _resolve_prompt_source_pause_boundary(context, entries)
+        != "post_audit_terminal_decision"
+    ):
+        return None
+    proof = _prove_post_audit_prompt_source_pause(context, entries)
     return cast(
         Literal["finish", "repair_prompt", "human_pause"],
         {
@@ -1646,6 +1684,7 @@ def _call_prompt_source(
     source = context.services.prompt_source
     if source is None:
         return None
+    semantic_boundary = _semantic_prompt_source_boundary(action)
     try:
         decision = source(_prompt_source_request(context, action, default_prompt))
     except WorkflowPromptSourceError as exc:
@@ -1658,6 +1697,7 @@ def _call_prompt_source(
                 "prompt_source_failure_category": exc.failure_category,
                 "prompt_source_adapter_status": exc.adapter_status,
             },
+            prompt_source_boundary=semantic_boundary,
         )
         return WorkflowPromptDecision(
             action="human_pause",
@@ -1676,6 +1716,7 @@ def _call_prompt_source(
                 ),
                 "prompt_source_adapter_status": "not_available",
             },
+            prompt_source_boundary=semantic_boundary,
         )
         return WorkflowPromptDecision(
             action="human_pause",
@@ -1688,6 +1729,7 @@ def _call_prompt_source(
             "human_paused",
             "prompt_source_human_pause",
             decision.summary,
+            prompt_source_boundary=semantic_boundary,
         )
         return decision
     if decision.action != action:
@@ -1696,6 +1738,7 @@ def _call_prompt_source(
             "human_paused",
             "prompt_source_invalid",
             "The replay prompt source returned an unauthorized action.",
+            prompt_source_boundary=semantic_boundary,
         )
         return WorkflowPromptDecision(
             action="human_pause",
@@ -1703,6 +1746,19 @@ def _call_prompt_source(
             summary="Prompt source returned an unauthorized action.",
         )
     return decision
+
+
+def _semantic_prompt_source_boundary(
+    action: PromptBoundary,
+) -> PromptSourcePauseBoundary:
+    boundaries: dict[PromptBoundary, PromptSourcePauseBoundary] = {
+        "worker_prompt": "initial_worker_prompt",
+        "repair_prompt": "worker_repair_prompt",
+        "auditor_prompt": "auditor_prompt",
+        "finish": "post_audit_terminal_decision",
+        "human_pause": "post_audit_terminal_decision",
+    }
+    return boundaries[action]
 
 
 def _source_prompt(
@@ -1722,6 +1778,7 @@ def _source_prompt(
             "human_paused",
             "prompt_source_invalid",
             "The replay prompt source returned invalid prompt bytes.",
+            prompt_source_boundary=_semantic_prompt_source_boundary(action),
         )
         return None
     prompt = _engine_owned_source_prompt(
@@ -1848,6 +1905,7 @@ def _source_terminal_action(
             "human_paused",
             "prompt_source_invalid",
             "A terminal replay action unexpectedly contained prompt bytes.",
+            prompt_source_boundary="post_audit_terminal_decision",
         )
         return False
     return True
@@ -2578,6 +2636,38 @@ def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
         raise WorkflowStateError(
             "workflow journal evidence reason contradicts its state update semantics"
         )
+    prompt_pause = (
+        entry.event_type == "transition"
+        and entry.reason in {"prompt_source_human_pause", "prompt_source_invalid"}
+    )
+    recorded_boundary = entry.state_updates.get("prompt_source_boundary")
+    if prompt_pause and recorded_boundary is not None:
+        boundaries_by_state: dict[str, set[str]] = {
+            "worker_running": {
+                "initial_worker_prompt",
+                "worker_repair_prompt",
+            },
+            "auditor_running": {
+                "auditor_prompt",
+                "post_audit_terminal_decision",
+            },
+        }
+        allowed_boundaries = (
+            set()
+            if entry.previous_state is None
+            else boundaries_by_state.get(entry.previous_state, set())
+        )
+        if recorded_boundary not in allowed_boundaries:
+            raise WorkflowStateError(
+                "prompt-source pause boundary contradicts its workflow state"
+            )
+    elif (
+        "prompt_source_boundary" in entry.state_updates
+        and recorded_boundary is not None
+    ):
+        raise WorkflowStateError(
+            "non-prompt transition recorded a prompt-source boundary"
+        )
     if (
         entry.event_type == "transition"
         and entry.new_state
@@ -2614,6 +2704,7 @@ def _validate_journal_semantics(
         "repair_trigger",
         "continuation_path",
         "continuation_sha256",
+        "prompt_source_boundary",
         "tests_passed",
         "scope_compliant",
         "contract_satisfied",
@@ -2638,6 +2729,7 @@ def _validate_journal_semantics(
         "repair_trigger": None,
         "continuation_path": None,
         "continuation_sha256": None,
+        "prompt_source_boundary": None,
         "tests_passed": False,
         "scope_compliant": False,
         "contract_satisfied": False,
@@ -3823,6 +3915,173 @@ def _prior_audits(context: _WorkflowContext) -> tuple[AuditorModelResult, ...]:
         raise WorkflowStateError("prior auditor evidence is invalid") from exc
 
 
+def _resolve_prompt_source_pause_boundary(
+    context: _WorkflowContext,
+    entries: Sequence[JournalEntry],
+) -> PromptSourcePauseBoundary:
+    """Validate a recorded boundary, or conservatively infer one for old runs."""
+    state = context.state
+    if state.status != "human_paused" or state.pause_reason not in {
+        "prompt_source_human_pause",
+        "prompt_source_invalid",
+    }:
+        raise WorkflowStateError("workflow is not at a prompt-source pause")
+    transitions = [
+        entry for entry in entries if entry.event_type == "transition"
+    ]
+    if not transitions:
+        raise WorkflowStateError("prompt-source pause transition is unavailable")
+    pause = transitions[-1]
+    if (
+        pause.new_state != "human_paused"
+        or pause.reason != state.pause_reason
+        or pause.reason
+        not in {"prompt_source_human_pause", "prompt_source_invalid"}
+    ):
+        raise WorkflowStateError(
+            "prompt-source pause ordering or reason is ambiguous"
+        )
+    later = entries[entries.index(pause) + 1 :]
+    if any(
+        entry.event_type != "evidence"
+        or entry.reason != "escalation_package_written"
+        or entry.state_updates
+        for entry in later
+    ):
+        raise WorkflowStateError(
+            "prompt-source pause contains ambiguous later evidence"
+        )
+    recorded = state.prompt_source_boundary
+    journal_recorded = pause.state_updates.get("prompt_source_boundary")
+    if (recorded is None) != (journal_recorded is None):
+        raise WorkflowStateError(
+            "prompt-source boundary state and journal evidence conflict"
+        )
+    if recorded is not None and journal_recorded != recorded:
+        raise WorkflowStateError(
+            "prompt-source boundary state and journal evidence conflict"
+        )
+    inferred = _infer_prompt_source_pause_boundary(context, entries, pause)
+    if recorded is not None and recorded != inferred:
+        raise WorkflowStateError(
+            "recorded prompt-source boundary contradicts durable action history"
+        )
+    return inferred
+
+
+def _infer_prompt_source_pause_boundary(
+    context: _WorkflowContext,
+    entries: Sequence[JournalEntry],
+    pause: JournalEntry,
+) -> PromptSourcePauseBoundary:
+    """Infer only histories whose next model boundary has exactly one meaning."""
+    state = context.state
+    action_events = [
+        entry
+        for entry in entries
+        if entry.event_type in {"action_intent", "action_completion"}
+    ]
+    current_worker = f"worker-r{state.repair_round:03d}"
+    current_auditor = f"auditor-r{state.repair_round:03d}"
+    current_action_ids = {
+        entry.action_id
+        for entry in action_events
+        if entry.action_id in {current_worker, current_auditor}
+    }
+    transitions = [
+        entry for entry in entries if entry.event_type == "transition"
+    ]
+    prior_transition = transitions[-2] if len(transitions) >= 2 else None
+    if (
+        pause.previous_state == "worker_running"
+        and prior_transition is not None
+        and prior_transition.reason
+        in {"initial_worker_requested", "prompt_source_human_resume"}
+        and state.repair_round == 0
+        and not action_events
+        and not state.completed_action_ids
+        and state.pending_action is None
+        and state.worker_thread_id is None
+        and state.latest_worker_action_id is None
+        and state.latest_audit_action_id is None
+        and state.latest_worker_result_path is None
+        and state.latest_audit_result_path is None
+        and state.latest_git_evidence_path is None
+        and state.latest_tests_path is None
+        and not state.prior_audit_result_paths
+        and state.repair_trigger is None
+        and not state.tests_passed
+        and not state.scope_compliant
+        and not state.contract_satisfied
+        and _workspace_matches_initial_baseline(context)
+    ):
+        return "initial_worker_prompt"
+    if (
+        pause.previous_state == "worker_running"
+        and prior_transition is not None
+        and prior_transition.reason
+        in {
+            "automatic_repair_worker_resume",
+            "human_continuation_requested",
+            "post_audit_repair_recovery",
+            "prompt_source_human_resume",
+        }
+        and state.repair_round > 0
+        and current_worker not in current_action_ids
+        and state.pending_action is None
+        and state.worker_thread_id is not None
+        and state.latest_worker_action_id is not None
+        and state.latest_worker_action_id in state.completed_action_ids
+        and state.latest_worker_result_path is not None
+        and state.repair_trigger is not None
+    ):
+        return "worker_repair_prompt"
+    if (
+        pause.previous_state == "auditor_running"
+        and prior_transition is not None
+        and prior_transition.reason
+        in {"fixed_tests_passed", "prompt_source_human_resume"}
+        and current_auditor not in current_action_ids
+        and state.pending_action is None
+        and state.latest_worker_action_id == current_worker
+        and current_worker in state.completed_action_ids
+        and state.latest_worker_result_path is not None
+        and state.latest_git_evidence_path is not None
+        and state.latest_tests_path is not None
+        and state.tests_passed
+        and state.scope_compliant
+    ):
+        return "auditor_prompt"
+    if (
+        pause.previous_state == "auditor_running"
+        and prior_transition is not None
+        and prior_transition.reason
+        in {"fixed_tests_passed", "post_audit_finish_recovery"}
+    ):
+        _prove_post_audit_prompt_source_pause(context, entries)
+        return "post_audit_terminal_decision"
+    raise WorkflowStateError(
+        "prompt-source boundary cannot be inferred unambiguously"
+    )
+
+
+def _workspace_matches_initial_baseline(context: _WorkflowContext) -> bool:
+    try:
+        current = record_git_baseline(
+            context.prepared.workspace,
+            environ=context.services.environ,
+        )
+    except (WorkflowInputError, WorkflowDependencyError):
+        return False
+    return (
+        current.clean
+        and current.repository_root == context.baseline.repository_root
+        and current.head == context.baseline.head
+        and current.branch == context.baseline.branch
+        and current.status_sha256 == context.baseline.status_sha256
+    )
+
+
 def _prove_post_audit_prompt_source_pause(
     context: _WorkflowContext,
     entries: Sequence[JournalEntry],
@@ -3830,7 +4089,8 @@ def _prove_post_audit_prompt_source_pause(
     """Prove that a prompt-source pause occurred after durable audit validation."""
     if (
         context.state.status != "human_paused"
-        or context.state.pause_reason != "prompt_source_invalid"
+        or context.state.pause_reason
+        not in {"prompt_source_human_pause", "prompt_source_invalid"}
         or context.state.pending_action is not None
     ):
         raise WorkflowStateError(
@@ -3850,33 +4110,38 @@ def _prove_post_audit_prompt_source_pause(
         for entry in later
         if entry.event_type == "transition"
         and entry.new_state == "human_paused"
-        and entry.reason == "prompt_source_invalid"
+        and entry.reason == context.state.pause_reason
     ]
-    if len(pause_entries) != 1 or pause_entries[0] is not next(
+    latest_transition = next(
         (
             entry
             for entry in reversed(entries)
             if entry.event_type == "transition"
         ),
         None,
-    ):
+    )
+    if not pause_entries or pause_entries[-1] is not latest_transition:
         raise WorkflowStateError(
             "post-audit prompt-source pause ordering is ambiguous"
         )
     expected_reasons = {
         "pass": {
+            "prompt_source_human_pause",
             "prompt_source_invalid",
             "escalation_package_written",
+            "post_audit_finish_recovery",
         },
         "fail_repairable": {
             "auditor_repairable_failure",
             "automatic_repair_worker_resume",
-            "prompt_source_invalid",
+            context.state.pause_reason,
             "escalation_package_written",
         },
         "escalate": {
+            "prompt_source_human_pause",
             "prompt_source_invalid",
             "escalation_package_written",
+            "post_audit_finish_recovery",
         },
     }[proof.audit.verdict]
     if any(entry.reason not in expected_reasons for entry in later):
@@ -3890,7 +4155,7 @@ def _prove_post_audit_prompt_source_pause(
         if transition_reasons != [
             "auditor_repairable_failure",
             "automatic_repair_worker_resume",
-            "prompt_source_invalid",
+            context.state.pause_reason,
         ]:
             raise WorkflowStateError(
                 "repairable post-audit pause ordering is invalid"
@@ -3903,10 +4168,29 @@ def _prove_post_audit_prompt_source_pause(
             raise WorkflowStateError(
                 "repairable post-audit pause contradicts the repair limit"
             )
-    elif context.state.repair_round != proof.audit_round:
-        raise WorkflowStateError(
-            "post-audit pause changed the validated audit round"
-        )
+    else:
+        transition_reasons = [
+            entry.reason for entry in later if entry.event_type == "transition"
+        ]
+        if (
+            len(transition_reasons) % 2 != 1
+            or any(
+                reason != "post_audit_finish_recovery"
+                for reason in transition_reasons[1::2]
+            )
+            or any(
+                reason
+                not in {"prompt_source_human_pause", "prompt_source_invalid"}
+                for reason in transition_reasons[::2]
+            )
+        ):
+            raise WorkflowStateError(
+                "terminal post-audit pause ordering is invalid"
+            )
+        if context.state.repair_round != proof.audit_round:
+            raise WorkflowStateError(
+                "post-audit pause changed the validated audit round"
+            )
     return proof
 
 

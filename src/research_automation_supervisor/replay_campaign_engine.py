@@ -92,6 +92,7 @@ from research_automation_supervisor.workflow_engine import (
     _write_json,
     continue_substage,
     post_audit_prompt_source_boundary,
+    prompt_source_pause_boundary,
     resume_prompt_source_substage,
     resume_substage,
     run_substage,
@@ -787,11 +788,59 @@ def _resume_stored_continuation(
             boundary,
         )
         return resume_substage(stage2_run, services=services)
-    post_audit = post_audit_prompt_source_boundary(
+    if observed.status in _ACTIVE_WORKFLOW_STATUSES and _stage2_accepted_continuation(
+        context,
+        task,
+        stage2_run,
+        continuation_path,
+        boundary,
+    ):
+        return resume_substage(stage2_run, services=services)
+    if boundary not in _PROMPT_SOURCE_BOUNDARIES:
+        if _stage2_accepted_continuation(
+            context,
+            task,
+            stage2_run,
+            continuation_path,
+            boundary,
+        ):
+            return observed
+        if boundary in {"worker_continuation", "repair_limit"}:
+            return continue_substage(
+                stage2_run,
+                continuation_path,
+                services=services,
+            )
+        raise ReplayCampaignStateError("stored paused boundary is unsupported")
+    semantic_boundary = prompt_source_pause_boundary(
         stage2_run,
         services=services,
     )
-    if post_audit is not None:
+    expected_campaign_boundary = {
+        "initial_worker_prompt": "supervisor_worker_prompt",
+        "worker_repair_prompt": "supervisor_repair_prompt",
+        "auditor_prompt": "supervisor_auditor_prompt",
+        "post_audit_terminal_decision": boundary,
+    }[semantic_boundary]
+    if boundary != expected_campaign_boundary:
+        raise ReplayCampaignStateError(
+            "campaign boundary contradicts the journal-proven Stage 2 boundary"
+        )
+    _validate_campaign_prompt_source_pause(
+        context,
+        task,
+        stage2_run,
+        semantic_boundary,
+    )
+    if semantic_boundary == "post_audit_terminal_decision":
+        post_audit = post_audit_prompt_source_boundary(
+            stage2_run,
+            services=services,
+        )
+        if post_audit is None:
+            raise ReplayCampaignStateError(
+                "post-audit boundary lacks a validated terminal decision"
+            )
         expected_boundary = {
             "finish": "supervisor_finish",
             "repair_prompt": "supervisor_repair_prompt",
@@ -807,32 +856,143 @@ def _resume_stored_continuation(
             stage2_run,
             boundary,
         )
-        if post_audit == "human_pause":
-            return observed
         return resume_prompt_source_substage(
             stage2_run,
             services=services,
             allow_post_audit_recovery=True,
         )
-    if _stage2_accepted_continuation(
-        context,
-        task,
-        stage2_run,
-        continuation_path,
-        boundary,
-    ):
-        if observed.status in _ACTIVE_WORKFLOW_STATUSES:
-            return resume_substage(stage2_run, services=services)
-        return observed
-    if boundary in _PROMPT_SOURCE_BOUNDARIES:
-        return resume_prompt_source_substage(stage2_run, services=services)
-    if boundary in {"worker_continuation", "repair_limit"}:
-        return continue_substage(
-            stage2_run,
-            continuation_path,
-            services=services,
+    return resume_prompt_source_substage(stage2_run, services=services)
+
+
+def _validate_campaign_prompt_source_pause(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    stage2_run: Path,
+    semantic_boundary: str,
+) -> None:
+    """Bind a Stage 2 prompt pause to the matching durable supervisor turn."""
+    task_id = task.specification.task_id
+    actions = _supervisor_actions_for_task(context.run_directory, task_id)
+    expected_source = {
+        "initial_worker_prompt": "worker_prompt",
+        "worker_repair_prompt": "repair_prompt",
+        "auditor_prompt": "auditor_prompt",
+        "post_audit_terminal_decision": None,
+    }[semantic_boundary]
+    if expected_source is not None:
+        matching_action = (
+            bool(actions) and actions[-1].get("boundary") == expected_source
         )
-    raise ReplayCampaignStateError("stored paused boundary is unsupported")
+        matching_unlaunched_intent = (
+            semantic_boundary != "initial_worker_prompt"
+            and _matching_unlaunched_supervisor_intent(
+                context.run_directory,
+                stage2_run,
+                task_id,
+                expected_source,
+            )
+        )
+        if not matching_action and not matching_unlaunched_intent:
+            raise ReplayCampaignStateError(
+                "prompt-source pause lacks a matching durable supervisor action"
+            )
+    if semantic_boundary != "initial_worker_prompt":
+        return
+    if any(action.get("boundary") != "worker_prompt" for action in actions):
+        raise ReplayCampaignStateError(
+            "initial worker-prompt supervisor history is ambiguous"
+        )
+    def refused_worker_prompt(action: Mapping[str, object]) -> bool:
+        raw = action.get("raw_action")
+        accepted = action.get("accepted_action")
+        return (
+            accepted is None
+            and isinstance(raw, dict)
+            and raw.get("action") == "worker_prompt"
+            and bool(action.get("rejection_reasons"))
+        ) or (
+            isinstance(accepted, dict)
+            and accepted.get("action") == "human_pause"
+        )
+
+    if not all(refused_worker_prompt(action) for action in actions):
+        raise ReplayCampaignStateError(
+            "initial worker-prompt pause lacks its recorded supervisor rejection"
+        )
+    state = substage_status(stage2_run)
+    if (
+        state.latest_worker_action_id is not None
+        or state.latest_audit_action_id is not None
+        or context.state.gold_evaluated_task_ids
+        or context.state.gold_reveal_model_turn_count is not None
+        or context.state.post_gold_model_turn_count is not None
+        or task_id in context.state.model_terminal_task_ids
+        or task_id in context.state.completed_task_ids
+        or list((context.run_directory / "tasks").glob("*/gold-reveal.json"))
+        or any(
+            path.is_file()
+            for path in (context.run_directory / "tasks").glob("*/gold/**/*")
+        )
+    ):
+        raise ReplayCampaignStateError(
+            "initial worker-prompt recovery has later action or gold evidence"
+        )
+
+
+def _matching_unlaunched_supervisor_intent(
+    run_directory: Path,
+    stage2_run: Path,
+    task_id: str,
+    boundary: str,
+) -> bool:
+    """Recognize one hashed intent whose adapter was proven not to start."""
+    requests = [
+        request
+        for request in _read_matching(run_directory / "decisions", "*/request.json")
+        if request.get("task_id") == task_id
+        and request.get("boundary") == boundary
+    ]
+    unlaunched = []
+    for request in requests:
+        action_id = request.get("action_id")
+        if (
+            isinstance(action_id, str)
+            and not (
+                run_directory / "supervisor" / "codex" / action_id
+            ).exists()
+        ):
+            unlaunched.append(request)
+    if len(unlaunched) != 1:
+        return False
+    latest = unlaunched[0]
+    action_id = latest.get("action_id")
+    if not isinstance(action_id, str):
+        return False
+    escalation_paths = sorted(
+        (stage2_run / "escalation").glob(
+            "*-prompt_source_invalid/package.json"
+        )
+    )
+    if not escalation_paths:
+        return False
+    escalation = _read_json(escalation_paths[-1])
+    if (
+        escalation.get("prompt_source_failure_category")
+        != "supervisor_adapter_not_started"
+        or escalation.get("prompt_source_adapter_status") != "not_started"
+    ):
+        return False
+    campaign_entries = _read_campaign_journal(run_directory)
+    request_path = (
+        run_directory / "decisions" / action_id / "request.json"
+    )
+    return any(
+        entry.get("reason") == "supervisor_action_intent"
+        and isinstance(entry.get("artifact_hashes"), dict)
+        and entry["artifact_hashes"].get(str(request_path))
+        == sha256_regular_file(request_path)
+        for entry in campaign_entries
+    )
 
 
 def _post_audit_recovery_started(
@@ -842,6 +1002,7 @@ def _post_audit_recovery_started(
     expected_reason = {
         "supervisor_finish": "post_audit_finish_recovery",
         "supervisor_repair_prompt": "post_audit_repair_recovery",
+        "auditor_escalation": "post_audit_finish_recovery",
     }.get(boundary)
     if expected_reason is None:
         return False
@@ -914,11 +1075,27 @@ def _validate_campaign_post_audit_recovery(
     latest = actions[-1]
     accepted = latest.get("accepted_action")
     latest_boundary = latest.get("boundary")
+    pause_attempt = max(context.state.human_decision_count - 1, 0)
+    paused_latest = (
+        latest_boundary == expected_source_boundary
+        and (
+            (
+                isinstance(accepted, dict)
+                and accepted.get("action") == "human_pause"
+            )
+            or (
+                accepted is None
+                and bool(latest.get("rejection_reasons"))
+            )
+        )
+        and isinstance(latest.get("key"), str)
+        and cast(str, latest["key"]).endswith(f"-h{pause_attempt:03d}")
+    )
     allowed_latest = (
         latest_boundary == "auditor_prompt"
         and isinstance(accepted, dict)
         and accepted.get("action") == "auditor_prompt"
-    ) or (
+    ) or paused_latest or (
         recovery_started
         and latest_boundary == expected_source_boundary
         and isinstance(accepted, dict)
@@ -2563,42 +2740,36 @@ def _paused_boundary(
     if reason == "auditor_escalated":
         return "auditor_escalation"
     if reason.startswith("prompt_source"):
-        if reason == "prompt_source_invalid":
-            recovered = post_audit_prompt_source_boundary(
+        semantic_boundary = prompt_source_pause_boundary(
+            Path(result.artifact_directory),
+            services=services,
+        )
+        _validate_campaign_prompt_source_pause(
+            context,
+            task,
+            Path(result.artifact_directory),
+            semantic_boundary,
+        )
+        direct = {
+            "initial_worker_prompt": "supervisor_worker_prompt",
+            "worker_repair_prompt": "supervisor_repair_prompt",
+            "auditor_prompt": "supervisor_auditor_prompt",
+        }.get(semantic_boundary)
+        if direct is not None:
+            return direct
+        recovered = post_audit_prompt_source_boundary(
                 Path(result.artifact_directory),
                 services=services,
             )
-            if recovered is not None:
-                return {
-                    "finish": "supervisor_finish",
-                    "repair_prompt": "supervisor_repair_prompt",
-                    "human_pause": "auditor_escalation",
-                }[recovered]
-        actions = _supervisor_actions_for_task(
-            context.run_directory,
-            task.specification.task_id,
-        )
-        if not actions:
+        if recovered is None:
             raise ReplayCampaignStateError(
-                "prompt-source pause has no exact supervisor boundary evidence"
+                "terminal prompt-source pause lacks validated audit evidence"
             )
-        source_boundary = actions[-1].get("boundary")
-        if not isinstance(source_boundary, str):
-            raise ReplayCampaignStateError(
-                "prompt-source pause boundary evidence is malformed"
-            )
-        mapped = {
-            "worker_prompt": "supervisor_worker_prompt",
-            "auditor_prompt": "supervisor_auditor_prompt",
-            "repair_prompt": "supervisor_repair_prompt",
+        return {
             "finish": "supervisor_finish",
             "human_pause": "auditor_escalation",
-        }.get(source_boundary)
-        if mapped is None:
-            raise ReplayCampaignStateError(
-                "prompt-source pause boundary is unsupported"
-            )
-        return mapped
+            "repair_prompt": "supervisor_repair_prompt",
+        }[recovered]
     return "worker_continuation"
 
 

@@ -475,6 +475,12 @@ class WorkflowState(BaseModel):
     repair_trigger: Literal["scope", "test", "audit", "human"] | None
     continuation_path: str | None
     continuation_sha256: str | None
+    prompt_source_boundary: Literal[
+        "initial_worker_prompt",
+        "worker_repair_prompt",
+        "auditor_prompt",
+        "post_audit_terminal_decision",
+    ] | None = None
     tests_passed: bool
     scope_compliant: bool
     contract_satisfied: bool
