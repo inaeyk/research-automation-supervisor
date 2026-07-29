@@ -148,6 +148,7 @@ def build_supervisor_request(
         },
         "gold_evidence": "withheld_until_terminal_and_never_model_visible",
     }
+    evidence = _portable_supervisor_evidence(evidence, campaign, request)
     policy = campaign.supervisor_policy.content.decode("utf-8")
     content = (
         "You are the one persistent historical-replay supervisor.\n"
@@ -181,6 +182,37 @@ def build_supervisor_request(
         output_schema=output_schema,
         visible_evidence=evidence,
     )
+
+
+def _portable_supervisor_evidence(
+    value: object,
+    campaign: PreparedReplayCampaign,
+    request: WorkflowPromptRequest,
+) -> dict[str, object]:
+    """Keep persistent Codex rollout state free of host workspace/run locators."""
+    replacements = [
+        (
+            str(prepared_task.stage2.repository_root),
+            f"<TASK_WORKSPACE:{prepared_task.specification.task_id}>",
+        )
+        for prepared_task in campaign.tasks
+    ]
+    replacements.append((str(request.run_directory), "<STAGE2_RUN>"))
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+
+    def normalize(item: object) -> object:
+        if isinstance(item, dict):
+            return {str(key): normalize(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return [normalize(child) for child in item]
+        if isinstance(item, str):
+            for locator, replacement in replacements:
+                item = item.replace(locator, replacement)
+        return item
+
+    normalized = normalize(value)
+    assert isinstance(normalized, dict)
+    return normalized
 
 
 def _read_optional_json(path: Path | None) -> object:

@@ -188,6 +188,12 @@ def main() -> int:
         prompt = b""
     else:
         prompt = sys.stdin.buffer.read()
+    required_home_file = configuration.get("require_codex_home_file")
+    if isinstance(required_home_file, str):
+        required = Path(os.environ["CODEX_HOME"]) / required_home_file
+        if not required.is_file():
+            print("fake codex required runtime-home state is absent", file=sys.stderr)
+            return 73
     observation = {
         "argv": sys.argv[1:],
         "cwd": str(workspace),
@@ -220,11 +226,18 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    if configuration.get("write_codex_home_workspace_locator"):
+    if configuration.get("persist_prompt_in_codex_home"):
         codex_home = Path(os.environ["CODEX_HOME"])
-        locator = codex_home / "cache" / "workspace-locator.txt"
-        locator.parent.mkdir(parents=True, exist_ok=True)
-        locator.write_text(str(workspace), encoding="utf-8")
+        persisted = codex_home / "sessions" / f"prompt-{call_index:03d}.txt"
+        persisted.parent.mkdir(parents=True, exist_ok=True)
+        persisted.write_bytes(prompt)
+    write_codex_home_files = configuration.get("write_codex_home_files", {})
+    if isinstance(write_codex_home_files, dict) and write_codex_home_files:
+        codex_home = Path(os.environ["CODEX_HOME"])
+        for relative, content in write_codex_home_files.items():
+            destination = codex_home / str(relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(str(content), encoding="utf-8")
 
     write_files = configuration.get("write_files", {})
     if isinstance(write_files, dict):

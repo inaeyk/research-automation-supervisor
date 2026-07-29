@@ -1519,7 +1519,8 @@ def _invoke_supervisor(
     if capability is None:
         raise ReplayCampaignDependencyError("supervisor isolation is unavailable")
     runtime_home = context.run_directory / "quarantine" / "codex-home"
-    _recreate_campaign_supervisor_runtime_home(runtime_home)
+    if resume_id is None:
+        _recreate_campaign_supervisor_runtime_home(runtime_home)
 
     def isolated_launch(
         command: Sequence[str],

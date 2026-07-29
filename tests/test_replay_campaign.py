@@ -2636,7 +2636,10 @@ os.execve(inner[0], inner, environment)
                         "require_stage4_policy": True,
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
-                        "write_codex_home_workspace_locator": True,
+                        "persist_prompt_in_codex_home": True,
+                        "write_codex_home_files": {
+                            "sessions/resume-marker.txt": SUPERVISOR_UUID,
+                        },
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2653,7 +2656,8 @@ os.execve(inner[0], inner, environment)
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
                         "expected_resume_thread_id": SUPERVISOR_UUID,
-                        "write_codex_home_workspace_locator": True,
+                        "persist_prompt_in_codex_home": True,
+                        "require_codex_home_file": "sessions/resume-marker.txt",
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2670,7 +2674,8 @@ os.execve(inner[0], inner, environment)
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
                         "expected_resume_thread_id": SUPERVISOR_UUID,
-                        "write_codex_home_workspace_locator": True,
+                        "persist_prompt_in_codex_home": True,
+                        "require_codex_home_file": "sessions/resume-marker.txt",
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2733,9 +2738,26 @@ os.execve(inner[0], inner, environment)
         "auditor_prompt": SUPERVISOR_UUID,
         "finish": SUPERVISOR_UUID,
     }
-    assert (
-        run / "quarantine/codex-home/cache/workspace-locator.txt"
-    ).read_text(encoding="utf-8") == str(run / "quarantine/workspace")
+    runtime_home = run / "quarantine/codex-home"
+    assert (runtime_home / "sessions/resume-marker.txt").read_text(
+        encoding="utf-8"
+    ) == SUPERVISOR_UUID
+    prompts = sorted((run / "decisions").glob("*/supervisor-prompt.md"))
+    assert len(prompts) == 3
+    forbidden = (
+        str(run),
+        str(tmp_path / "task-1/project"),
+    )
+    assert all(
+        value not in path.read_text(encoding="utf-8")
+        for path in prompts
+        for value in forbidden
+    )
+    combined_prompts = "\n".join(
+        path.read_text(encoding="utf-8") for path in prompts
+    )
+    assert "<TASK_WORKSPACE:replay-task-1>" in combined_prompts
+    assert "<STAGE2_RUN>" in combined_prompts
 
 
 def test_campaign_supervisor_runtime_home_is_recreated(tmp_path: Path) -> None:
