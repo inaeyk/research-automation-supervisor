@@ -180,15 +180,106 @@ def test_exact_process_construction_and_prompt_stdin(
     assert ("--ephemeral" in argv) is ephemeral
     assert argv[-1] == "-"
     assert {"--ignore-user-config", "--ignore-rules", "--strict-config"} <= set(argv)
+    if role == "auditor":
+        assert argv.count("--add-dir") == 1
+        scratch = Path(argv[argv.index("--add-dir") + 1])
+        assert scratch == Path(result.artifact_directory) / "scratch"
+    else:
+        assert "--add-dir" not in argv
     for forbidden in (
         "--skip-git-repo-check",
-        "--add-dir",
         "--search",
         "--full-auto",
         "--yolo",
         "danger-full-access",
     ):
         assert forbidden not in argv
+
+
+def test_read_only_auditor_tempfile_reproducer_uses_only_action_scratch(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_request(tmp_path, "auditor")
+    protected = prepared.workspace / "protected.txt"
+    protected.write_text("immutable\n", encoding="utf-8")
+    configure(
+        prepared,
+        exercise_tempfile=True,
+        stdout_lines=['{"thread_id":"audit-1","type":"thread.started"}'],
+        final="completed",
+    )
+
+    result = run_fake(prepared)
+    directory = Path(result.artifact_directory)
+    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    observation = json.loads(
+        (prepared.workspace / ".fake-codex-observation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    argv = observation["argv"]
+    environment = observation["environment"]
+    scratch = directory / "scratch"
+    reproducer = observation["tempfile_reproducer"]
+
+    assert result.status == "succeeded"
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert argv.count("--add-dir") == 1
+    assert Path(argv[argv.index("--add-dir") + 1]) == scratch
+    assert environment["TMPDIR"] == str(scratch)
+    assert environment["TMP"] == str(scratch)
+    assert environment["TEMP"] == str(scratch)
+    assert Path(reproducer["temporary_directory"]).is_relative_to(scratch)
+    assert reproducer["source_created"] is True
+    assert reproducer["compiled_created"] is True
+    assert protected.read_text(encoding="utf-8") == "immutable\n"
+    assert metadata["auditor_scratch_path"] == str(scratch)
+    assert (
+        metadata["sandbox_disposition"]
+        == "workspace-read-only-action-scratch-write"
+    )
+
+
+def test_auditor_scratch_is_unique_per_action_and_worker_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    first = prepared_request(tmp_path / "first", "auditor")
+    second = prepared_request(tmp_path / "second", "auditor")
+    worker = prepared_request(tmp_path / "worker", "worker")
+    for prepared, thread in (
+        (first, "audit-1"),
+        (second, "audit-2"),
+        (worker, "worker-1"),
+    ):
+        configure(
+            prepared,
+            stdout_lines=[
+                json.dumps({"thread_id": thread, "type": "thread.started"})
+            ],
+            final="completed",
+        )
+
+    first_result = run_fake(first)
+    second_result = run_fake(second)
+    worker_result = run_fake(worker)
+    first_metadata = json.loads(
+        (Path(first_result.artifact_directory) / "metadata.json").read_text()
+    )
+    second_metadata = json.loads(
+        (Path(second_result.artifact_directory) / "metadata.json").read_text()
+    )
+    worker_metadata = json.loads(
+        (Path(worker_result.artifact_directory) / "metadata.json").read_text()
+    )
+
+    assert first_metadata["auditor_scratch_path"] != second_metadata[
+        "auditor_scratch_path"
+    ]
+    assert Path(first_metadata["auditor_scratch_path"]).is_dir()
+    assert Path(second_metadata["auditor_scratch_path"]).is_dir()
+    assert "auditor_scratch_path" not in worker_metadata
+    assert "sandbox_disposition" not in worker_metadata
+    assert "--add-dir" not in worker_metadata["command"]
 
 
 def test_build_command_has_no_prompt_and_only_role_owned_policy(tmp_path: Path) -> None:

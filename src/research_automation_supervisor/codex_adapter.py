@@ -51,6 +51,8 @@ STDERR_LIMIT_BYTES = 10 * 1024 * 1024
 TERMINATION_GRACE_SECONDS = 2.0
 IO_POLL_SECONDS = 0.1
 VERSION_PROBE_TIMEOUT_SECONDS = 10.0
+AUDITOR_SCRATCH_DIRECTORY_NAME = "scratch"
+AUDITOR_SANDBOX_DISPOSITION = "workspace-read-only-action-scratch-write"
 
 _PERMISSION_PHRASES = (
     "permission denied",
@@ -330,6 +332,20 @@ def run_prepared_codex(
         resolved_runs_dir,
         prepared.request.run_id,
     )
+    auditor_scratch = (
+        prepare_auditor_scratch_directory(artifact_directory)
+        if prepared.request.role == "auditor"
+        else None
+    )
+    if auditor_scratch is not None:
+        scratch_value = str(auditor_scratch)
+        environment.update(
+            {
+                "TMPDIR": scratch_value,
+                "TMP": scratch_value,
+                "TEMP": scratch_value,
+            }
+        )
     redaction_values = tuple(
         sorted(
             {value for value in (*sensitive_values, *confidential_fragments) if value},
@@ -372,6 +388,7 @@ def run_prepared_codex(
             output_schema=resolved_output_schema,
             resume_thread_id=resume_thread_id,
             skip_git_repo_check=skip_git_repo_check,
+            writable_scratch=auditor_scratch,
         )
         launch = (
             process_launch_builder(
@@ -522,6 +539,7 @@ def run_prepared_codex(
             confidentiality_violation_detected
         ),
         durable_command_replacements=durable_command_replacements or {},
+        auditor_scratch=auditor_scratch,
     )
     _atomic_write_json(
         artifact_directory / "metadata.json",
@@ -653,9 +671,17 @@ def build_codex_command(
     output_schema: Path | None = None,
     resume_thread_id: str | None = None,
     skip_git_repo_check: bool = False,
+    writable_scratch: Path | None = None,
 ) -> list[str]:
     """Construct the fixed shell-free Codex argument vector."""
     request = prepared.request
+    if writable_scratch is not None and request.role != "auditor":
+        raise CodexRequestError("only an auditor may receive action-owned scratch")
+    if writable_scratch is not None and (
+        not writable_scratch.is_absolute()
+        or writable_scratch.name != AUDITOR_SCRATCH_DIRECTORY_NAME
+    ):
+        raise CodexRequestError("auditor scratch locator is invalid")
     if resume_thread_id is not None and (
         request.role not in {"worker", "supervisor"}
         or not resume_thread_id.strip()
@@ -692,6 +718,8 @@ def build_codex_command(
             "--cd",
             str(prepared.workspace),
         ]
+        if writable_scratch is not None:
+            command.extend(("--add-dir", str(writable_scratch)))
         if prepared.policy.ephemeral:
             command.append("--ephemeral")
     else:
@@ -1184,6 +1212,70 @@ def _create_artifact_directory(runs_dir: Path, run_id: str) -> Path:
         raise CodexRequestError("run directory could not be created") from exc
 
 
+def prepare_auditor_scratch_directory(artifact_directory: Path) -> Path:
+    """Create or verify one private scratch directory below an exact action directory."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        inspected = artifact_directory.lstat()
+        parent_descriptor = os.open(artifact_directory, flags)
+        try:
+            opened = os.fstat(parent_descriptor)
+            if (
+                not stat.S_ISDIR(inspected.st_mode)
+                or stat.S_ISLNK(inspected.st_mode)
+                or (inspected.st_dev, inspected.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                raise OSError("auditor action directory is not exact")
+            with suppress(FileExistsError):
+                os.mkdir(
+                    AUDITOR_SCRATCH_DIRECTORY_NAME,
+                    mode=0o700,
+                    dir_fd=parent_descriptor,
+                )
+            scratch_status = os.stat(
+                AUDITOR_SCRATCH_DIRECTORY_NAME,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(scratch_status.st_mode)
+                or stat.S_ISLNK(scratch_status.st_mode)
+                or scratch_status.st_uid != os.getuid()
+                or scratch_status.st_nlink < 2
+            ):
+                raise OSError("auditor scratch directory is not exact")
+            scratch_descriptor = os.open(
+                AUDITOR_SCRATCH_DIRECTORY_NAME,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                opened_scratch = os.fstat(scratch_descriptor)
+                if (
+                    opened_scratch.st_dev,
+                    opened_scratch.st_ino,
+                ) != (
+                    scratch_status.st_dev,
+                    scratch_status.st_ino,
+                ):
+                    raise OSError("auditor scratch directory changed during open")
+                os.fchmod(scratch_descriptor, 0o700)
+                os.fsync(scratch_descriptor)
+            finally:
+                os.close(scratch_descriptor)
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    except OSError as exc:
+        raise CodexRequestError(
+            "auditor action-owned scratch could not be prepared safely"
+        ) from exc
+    return artifact_directory / AUDITOR_SCRATCH_DIRECTORY_NAME
+
+
 def _initialize_artifacts(
     artifact_directory: Path,
     prepared: PreparedCodexRequest,
@@ -1224,6 +1316,7 @@ def _build_metadata(
     limits: AdapterLimits,
     confidentiality_violation_detected: bool,
     durable_command_replacements: Mapping[str, str],
+    auditor_scratch: Path | None,
 ) -> dict[str, object]:
     terminating_signal = (
         -observation.exit_code
@@ -1302,6 +1395,9 @@ def _build_metadata(
     }
     if confidentiality_violation_detected:
         metadata["confidentiality_violation_detected"] = True
+    if auditor_scratch is not None:
+        metadata["auditor_scratch_path"] = str(auditor_scratch)
+        metadata["sandbox_disposition"] = AUDITOR_SANDBOX_DISPOSITION
     return metadata
 
 

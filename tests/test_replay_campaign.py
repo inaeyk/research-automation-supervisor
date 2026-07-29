@@ -945,6 +945,52 @@ def test_auditor_escalation_pause_reenters_the_same_supervisor_boundary(
     assert len(supervisor.resume_ids) == 4
 
 
+def test_auditor_transport_failure_reaches_campaign_escalation_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response(
+                "auditor",
+                AUDITOR_ONE_UUID,
+                auditor_result(),
+                exit_code=9,
+                stderr="bounded campaign auditor diagnostic\n",
+            ),
+        ]],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+        ]
+    )
+
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(fake, supervisor, []),
+    )
+    run = next((tmp_path / "runs").iterdir())
+    packet = (run / "human-review-packet.md").read_text(encoding="utf-8")
+    report = json.loads(
+        (run / "tasks/replay-task-1/task-report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert paused.status == "human_paused"
+    assert paused.pause_reason == "auditor_requires_judgment"
+    assert "Transport error category: auditor_process_failed" in packet
+    assert "bounded campaign auditor diagnostic" in packet
+    assert report["escalation_evidence"] == {
+        "transport_error_category": "auditor_process_failed",
+        "transport_stderr_tail": "bounded campaign auditor diagnostic\n",
+    }
+
+
 def test_crash_after_stage2_continuation_acceptance_does_not_duplicate_actions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

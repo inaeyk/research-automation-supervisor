@@ -1695,6 +1695,9 @@ def _write_paused_task_summary(
                 in context.state.human_assisted_task_ids
             ),
             "stage2_result": workflow.to_dict(),
+            "escalation_evidence": _stage2_escalation_evidence(
+                Path(workflow.artifact_directory)
+            ),
         },
     )
 
@@ -1707,6 +1710,23 @@ def _pause_campaign(
     boundary: str,
 ) -> ReplayCampaignState:
     safe_detail = redact_text(detail, context.prepared.sensitive_values)[:16_384]
+    escalation = _stage2_escalation_evidence(
+        None
+        if context.state.current_task_run is None
+        else Path(context.state.current_task_run)
+    )
+    transport_lines = ""
+    error_category = escalation.get("transport_error_category")
+    stderr_tail = escalation.get("transport_stderr_tail")
+    if isinstance(error_category, str):
+        transport_lines += f"- Transport error category: {error_category}\n"
+    if isinstance(stderr_tail, str) and stderr_tail:
+        transport_lines += (
+            "- Bounded transport stderr tail:\n\n"
+            "```text\n"
+            f"{stderr_tail}\n"
+            "```\n"
+        )
     worker_id = context.state.task_worker_session_ids.get(
         task.specification.task_id,
         "not established",
@@ -1731,6 +1751,7 @@ def _pause_campaign(
             f"- Safe reason category: {category}\n"
             f"- Exact paused boundary: {boundary}\n"
             f"- Detail: {safe_detail}\n"
+            f"{transport_lines}"
             f"- Stage 2 run: {context.state.current_task_run or 'not created'}\n"
             f"- Supervisor UUID: {context.state.supervisor_session_id or 'not established'}\n"
             f"- Worker UUID: {worker_id}\n"
@@ -1745,6 +1766,29 @@ def _pause_campaign(
     )
     _write_report(context)
     return context.state
+
+
+def _stage2_escalation_evidence(
+    stage2_run: Path | None,
+) -> dict[str, str]:
+    """Load only the bounded auditor transport fields from Stage 2 evidence."""
+    if stage2_run is None:
+        return {}
+    path = stage2_run / "escalation" / "package.json"
+    try:
+        value = _read_json(path)
+    except ReplayCampaignStateError:
+        return {}
+    category = value.get("transport_error_category")
+    tail = value.get("transport_stderr_tail")
+    if not isinstance(category, str) or not category.startswith("auditor_"):
+        return {}
+    return {
+        "transport_error_category": category[:256],
+        "transport_stderr_tail": (
+            tail[-4096:] if isinstance(tail, str) else ""
+        ),
+    }
 
 
 def _record_notification(

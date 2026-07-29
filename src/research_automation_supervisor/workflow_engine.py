@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from research_automation_supervisor.codex_adapter import (
     DEFAULT_LIMITS,
     build_subprocess_environment,
+    prepare_auditor_scratch_directory,
     run_prepared_codex,
 )
 from research_automation_supervisor.codex_models import (
@@ -2029,6 +2030,8 @@ def _recover_pending_action(context: _WorkflowContext) -> WorkflowState:
     if pending is None:
         return context.state
     try:
+        if pending.kind == "auditor" and Path(pending.artifact_path).exists():
+            prepare_auditor_scratch_directory(Path(pending.artifact_path))
         record = _read_action_record(context.run_directory, pending.action_id)
         if record is None:
             record = (
@@ -2037,7 +2040,7 @@ def _recover_pending_action(context: _WorkflowContext) -> WorkflowState:
                 else _finalize_test_action(context)
             )
         _verify_action_record(context, pending, record)
-    except WorkflowStateError:
+    except (CodexAdapterError, WorkflowStateError):
         return _pause(
             context,
             "human_paused",
@@ -3755,6 +3758,10 @@ def _write_escalation(
 ) -> tuple[Path, ...]:
     root = context.run_directory / "escalation"
     directory = root / f"{context.state.journal_sequence:06d}-{reason}"
+    transport_evidence = _auditor_transport_escalation_evidence(
+        context,
+        reason,
+    )
     package = {
         "schema_version": 1,
         "substage_id": context.state.substage_id,
@@ -3768,21 +3775,36 @@ def _write_escalation(
         "latest_git_evidence_path": context.state.latest_git_evidence_path,
         "latest_tests_path": context.state.latest_tests_path,
         "updated_at": context.state.updated_at,
+        **transport_evidence,
     }
     package_path = directory / "package.json"
     readme_path = directory / "README.md"
     _write_json(package_path, package)
-    markdown = "\n".join(
-        (
+    markdown_lines = [
             "# Workflow escalation",
             "",
             f"- Status: `{context.state.status}`",
             f"- Reason: `{reason}`",
             f"- Repair round: `{context.state.repair_round}`",
             f"- Summary: {summary}",
-            "",
+    ]
+    error_category = transport_evidence.get("transport_error_category")
+    stderr_tail = transport_evidence.get("transport_stderr_tail")
+    if isinstance(error_category, str):
+        markdown_lines.append(f"- Transport error category: `{error_category}`")
+    if isinstance(stderr_tail, str) and stderr_tail:
+        markdown_lines.extend(
+            (
+                "",
+                "## Bounded transport stderr tail",
+                "",
+                "```text",
+                stderr_tail,
+                "```",
+            )
         )
-    )
+    markdown_lines.append("")
+    markdown = "\n".join(markdown_lines)
     _write_text(readme_path, markdown)
     root_package = root / "package.json"
     root_readme = root / "README.md"
@@ -3792,6 +3814,36 @@ def _write_escalation(
         _write_text(root_readme, markdown)
         mirror_paths = (root_package, root_readme)
     return (package_path, readme_path, *mirror_paths)
+
+
+def _auditor_transport_escalation_evidence(
+    context: _WorkflowContext,
+    reason: str,
+) -> dict[str, str]:
+    """Return bounded, already-redacted transport evidence for an auditor failure."""
+    action_id = context.state.latest_audit_action_id
+    if not reason.startswith("auditor_") or action_id is None:
+        return {}
+    record = _read_action_record(context.run_directory, action_id)
+    if record is None:
+        return {}
+    try:
+        result = CodexRunResult.model_validate(record.get("adapter_result"))
+    except ValidationError:
+        return {}
+    if result.status == "succeeded":
+        return {}
+    stderr_path = Path(result.artifact_directory) / "stderr.log"
+    try:
+        stderr_bytes = stderr_path.read_bytes()
+    except OSError:
+        stderr_bytes = b""
+    tail = stderr_bytes[-4096:].decode("utf-8", errors="replace")
+    _, _, sensitive_values = build_subprocess_environment(context.services.environ)
+    return {
+        "transport_error_category": f"auditor_{result.status}",
+        "transport_stderr_tail": redact_text(tail, sensitive_values),
+    }
 
 
 def _frozen_artifact_hashes(

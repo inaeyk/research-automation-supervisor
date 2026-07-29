@@ -1064,6 +1064,26 @@ def test_complete_codex_proof_recovers_once_without_duplicate_launch(
     assert (tmp_path / "fake-counter").read_text(encoding="ascii") == final_count
 
 
+def test_interrupted_auditor_recreates_same_scratch_without_duplicate_launch(
+    tmp_path: Path,
+) -> None:
+    run_directory, fake = _interrupted_codex_run(
+        tmp_path,
+        interrupt_role="auditor",
+    )
+    artifact = run_directory / "audits/codex/auditor-r000"
+    scratch = artifact / "scratch"
+    before = (tmp_path / "fake-counter").read_text(encoding="ascii")
+    scratch.rmdir()
+
+    result = resume_substage(run_directory, services=services(fake))
+
+    assert result.status == "completed"
+    assert scratch.is_dir()
+    assert (tmp_path / "fake-counter").read_text(encoding="ascii") == before
+    assert len(list((run_directory / "actions").glob("auditor-*.json"))) == 1
+
+
 @pytest.mark.parametrize("boundary", ["before_intent", "after_completion_snapshot"])
 def test_worker_crash_boundaries_do_not_duplicate_launch(
     tmp_path: Path,

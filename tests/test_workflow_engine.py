@@ -85,6 +85,43 @@ def test_direct_pass_uses_persistent_worker_fresh_auditor_and_equal_snapshots(
         assert human_file.read_bytes() not in artifact_bytes
 
 
+def test_auditor_transport_failure_escalation_keeps_category_and_stderr_tail(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake = create_workflow_tree(
+        tmp_path,
+        responses=[
+            codex_response("worker", "worker-thread-1", worker_result()),
+            codex_response(
+                "auditor",
+                "audit-thread-1",
+                auditor_result(),
+                exit_code=9,
+                stderr="specific safe auditor diagnostic\n",
+            ),
+        ],
+    )
+
+    result = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=services(fake),
+    )
+    escalation = json.loads(
+        (
+            Path(result.artifact_directory) / "escalation/package.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert result.status == "human_paused"
+    assert result.pause_reason == "auditor_process_failed"
+    assert escalation["transport_error_category"] == "auditor_process_failed"
+    assert (
+        escalation["transport_stderr_tail"]
+        == "specific safe auditor diagnostic\n"
+    )
+
+
 def test_default_prompt_source_seam_preserves_frozen_worker_prompt_bytes(
     tmp_path: Path,
 ) -> None:

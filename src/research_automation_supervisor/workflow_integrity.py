@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 from collections.abc import Mapping
@@ -22,6 +23,10 @@ from pydantic import (
     model_validator,
 )
 
+from research_automation_supervisor.codex_adapter import (
+    AUDITOR_SANDBOX_DISPOSITION,
+    AUDITOR_SCRATCH_DIRECTORY_NAME,
+)
 from research_automation_supervisor.codex_models import (
     CodexRunResult,
     ModelName,
@@ -147,6 +152,10 @@ class CodexMetadata(BaseModel):
     events_sha256: Sha256
     stderr_sha256: Sha256
     final_message_sha256: Sha256
+    auditor_scratch_path: str | None = None
+    sandbox_disposition: Literal[
+        "workspace-read-only-action-scratch-write"
+    ] | None = None
 
     @model_validator(mode="after")
     def validate_process_fields(self) -> CodexMetadata:
@@ -174,6 +183,17 @@ class CodexMetadata(BaseModel):
             )
         ):
             raise ValueError("removed environment-variable names are invalid")
+        if (self.auditor_scratch_path is None) != (
+            self.sandbox_disposition is None
+        ):
+            raise ValueError("auditor scratch metadata is incomplete")
+        if self.auditor_scratch_path is not None and (
+            self.role != "auditor"
+            or self.sandbox != "read-only"
+            or not self.ephemeral
+            or self.sandbox_disposition != AUDITOR_SANDBOX_DISPOSITION
+        ):
+            raise ValueError("auditor scratch metadata contradicts the sandbox")
         return self
 
 
@@ -358,7 +378,16 @@ def verify_codex_artifacts(
     if pending.kind not in {"worker", "auditor"}:
         raise WorkflowStateError("Codex proof received a non-Codex intent")
     artifact_directory = Path(pending.artifact_path)
-    _require_exact_directory(artifact_directory, STAGE2_STAGE1_ARTIFACT_NAMES)
+    scratch_directories = (
+        frozenset({AUDITOR_SCRATCH_DIRECTORY_NAME})
+        if pending.kind == "auditor"
+        else frozenset()
+    )
+    _require_exact_directory(
+        artifact_directory,
+        STAGE2_STAGE1_ARTIFACT_NAMES,
+        directories=scratch_directories,
+    )
     completion = _model_from_json(
         artifact_directory / "stage2-completion.json",
         Stage2CompletionManifest,
@@ -380,6 +409,20 @@ def verify_codex_artifacts(
         CodexMetadata,
         "Codex metadata",
     )
+    if pending.kind == "auditor":
+        expected_scratch = artifact_directory / AUDITOR_SCRATCH_DIRECTORY_NAME
+        if (
+            metadata.auditor_scratch_path != str(expected_scratch)
+            or metadata.sandbox_disposition != AUDITOR_SANDBOX_DISPOSITION
+        ):
+            raise WorkflowStateError(
+                "auditor scratch metadata contradicts its action artifact"
+            )
+    elif (
+        metadata.auditor_scratch_path is not None
+        or metadata.sandbox_disposition is not None
+    ):
+        raise WorkflowStateError("non-auditor action received writable scratch")
     adapter_result = _model_from_json(
         artifact_directory / "result.json",
         CodexRunResult,
@@ -798,6 +841,16 @@ def _verify_codex_command(pending: PendingAction, metadata: CodexMetadata) -> No
             "--cd",
             pending.workspace,
         ]
+        if pending.kind == "auditor":
+            expected.extend(
+                (
+                    "--add-dir",
+                    str(
+                        Path(pending.artifact_path)
+                        / AUDITOR_SCRATCH_DIRECTORY_NAME
+                    ),
+                )
+            )
         if pending.ephemeral:
             expected.append("--ephemeral")
     else:
@@ -892,7 +945,12 @@ def _parse_events(
     return tuple(events), tuple(thread_ids), first_thread_id, first_session_id
 
 
-def _require_exact_directory(directory: Path, names: frozenset[str]) -> None:
+def _require_exact_directory(
+    directory: Path,
+    names: frozenset[str],
+    *,
+    directories: frozenset[str] = frozenset(),
+) -> None:
     try:
         status = directory.lstat()
         if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
@@ -902,10 +960,26 @@ def _require_exact_directory(directory: Path, names: frozenset[str]) -> None:
         raise
     except OSError as exc:
         raise WorkflowStateError("action artifact directory is unavailable") from exc
-    if {entry.name for entry in entries} != names:
+    if {entry.name for entry in entries} != names | directories:
         raise WorkflowStateError("action artifact set is missing, additional, or replaced")
     for entry in entries:
-        sha256_regular_file(entry)
+        if entry.name in directories:
+            try:
+                status = entry.lstat()
+            except OSError as exc:
+                raise WorkflowStateError(
+                    "action scratch directory is unavailable"
+                ) from exc
+            if (
+                stat.S_ISLNK(status.st_mode)
+                or not stat.S_ISDIR(status.st_mode)
+                or status.st_uid != os.getuid()
+                or stat.S_IMODE(status.st_mode) != 0o700
+                or status.st_nlink < 2
+            ):
+                raise WorkflowStateError("action scratch directory is not exact")
+        else:
+            sha256_regular_file(entry)
 
 
 def _model_from_json(

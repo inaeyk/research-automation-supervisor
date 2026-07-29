@@ -6,8 +6,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import py_compile
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from uuid import UUID
@@ -193,6 +195,22 @@ def main() -> int:
         "environment": dict(os.environ),
         "call_index": call_index,
     }
+    if configuration.get("exercise_tempfile"):
+        with tempfile.TemporaryDirectory(prefix="auditor-reproducer-") as temporary:
+            temporary_path = Path(temporary)
+            source = temporary_path / "reproducer.py"
+            compiled = temporary_path / "reproducer.pyc"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            py_compile.compile(
+                str(source),
+                cfile=str(compiled),
+                doraise=True,
+            )
+            observation["tempfile_reproducer"] = {
+                "temporary_directory": str(temporary_path),
+                "source_created": source.is_file(),
+                "compiled_created": compiled.is_file(),
+            }
     observation_path = Path(
         str(configuration.get("observation_path", workspace / ".fake-codex-observation.json"))
     )
