@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -136,6 +137,13 @@ class ReplayCampaignServices:
     environ: Mapping[str, str] | None = None
     token_factory: Callable[[], str] = lambda: secrets.token_hex(16)
     utc_now: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class _RequiredChecksNormalization:
+    action: SupervisorAction
+    normalized_acceptance_test_ids: tuple[str, ...] | None
+    occurred: bool
 
 
 DEFAULT_REPLAY_CAMPAIGN_SERVICES = ReplayCampaignServices()
@@ -947,7 +955,12 @@ class _CampaignPromptSource:
                 f"supervisor transport failed safely: {result.status}"
             )
         session_id = _exact_supervisor_session(result, resume_id)
-        raw_action, action = _parse_supervisor_action(result)
+        raw_action, raw_typed_action = _parse_supervisor_action(result)
+        normalization = _normalize_supervisor_required_checks(
+            raw_typed_action,
+            self.task,
+        )
+        action = normalization.action
         rejection_reasons = _supervisor_action_rejections(
             action,
             request,
@@ -966,6 +979,13 @@ class _CampaignPromptSource:
             "adapter_result": result.to_dict(),
             "supervisor_prompt_body": rendered.content.decode("utf-8"),
             "raw_action": raw_action,
+            "raw_supervisor_required_checks": raw_action["required_checks"],
+            "normalized_acceptance_test_ids": (
+                None
+                if normalization.normalized_acceptance_test_ids is None
+                else list(normalization.normalized_acceptance_test_ids)
+            ),
+            "required_checks_normalization_occurred": normalization.occurred,
             "accepted_action": (
                 None
                 if accepted_action is None
@@ -1178,6 +1198,42 @@ def _supervisor_action_rejections(
     ):
         reasons.append("acceptance_test_ids_mismatch")
     return tuple(reasons)
+
+
+def _normalize_supervisor_required_checks(
+    action: SupervisorAction,
+    task: PreparedReplayTask,
+) -> _RequiredChecksNormalization:
+    """Atomically map exact command tokens to IDs without invoking a shell."""
+    tests = task.stage2.acceptance_tests
+    test_ids = frozenset(test.specification.id for test in tests)
+    normalized_ids: list[str] = []
+    occurred = False
+    for check in action.required_checks:
+        if check in test_ids:
+            normalized_ids.append(check)
+            continue
+        try:
+            candidate_argv = tuple(shlex.split(check, comments=False, posix=True))
+        except ValueError:
+            return _RequiredChecksNormalization(action, None, False)
+        matches = tuple(
+            test.specification.id
+            for test in tests
+            if test.specification.argv == candidate_argv
+        )
+        if len(matches) != 1:
+            return _RequiredChecksNormalization(action, None, False)
+        normalized_ids.append(matches[0])
+        occurred = True
+    normalized = tuple(normalized_ids)
+    if not occurred:
+        return _RequiredChecksNormalization(action, normalized, False)
+    return _RequiredChecksNormalization(
+        action.model_copy(update={"required_checks": normalized}),
+        normalized,
+        True,
+    )
 
 
 def _workflow_services(

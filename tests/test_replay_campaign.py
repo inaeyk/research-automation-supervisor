@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shlex
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,7 @@ def supervisor_action(
     *,
     prompt: str | None = None,
     unauthorized: bool = False,
+    required_checks: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -110,7 +113,9 @@ def supervisor_action(
         ),
         "summary": f"supervisor selected {action}",
         "referenced_paths": [],
-        "required_checks": ["fixed-test"],
+        "required_checks": (
+            ["fixed-test"] if required_checks is None else required_checks
+        ),
         "assumptions": [],
         "questions": [],
         "contract_change_requested": unauthorized,
@@ -194,6 +199,54 @@ def create_campaign(
     )
     assert first_fake is not None
     return manifest, first_fake
+
+
+def replace_fixed_acceptance_tests(
+    manifest: Path,
+    tests: list[tuple[str, list[str]]],
+) -> None:
+    campaign = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    specification_path = Path(
+        campaign["tasks"][0]["stage2_specification_path"]
+    )
+    specification = yaml.safe_load(specification_path.read_text(encoding="utf-8"))
+    base = specification["acceptance_tests"][0]
+    specification["acceptance_tests"] = [
+        {**base, "id": test_id, "argv": argv}
+        for test_id, argv in tests
+    ]
+    specification_path.write_text(
+        yaml.safe_dump(specification, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def run_required_checks_boundary(
+    tmp_path: Path,
+    required_checks: list[str],
+    *,
+    tests: list[tuple[str, list[str]]] | None = None,
+) -> dict[str, Any]:
+    manifest, fake = create_campaign(tmp_path, [[]])
+    if tests is not None:
+        replace_fixed_acceptance_tests(manifest, tests)
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action(
+                "worker_prompt",
+                required_checks=required_checks,
+            )
+        ]
+    )
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(fake, supervisor, []),
+    )
+    run = next((tmp_path / "runs").iterdir())
+    return json.loads(
+        next((run / "supervisor/actions").iterdir()).read_text(encoding="utf-8")
+    )
 
 
 def campaign_services(
@@ -371,6 +424,130 @@ def test_unauthorized_supervisor_action_pauses_and_exact_decision_resumes(
     assert resumed.status == "completed"
     assert resumed.human_assisted_task_ids == ("replay-task-1",)
     assert resumed.supervisor_session_id == SUPERVISOR_UUID
+
+
+def test_required_checks_exact_frozen_id_is_accepted_unchanged(
+    tmp_path: Path,
+) -> None:
+    record = run_required_checks_boundary(tmp_path, ["fixed-test"])
+
+    assert record["accepted_action"]["required_checks"] == ["fixed-test"]
+    assert record["raw_supervisor_required_checks"] == ["fixed-test"]
+    assert record["normalized_acceptance_test_ids"] == ["fixed-test"]
+    assert record["required_checks_normalization_occurred"] is False
+    assert record["rejection_reasons"] == []
+
+
+def test_required_checks_exact_argv_string_is_uniquely_normalized(
+    tmp_path: Path,
+) -> None:
+    command = shlex.join((sys.executable, "tools/acceptance.py"))
+    record = run_required_checks_boundary(tmp_path, [command])
+
+    assert record["raw_supervisor_required_checks"] == [command]
+    assert record["normalized_acceptance_test_ids"] == ["fixed-test"]
+    assert record["required_checks_normalization_occurred"] is True
+    assert record["accepted_action"]["required_checks"] == ["fixed-test"]
+    assert record["rejection_reasons"] == []
+
+
+def test_required_checks_unknown_command_is_rejected(tmp_path: Path) -> None:
+    command = f"{sys.executable} tools/unknown.py"
+    record = run_required_checks_boundary(tmp_path, [command])
+
+    assert record["raw_supervisor_required_checks"] == [command]
+    assert record["normalized_acceptance_test_ids"] is None
+    assert record["required_checks_normalization_occurred"] is False
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_partial_command_is_rejected(tmp_path: Path) -> None:
+    record = run_required_checks_boundary(tmp_path, [sys.executable])
+
+    assert record["normalized_acceptance_test_ids"] is None
+    assert record["required_checks_normalization_occurred"] is False
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_extra_argument_is_rejected(tmp_path: Path) -> None:
+    command = shlex.join(
+        (sys.executable, "tools/acceptance.py", "--additional-check")
+    )
+    record = run_required_checks_boundary(tmp_path, [command])
+
+    assert record["normalized_acceptance_test_ids"] is None
+    assert record["required_checks_normalization_occurred"] is False
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_ambiguous_argv_match_is_rejected(tmp_path: Path) -> None:
+    argv = [sys.executable, "tools/acceptance.py"]
+    command = shlex.join(argv)
+    record = run_required_checks_boundary(
+        tmp_path,
+        [command, "second-test"],
+        tests=[("fixed-test", argv), ("second-test", argv)],
+    )
+
+    assert record["normalized_acceptance_test_ids"] is None
+    assert record["required_checks_normalization_occurred"] is False
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_normalizes_multiple_fixed_acceptance_tests(
+    tmp_path: Path,
+) -> None:
+    first_argv = [sys.executable, "tools/acceptance.py"]
+    second_argv = [sys.executable, "tools/acceptance.py", "--json"]
+    first_command = shlex.join(first_argv)
+    second_command = shlex.join(second_argv)
+    record = run_required_checks_boundary(
+        tmp_path,
+        [first_command, second_command],
+        tests=[("fixed-test", first_argv), ("second-test", second_argv)],
+    )
+
+    assert record["raw_supervisor_required_checks"] == [
+        first_command,
+        second_command,
+    ]
+    assert record["normalized_acceptance_test_ids"] == [
+        "fixed-test",
+        "second-test",
+    ]
+    assert record["required_checks_normalization_occurred"] is True
+    assert record["accepted_action"]["required_checks"] == [
+        "fixed-test",
+        "second-test",
+    ]
+    assert record["rejection_reasons"] == []
+
+
+def test_reduced_vars_gp_acceptance_command_reproducer_is_normalized(
+    tmp_path: Path,
+) -> None:
+    test_id = "reduced-vars-gp-visible"
+    argv = [
+        "/usr/bin/python3",
+        "campaign-control/acceptance.py",
+        "--json",
+    ]
+    command = "/usr/bin/python3 campaign-control/acceptance.py --json"
+    record = run_required_checks_boundary(
+        tmp_path,
+        [command],
+        tests=[(test_id, argv)],
+    )
+
+    assert record["raw_supervisor_required_checks"] == [command]
+    assert record["normalized_acceptance_test_ids"] == [test_id]
+    assert record["required_checks_normalization_occurred"] is True
+    assert record["accepted_action"]["required_checks"] == [test_id]
+    assert record["rejection_reasons"] == []
 
 
 @pytest.mark.parametrize("invalid_role", ("worker", "auditor"))
@@ -978,15 +1155,31 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
         "raise SystemExit(9)",
     ]
     manifest.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    acceptance_command = shlex.join((sys.executable, "tools/acceptance.py"))
     supervisor = FakeSupervisor(
         [
-            supervisor_action("worker_prompt"),
-            supervisor_action("repair_prompt"),
-            supervisor_action("auditor_prompt"),
-            supervisor_action("finish"),
-            supervisor_action("worker_prompt"),
-            supervisor_action("auditor_prompt"),
-            supervisor_action("finish"),
+            supervisor_action(
+                "worker_prompt",
+                required_checks=[acceptance_command],
+            ),
+            supervisor_action(
+                "repair_prompt",
+                required_checks=[acceptance_command],
+            ),
+            supervisor_action(
+                "auditor_prompt",
+                required_checks=[acceptance_command],
+            ),
+            supervisor_action("finish", required_checks=[acceptance_command]),
+            supervisor_action(
+                "worker_prompt",
+                required_checks=[acceptance_command],
+            ),
+            supervisor_action(
+                "auditor_prompt",
+                required_checks=[acceptance_command],
+            ),
+            supervisor_action("finish", required_checks=[acceptance_command]),
         ]
     )
     services = campaign_services(fake, supervisor, [])
@@ -1013,6 +1206,11 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
     assert len(first["supervisor_instructions_and_actions"]) == 4
     assert all(
         action["raw_action"] and action["accepted_action"]
+        for action in first["supervisor_instructions_and_actions"]
+    )
+    assert all(
+        action["required_checks_normalization_occurred"]
+        and action["normalized_acceptance_test_ids"] == ["fixed-test"]
         for action in first["supervisor_instructions_and_actions"]
     )
     assert len(first["worker_requests"]) == 2
