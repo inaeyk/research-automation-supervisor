@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import shlex
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from research_automation_supervisor.replay_campaign_sources import (
 )
 from research_automation_supervisor.structured_outputs import normalize_production_schema
 from research_automation_supervisor.workflow_engine import WorkflowPromptRequest
+from research_automation_supervisor.workflow_models import path_matches_any
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,8 @@ def build_supervisor_action_schema(
     assert isinstance(properties, dict)
     required_checks = properties["required_checks"]
     assert isinstance(required_checks, dict)
+    referenced_paths = properties["referenced_paths"]
+    assert isinstance(referenced_paths, dict)
     tests = task.stage2.acceptance_tests
     allowed_values = list(
         dict.fromkeys(
@@ -56,7 +61,53 @@ def build_supervisor_action_schema(
             },
         }
     )
+    reference_candidates = _supervisor_reference_candidates(task)
+    if reference_candidates:
+        referenced_paths["items"] = {
+            "type": "string",
+            "enum": list(reference_candidates),
+        }
     return normalize_production_schema(schema)
+
+
+def _supervisor_reference_candidates(
+    task: PreparedReplayTask,
+) -> tuple[str, ...]:
+    """Enumerate only concrete references accepted by frozen task authority."""
+    specification = task.stage2.specification
+    candidates = [
+        path
+        for path in (
+            *specification.allowed_paths,
+            *specification.protected_paths,
+        )
+        if not glob.has_magic(path)
+    ]
+    workspace = task.stage2.workspace
+    for candidate in sorted(workspace.rglob("*")):
+        try:
+            relative = candidate.relative_to(workspace).as_posix()
+            status = candidate.lstat()
+        except (OSError, ValueError):
+            continue
+        if (
+            stat.S_ISREG(status.st_mode)
+            and not stat.S_ISLNK(status.st_mode)
+            and path_matches_any(relative, specification.protected_paths)
+            and _has_no_symlink_parent(workspace, candidate)
+        ):
+            candidates.append(relative)
+    return tuple(dict.fromkeys(candidates))
+def _has_no_symlink_parent(workspace: Path, candidate: Path) -> bool:
+    current = workspace
+    try:
+        for part in candidate.relative_to(workspace).parts[:-1]:
+            current = current / part
+            if stat.S_ISLNK(current.lstat().st_mode):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def build_supervisor_request(
@@ -106,6 +157,8 @@ def build_supervisor_request(
         "case return 'human_pause'. Prompt actions contain only an advisory task body; "
         "the Stage 2 engine supplies the complete authoritative worker or auditor wrapper. "
         "Terminal actions must use an empty prompt.\n"
+        "In referenced_paths, include only concrete paths permitted by the output schema; "
+        "omit contextual files outside frozen allowed/protected path authority.\n"
         "Never mention, infer, or request hidden/gold evaluation material.\n\n"
         "[BEGIN SUPERVISOR POLICY]\n"
         + policy

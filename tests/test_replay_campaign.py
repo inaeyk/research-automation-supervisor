@@ -831,6 +831,36 @@ def test_generated_required_checks_schema_rejects_prose_by_enum(
     ]
 
 
+def test_generated_referenced_paths_schema_excludes_outside_context(
+    tmp_path: Path,
+) -> None:
+    manifest, _fake = create_campaign(tmp_path, [[]])
+    allowed = "src/output.txt"
+    protected = "tools/fixture.txt"
+    glob_protected = "tools/nested/fixture.txt"
+    outside = "src/context-only.hpp"
+    replace_path_authority(
+        manifest,
+        allowed_paths=[allowed],
+        protected_paths=[protected, "tools/**"],
+        files=[allowed, protected, glob_protected, outside],
+    )
+    prepared = load_replay_campaign_specification(manifest)
+    schema = build_supervisor_action_schema(prepared.tasks[0])
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    referenced_paths = properties["referenced_paths"]
+    assert isinstance(referenced_paths, dict)
+    items = referenced_paths["items"]
+    assert isinstance(items, dict)
+
+    assert allowed in items["enum"]
+    assert protected in items["enum"]
+    assert glob_protected in items["enum"]
+    assert outside not in items["enum"]
+    assert "tools/**" not in items["enum"]
+
+
 def test_generating_authority_schema_does_not_mutate_campaign_or_runtime_state(
     tmp_path: Path,
 ) -> None:
