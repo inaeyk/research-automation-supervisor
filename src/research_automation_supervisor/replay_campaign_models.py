@@ -20,6 +20,7 @@ from research_automation_supervisor.workflow_models import (
     WorkflowTest,
     _freeze_sequence,
     normalize_path_pattern,
+    normalize_relative_path,
 )
 
 BoundedText = Annotated[str, Field(min_length=1, max_length=16_384)]
@@ -183,7 +184,10 @@ class SupervisorAction(BaseModel):
     @field_validator("referenced_paths")
     @classmethod
     def normalize_referenced_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        normalized = tuple(normalize_path_pattern(item) for item in value)
+        normalized = tuple(
+            normalize_relative_path(normalize_path_pattern(item))
+            for item in value
+        )
         if len(normalized) != len(set(normalized)):
             raise ValueError("referenced paths must be unique")
         return normalized

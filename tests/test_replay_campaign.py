@@ -32,6 +32,13 @@ from research_automation_supervisor.replay_campaign_engine import (
     resume_replay_campaign,
     run_replay_campaign,
 )
+from research_automation_supervisor.replay_campaign_models import SupervisorAction
+from research_automation_supervisor.replay_campaign_prompts import (
+    build_supervisor_action_schema,
+)
+from research_automation_supervisor.replay_campaign_sources import (
+    load_replay_campaign_specification,
+)
 from research_automation_supervisor.test_runner import run_test_attempt
 from research_automation_supervisor.workflow_engine import WorkflowServices
 from tests.workflow_helpers import (
@@ -129,6 +136,7 @@ def supervisor_action(
     *,
     prompt: str | None = None,
     unauthorized: bool = False,
+    referenced_paths: list[str] | None = None,
     required_checks: list[str] | None = None,
 ) -> dict[str, object]:
     return {
@@ -144,7 +152,7 @@ def supervisor_action(
             )
         ),
         "summary": f"supervisor selected {action}",
-        "referenced_paths": [],
+        "referenced_paths": [] if referenced_paths is None else referenced_paths,
         "required_checks": (
             ["fixed-test"] if required_checks is None else required_checks
         ),
@@ -238,19 +246,46 @@ def replace_fixed_acceptance_tests(
     tests: list[tuple[str, list[str]]],
 ) -> None:
     campaign = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-    specification_path = Path(
-        campaign["tasks"][0]["stage2_specification_path"]
-    )
+    specification_path = Path(campaign["tasks"][0]["stage2_specification_path"])
     specification = yaml.safe_load(specification_path.read_text(encoding="utf-8"))
     base = specification["acceptance_tests"][0]
     specification["acceptance_tests"] = [
-        {**base, "id": test_id, "argv": argv}
-        for test_id, argv in tests
+        {**base, "id": test_id, "argv": argv} for test_id, argv in tests
     ]
     specification_path.write_text(
         yaml.safe_dump(specification, sort_keys=False),
         encoding="utf-8",
     )
+
+
+def replace_path_authority(
+    manifest: Path,
+    *,
+    allowed_paths: list[str],
+    protected_paths: list[str],
+    files: list[str] | None = None,
+) -> Path:
+    campaign = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    specification_path = Path(campaign["tasks"][0]["stage2_specification_path"])
+    specification = yaml.safe_load(specification_path.read_text(encoding="utf-8"))
+    workspace = (specification_path.parent / specification["workspace"]).resolve()
+    specification["allowed_paths"] = allowed_paths
+    specification["protected_paths"] = list(
+        dict.fromkeys(["control/**", *protected_paths])
+    )
+    specification_path.write_text(
+        yaml.safe_dump(specification, sort_keys=False),
+        encoding="utf-8",
+    )
+    fixture_paths = [] if files is None else files
+    for relative_path in fixture_paths:
+        path = workspace / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"fixture for {relative_path}\n", encoding="utf-8")
+    if fixture_paths:
+        git(workspace, "add", "--", *fixture_paths)
+        git(workspace, "commit", "-q", "-m", "add reference fixtures")
+    return workspace
 
 
 def run_required_checks_boundary(
@@ -276,9 +311,70 @@ def run_required_checks_boundary(
         services=campaign_services(fake, supervisor, []),
     )
     run = next((tmp_path / "runs").iterdir())
-    return json.loads(
+    record = json.loads(
         next((run / "supervisor/actions").iterdir()).read_text(encoding="utf-8")
     )
+    if record["accepted_action"] is None:
+        state = replay_campaign_status(run)
+        assert state.status == "human_paused"
+        assert state.pause_reason == "unsafe_workflow_state"
+    return record
+
+
+def run_referenced_paths_boundary(
+    tmp_path: Path,
+    referenced_paths: list[str],
+    *,
+    allowed_paths: list[str],
+    protected_paths: list[str],
+    files: list[str] | None = None,
+) -> tuple[dict[str, Any], Path]:
+    manifest, fake = create_campaign(tmp_path, [[]])
+    replace_path_authority(
+        manifest,
+        allowed_paths=allowed_paths,
+        protected_paths=protected_paths,
+        files=files,
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action(
+                "worker_prompt",
+                referenced_paths=referenced_paths,
+            )
+        ]
+    )
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(fake, supervisor, []),
+    )
+    run = next((tmp_path / "runs").iterdir())
+    record = json.loads(
+        next((run / "supervisor/actions").iterdir()).read_text(encoding="utf-8")
+    )
+    if record["accepted_action"] is None:
+        state = replay_campaign_status(run)
+        assert state.status == "human_paused"
+        assert state.pause_reason == "unsafe_workflow_state"
+    return record, run
+
+
+def generated_required_checks_schema(
+    tmp_path: Path,
+    *,
+    tests: list[tuple[str, list[str]]] | None = None,
+) -> tuple[dict[str, Any], Path]:
+    manifest, _fake = create_campaign(tmp_path, [[]])
+    if tests is not None:
+        replace_fixed_acceptance_tests(manifest, tests)
+    prepared = load_replay_campaign_specification(manifest)
+    schema = build_supervisor_action_schema(prepared.tasks[0])
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    required_checks = properties["required_checks"]
+    assert isinstance(required_checks, dict)
+    return required_checks, manifest
 
 
 def campaign_services(
@@ -470,6 +566,217 @@ def test_required_checks_exact_frozen_id_is_accepted_unchanged(
     assert record["rejection_reasons"] == []
 
 
+def test_allowed_referenced_path_is_accepted_as_informational_evidence(
+    tmp_path: Path,
+) -> None:
+    path = "src/output.txt"
+    record, _run = run_referenced_paths_boundary(
+        tmp_path,
+        [path],
+        allowed_paths=[path],
+        protected_paths=["tools/**", ".fake-codex.json"],
+        files=[path],
+    )
+
+    assert record["accepted_action"]["referenced_paths"] == [path]
+    assert record["referenced_path_evidence"] == [
+        {
+            "authority": "allowed",
+            "grants_writable_scope": False,
+            "path": path,
+            "read_only": False,
+        }
+    ]
+    assert record["rejection_reasons"] == []
+
+
+def test_exact_protected_fixture_reference_is_accepted_read_only(
+    tmp_path: Path,
+) -> None:
+    path = ".fake-codex.json"
+    record, _run = run_referenced_paths_boundary(
+        tmp_path,
+        [path],
+        allowed_paths=["src/output.txt"],
+        protected_paths=[path, "tools/**"],
+    )
+
+    assert record["accepted_action"]["referenced_paths"] == [path]
+    assert record["referenced_path_evidence"] == [
+        {
+            "authority": "protected",
+            "grants_writable_scope": False,
+            "path": path,
+            "read_only": True,
+        }
+    ]
+    assert record["rejection_reasons"] == []
+
+
+def test_protected_glob_match_is_accepted_read_only(tmp_path: Path) -> None:
+    path = "tools/acceptance.py"
+    record, _run = run_referenced_paths_boundary(
+        tmp_path,
+        [path],
+        allowed_paths=["src/output.txt"],
+        protected_paths=["tools/**", ".fake-codex.json"],
+    )
+
+    assert record["accepted_action"]["referenced_paths"] == [path]
+    assert record["referenced_path_evidence"][0]["authority"] == "protected"
+    assert record["referenced_path_evidence"][0]["read_only"] is True
+    assert record["rejection_reasons"] == []
+
+
+def test_outside_scope_reference_is_rejected(tmp_path: Path) -> None:
+    record, _run = run_referenced_paths_boundary(
+        tmp_path,
+        ["README.md"],
+        allowed_paths=["src/output.txt"],
+        protected_paths=["tools/**", ".fake-codex.json"],
+    )
+
+    assert record["accepted_action"] is None
+    assert record["referenced_path_evidence"] is None
+    assert record["rejection_reasons"] == ["referenced_path_outside_scope"]
+
+
+def test_protected_reference_never_expands_frozen_writable_scope(
+    tmp_path: Path,
+) -> None:
+    protected = ".fake-codex.json"
+    allowed = "src/output.txt"
+    record, run = run_referenced_paths_boundary(
+        tmp_path,
+        [protected],
+        allowed_paths=[allowed],
+        protected_paths=[protected],
+        files=[allowed],
+    )
+    stage2_run = next((run / "tasks" / "replay-task-1" / "stage2").iterdir())
+    normalized = json.loads(
+        (stage2_run / "spec.normalized.json").read_text(encoding="utf-8")
+    )
+
+    assert normalized["allowed_paths"] == [allowed]
+    assert normalized["protected_paths"] == ["control/**", protected]
+    assert protected not in normalized["allowed_paths"]
+    assert record["referenced_path_evidence"][0]["grants_writable_scope"] is False
+    assert record["referenced_path_evidence"][0]["read_only"] is True
+
+
+def test_current_four_path_reproducer_is_accepted_with_separate_authority(
+    tmp_path: Path,
+) -> None:
+    allowed = [
+        "code/BlackStringToy/BlackStringReducedVars.hpp",
+        "code/BlackStringToy/BlackStringGPPointwiseInitialData.hpp",
+    ]
+    protected = [
+        "code/BlackStringToy/tests/BlackStringReducedVarsTest.cpp",
+        "code/BlackStringToy/tests/BlackStringGPPointwiseInitialDataTest.cpp",
+    ]
+    manifest, fake = create_campaign(tmp_path, [[]])
+    replace_path_authority(
+        manifest,
+        allowed_paths=allowed,
+        protected_paths=["campaign-control/**", *protected],
+        files=[*allowed, *protected],
+    )
+    command = shlex.join((sys.executable, "tools/acceptance.py"))
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action(
+                "worker_prompt",
+                referenced_paths=[*allowed, *protected],
+                required_checks=[command],
+            )
+        ]
+    )
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(fake, supervisor, []),
+    )
+    run = next((tmp_path / "runs").iterdir())
+    record = json.loads(
+        next((run / "supervisor/actions").iterdir()).read_text(encoding="utf-8")
+    )
+
+    assert record["accepted_action"]["referenced_paths"] == [*allowed, *protected]
+    assert [item["authority"] for item in record["referenced_path_evidence"]] == [
+        "allowed",
+        "allowed",
+        "protected",
+        "protected",
+    ]
+    assert record["accepted_action"]["required_checks"] == ["fixed-test"]
+    assert record["rejection_reasons"] == []
+
+
+def test_glob_matched_directory_reference_cannot_broaden_scope(
+    tmp_path: Path,
+) -> None:
+    record, _run = run_referenced_paths_boundary(
+        tmp_path,
+        ["tools/fixtures"],
+        allowed_paths=["src/output.txt"],
+        protected_paths=["tools/**"],
+        files=["tools/fixtures/item.txt"],
+    )
+
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["referenced_path_outside_scope"]
+
+
+def test_symlink_reference_is_rejected_without_following(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(tmp_path, [[]])
+    path = "src/external-fixture"
+    workspace = replace_path_authority(
+        manifest,
+        allowed_paths=[path],
+        protected_paths=["tools/**"],
+    )
+    external = tmp_path / "external-fixture"
+    external.write_text("outside\n", encoding="utf-8")
+    (workspace / path).symlink_to(external)
+    git(workspace, "add", "--", path)
+    git(workspace, "commit", "-q", "-m", "add symlink reference")
+    supervisor = FakeSupervisor(
+        [supervisor_action("worker_prompt", referenced_paths=[path])]
+    )
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(fake, supervisor, []),
+    )
+    run = next((tmp_path / "runs").iterdir())
+    record = json.loads(
+        next((run / "supervisor/actions").iterdir()).read_text(encoding="utf-8")
+    )
+
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["referenced_path_outside_scope"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/absolute/path",
+        "../traversal",
+        "C:/windows-absolute",
+        "src/\x00malformed",
+    ),
+)
+def test_referenced_paths_reject_nonrelative_or_malformed_values(path: str) -> None:
+    value = supervisor_action("worker_prompt", referenced_paths=[path])
+
+    with pytest.raises(ValueError):
+        SupervisorAction.model_validate(value)
+
+
 def test_required_checks_exact_argv_string_is_uniquely_normalized(
     tmp_path: Path,
 ) -> None:
@@ -481,6 +788,64 @@ def test_required_checks_exact_argv_string_is_uniquely_normalized(
     assert record["required_checks_normalization_occurred"] is True
     assert record["accepted_action"]["required_checks"] == ["fixed-test"]
     assert record["rejection_reasons"] == []
+
+
+def test_generated_required_checks_schema_permits_frozen_id(
+    tmp_path: Path,
+) -> None:
+    schema, _manifest = generated_required_checks_schema(tmp_path)
+    items = schema["items"]
+    assert isinstance(items, dict)
+
+    assert "fixed-test" in items["enum"]
+    assert schema["minItems"] == 1
+    assert schema["maxItems"] == 1
+    assert schema["uniqueItems"] is True
+
+
+def test_generated_required_checks_schema_permits_exact_argv(
+    tmp_path: Path,
+) -> None:
+    schema, _manifest = generated_required_checks_schema(tmp_path)
+    items = schema["items"]
+    assert isinstance(items, dict)
+    command = shlex.join((sys.executable, "tools/acceptance.py"))
+
+    assert command in items["enum"]
+
+
+def test_generated_required_checks_schema_rejects_prose_by_enum(
+    tmp_path: Path,
+) -> None:
+    schema, _manifest = generated_required_checks_schema(tmp_path)
+    items = schema["items"]
+    assert isinstance(items, dict)
+
+    assert "Confirm the final diff changes only allowed files." not in items["enum"]
+    assert items["enum"] == [
+        "fixed-test",
+        shlex.join((sys.executable, "tools/acceptance.py")),
+    ]
+
+
+def test_generating_authority_schema_does_not_mutate_campaign_or_runtime_state(
+    tmp_path: Path,
+) -> None:
+    manifest, _fake = create_campaign(tmp_path, [[]])
+    campaign = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    specification_path = Path(campaign["tasks"][0]["stage2_specification_path"])
+    before = {
+        manifest: manifest.read_bytes(),
+        specification_path: specification_path.read_bytes(),
+    }
+    prepared = load_replay_campaign_specification(manifest)
+    authority_before = prepared.tasks[0].authority_summary()
+
+    build_supervisor_action_schema(prepared.tasks[0])
+
+    assert prepared.tasks[0].authority_summary() == authority_before
+    assert {path: path.read_bytes() for path in before} == before
+    assert not (tmp_path / "runs").exists()
 
 
 def test_required_checks_unknown_command_is_rejected(tmp_path: Path) -> None:
@@ -511,6 +876,54 @@ def test_required_checks_extra_argument_is_rejected(tmp_path: Path) -> None:
 
     assert record["normalized_acceptance_test_ids"] is None
     assert record["required_checks_normalization_occurred"] is False
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_duplicate_is_rejected_as_incomplete_set(
+    tmp_path: Path,
+) -> None:
+    tests = [
+        ("fixed-test", [sys.executable, "tools/acceptance.py"]),
+        ("second-test", [sys.executable, "tools/acceptance.py", "--json"]),
+    ]
+    record = run_required_checks_boundary(
+        tmp_path,
+        ["fixed-test", "fixed-test"],
+        tests=tests,
+    )
+
+    assert record["normalized_acceptance_test_ids"] == [
+        "fixed-test",
+        "fixed-test",
+    ]
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_missing_test_is_rejected(tmp_path: Path) -> None:
+    tests = [
+        ("fixed-test", [sys.executable, "tools/acceptance.py"]),
+        ("second-test", [sys.executable, "tools/acceptance.py", "--json"]),
+    ]
+    record = run_required_checks_boundary(
+        tmp_path,
+        ["fixed-test"],
+        tests=tests,
+    )
+
+    assert record["normalized_acceptance_test_ids"] == ["fixed-test"]
+    assert record["accepted_action"] is None
+    assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
+
+
+def test_required_checks_additional_test_is_rejected(tmp_path: Path) -> None:
+    record = run_required_checks_boundary(
+        tmp_path,
+        ["fixed-test", "additional-test"],
+    )
+
+    assert record["normalized_acceptance_test_ids"] is None
     assert record["accepted_action"] is None
     assert record["rejection_reasons"] == ["acceptance_test_ids_mismatch"]
 
@@ -1648,6 +2061,36 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
         and action["normalized_acceptance_test_ids"] == ["fixed-test"]
         for action in first["supervisor_instructions_and_actions"]
     )
+    first_task_schemas: dict[str, dict[str, Any]] = {}
+    for decision in (run / "decisions").iterdir():
+        request = json.loads((decision / "request.json").read_text(encoding="utf-8"))
+        if request["task_id"] != "replay-task-1":
+            continue
+        first_task_schemas[request["boundary"]] = json.loads(
+            (decision / "output-schema.json").read_text(encoding="utf-8")
+        )
+    assert set(first_task_schemas) == {
+        "worker_prompt",
+        "repair_prompt",
+        "auditor_prompt",
+        "finish",
+    }
+    required_checks_schemas = []
+    for schema in first_task_schemas.values():
+        properties = schema["properties"]
+        required_checks_schemas.append(properties["required_checks"])
+    assert all(
+        schema == required_checks_schemas[0] for schema in required_checks_schemas[1:]
+    )
+    assert required_checks_schemas[0]["minItems"] == 1
+    assert required_checks_schemas[0]["maxItems"] == 1
+    assert required_checks_schemas[0]["uniqueItems"] is True
+    terminal = next(
+        action
+        for action in first["supervisor_instructions_and_actions"]
+        if action["boundary"] == "finish"
+    )
+    assert terminal["raw_action"]["prompt"] == ""
     assert len(first["worker_requests"]) == 2
     assert len(first["worker_reports"]) == 2
     assert len(first["auditor_requests"]) == 1

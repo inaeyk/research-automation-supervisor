@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -14,7 +16,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -66,7 +68,6 @@ from research_automation_supervisor.replay_campaign_models import (
     SupervisorAction,
 )
 from research_automation_supervisor.replay_campaign_prompts import (
-    SUPERVISOR_ACTION_SCHEMA,
     build_supervisor_request,
 )
 from research_automation_supervisor.replay_campaign_sources import (
@@ -97,7 +98,11 @@ from research_automation_supervisor.workflow_engine import (
     substage_status,
 )
 from research_automation_supervisor.workflow_integrity import sha256_regular_file
-from research_automation_supervisor.workflow_models import WorkflowResult, path_matches_any
+from research_automation_supervisor.workflow_models import (
+    WorkflowResult,
+    normalize_relative_path,
+    path_matches_any,
+)
 
 ZERO_HASH = "0" * 64
 STATE_FILE = "state.json"
@@ -145,6 +150,21 @@ class _RequiredChecksNormalization:
     action: SupervisorAction
     normalized_acceptance_test_ids: tuple[str, ...] | None
     occurred: bool
+
+
+@dataclass(frozen=True)
+class _ReferencedPathEvidence:
+    path: str
+    authority: Literal["allowed", "protected"]
+    read_only: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "authority": self.authority,
+            "read_only": self.read_only,
+            "grants_writable_scope": False,
+        }
 
 
 DEFAULT_REPLAY_CAMPAIGN_SERVICES = ReplayCampaignServices()
@@ -1074,6 +1094,7 @@ class _CampaignPromptSource:
             self.task,
             request,
         )
+        output_schema = rendered.output_schema
         action_id = "supervisor-" + hashlib.sha256(key.encode()).hexdigest()[:16]
         decision_directory = self.context.run_directory / "decisions" / action_id
         schema_path = decision_directory / "output-schema.json"
@@ -1095,9 +1116,7 @@ class _CampaignPromptSource:
             _prepare_artifact_set(
                 decision_directory,
                 {
-                    "output-schema.json": render_json_bytes(
-                        SUPERVISOR_ACTION_SCHEMA
-                    ),
+                    "output-schema.json": render_json_bytes(output_schema),
                     "supervisor-prompt.md": rendered.content,
                     "request.json": render_json_bytes(request_value),
                 },
@@ -1117,7 +1136,7 @@ class _CampaignPromptSource:
         elif (
             _read_json(request_path) != request_value
             or sha256_regular_file(prompt_path) != rendered.sha256
-            or _read_json(schema_path) != SUPERVISOR_ACTION_SCHEMA
+            or _read_json(schema_path) != output_schema
         ):
             raise WorkflowPromptSourceError(
                 "durable supervisor action intent changed",
@@ -1172,10 +1191,15 @@ class _CampaignPromptSource:
             self.task,
         )
         action = normalization.action
+        referenced_path_evidence = _qualify_supervisor_referenced_paths(
+            action,
+            self.task,
+        )
         rejection_reasons = _supervisor_action_rejections(
             action,
             request,
             self.task,
+            referenced_path_evidence,
         )
         accepted_action = None if rejection_reasons else action
         record = {
@@ -1190,6 +1214,11 @@ class _CampaignPromptSource:
             "adapter_result": result.to_dict(),
             "supervisor_prompt_body": rendered.content.decode("utf-8"),
             "raw_action": raw_action,
+            "referenced_path_evidence": (
+                None
+                if referenced_path_evidence is None
+                else [item.to_dict() for item in referenced_path_evidence]
+            ),
             "raw_supervisor_required_checks": raw_action["required_checks"],
             "normalized_acceptance_test_ids": (
                 None
@@ -1389,28 +1418,104 @@ def _supervisor_action_rejections(
     action: SupervisorAction,
     request: WorkflowPromptRequest,
     task: PreparedReplayTask,
+    referenced_path_evidence: tuple[_ReferencedPathEvidence, ...] | None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     if action.requests_authority_change:
         reasons.append("authority_change_requested")
     if action.action not in {request.action, "human_pause"}:
         reasons.append("durable_boundary_mismatch")
-    specification = task.stage2.specification
-    if any(
-        not path_matches_any(path, specification.allowed_paths)
-        or path_matches_any(path, specification.protected_paths)
-        for path in action.referenced_paths
-    ):
+    if referenced_path_evidence is None:
         reasons.append("referenced_path_outside_scope")
     expected_checks = tuple(
         test.specification.id for test in task.stage2.acceptance_tests
     )
-    if (
-        len(action.required_checks) != len(expected_checks)
-        or set(action.required_checks) != set(expected_checks)
-    ):
+    if len(action.required_checks) != len(expected_checks) or set(
+        action.required_checks
+    ) != set(expected_checks):
         reasons.append("acceptance_test_ids_mismatch")
     return tuple(reasons)
+
+
+def _qualify_supervisor_referenced_paths(
+    action: SupervisorAction,
+    task: PreparedReplayTask,
+) -> tuple[_ReferencedPathEvidence, ...] | None:
+    """Classify concrete no-follow references without changing frozen write scope."""
+    specification = task.stage2.specification
+    evidence: list[_ReferencedPathEvidence] = []
+    for submitted_path in action.referenced_paths:
+        try:
+            path = normalize_relative_path(submitted_path)
+        except ValueError:
+            return None
+        if glob.has_magic(path):
+            return None
+        protected_exact = path in specification.protected_paths
+        protected = protected_exact or path_matches_any(
+            path,
+            specification.protected_paths,
+        )
+        allowed = path in specification.allowed_paths
+        if protected:
+            authority: Literal["allowed", "protected"] = "protected"
+            explicit = protected_exact
+        elif allowed:
+            authority = "allowed"
+            explicit = True
+        else:
+            return None
+        if not _reference_path_is_no_follow_safe(
+            task.stage2.workspace,
+            path,
+            explicitly_authorized=explicit,
+        ):
+            return None
+        evidence.append(
+            _ReferencedPathEvidence(
+                path=path,
+                authority=authority,
+                read_only=authority == "protected",
+            )
+        )
+    return tuple(evidence)
+
+
+def _reference_path_is_no_follow_safe(
+    workspace: Path,
+    path: str,
+    *,
+    explicitly_authorized: bool,
+) -> bool:
+    """Reject symlink chains and implicit directory references without following."""
+    try:
+        workspace_status = workspace.lstat()
+        if stat.S_ISLNK(workspace_status.st_mode) or not stat.S_ISDIR(
+            workspace_status.st_mode
+        ):
+            return False
+        current = workspace
+        parts = tuple(part for part in Path(path).parts if part not in {"", "."})
+        for index, part in enumerate(parts):
+            current = current / part
+            try:
+                status = current.lstat()
+            except FileNotFoundError:
+                return True
+            if stat.S_ISLNK(status.st_mode):
+                return False
+            final = index == len(parts) - 1
+            if not final and not stat.S_ISDIR(status.st_mode):
+                return False
+            if final and stat.S_ISDIR(status.st_mode) and not explicitly_authorized:
+                return False
+            if final and not (
+                stat.S_ISREG(status.st_mode) or stat.S_ISDIR(status.st_mode)
+            ):
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _normalize_supervisor_required_checks(

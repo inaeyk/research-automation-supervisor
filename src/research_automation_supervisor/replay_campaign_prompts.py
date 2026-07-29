@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,10 +15,6 @@ from research_automation_supervisor.replay_campaign_sources import (
 )
 from research_automation_supervisor.structured_outputs import normalize_production_schema
 from research_automation_supervisor.workflow_engine import WorkflowPromptRequest
-
-SUPERVISOR_ACTION_SCHEMA: dict[str, object] = normalize_production_schema(
-    SupervisorAction.model_json_schema()
-)
 
 
 @dataclass(frozen=True)
@@ -31,12 +28,45 @@ class RenderedSupervisorRequest:
     visible_evidence: dict[str, object]
 
 
+def build_supervisor_action_schema(
+    task: PreparedReplayTask,
+) -> dict[str, object]:
+    """Constrain model-owned checks to the complete frozen acceptance authority."""
+    schema = SupervisorAction.model_json_schema()
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    required_checks = properties["required_checks"]
+    assert isinstance(required_checks, dict)
+    tests = task.stage2.acceptance_tests
+    allowed_values = list(
+        dict.fromkeys(
+            (
+                *(test.specification.id for test in tests),
+                *(shlex.join(test.specification.argv) for test in tests),
+            )
+        )
+    )
+    required_checks.update(
+        {
+            "minItems": len(tests),
+            "maxItems": len(tests),
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "enum": allowed_values,
+            },
+        }
+    )
+    return normalize_production_schema(schema)
+
+
 def build_supervisor_request(
     campaign: PreparedReplayCampaign,
     task: PreparedReplayTask,
     request: WorkflowPromptRequest,
 ) -> RenderedSupervisorRequest:
     """Build one supervisor turn from visible authority and Stage 2 evidence."""
+    output_schema = build_supervisor_action_schema(task)
     evidence: dict[str, object] = {
         "campaign": {
             "campaign_id": campaign.specification.campaign_id,
@@ -96,7 +126,7 @@ def build_supervisor_request(
         content=content,
         sha256=hashlib.sha256(content).hexdigest(),
         byte_count=len(content),
-        output_schema=SUPERVISOR_ACTION_SCHEMA,
+        output_schema=output_schema,
         visible_evidence=evidence,
     )
 
