@@ -656,12 +656,25 @@ def _drive(
                     workflow_services,
                 )
             except (ReplayCampaignStateError, WorkflowStateError) as exc:
+                direct_prompt_boundary = None
+                with suppress(WorkflowInputError, WorkflowStateError):
+                    semantic_boundary = prompt_source_pause_boundary(
+                        Path(workflow.artifact_directory),
+                        services=workflow_services,
+                    )
+                    direct_prompt_boundary = {
+                        "initial_worker_prompt": "supervisor_worker_prompt",
+                        "worker_repair_prompt": "supervisor_repair_prompt",
+                        "auditor_prompt": "supervisor_auditor_prompt",
+                    }.get(semantic_boundary)
                 return _pause_campaign(
                     context,
                     "unsafe_workflow_state",
                     str(exc),
                     task,
-                    context.state.paused_boundary or "worker_continuation",
+                    direct_prompt_boundary
+                    or context.state.paused_boundary
+                    or "worker_continuation",
                 )
             return _pause_campaign(
                 context,
@@ -883,14 +896,11 @@ def _validate_campaign_prompt_source_pause(
         matching_action = (
             bool(actions) and actions[-1].get("boundary") == expected_source
         )
-        matching_unlaunched_intent = (
-            semantic_boundary != "initial_worker_prompt"
-            and _matching_unlaunched_supervisor_intent(
-                context.run_directory,
-                stage2_run,
-                task_id,
-                expected_source,
-            )
+        matching_unlaunched_intent = _matching_unlaunched_supervisor_intent(
+            context.run_directory,
+            stage2_run,
+            task_id,
+            expected_source,
         )
         if not matching_action and not matching_unlaunched_intent:
             raise ReplayCampaignStateError(

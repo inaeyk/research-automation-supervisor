@@ -318,7 +318,8 @@ def run_required_checks_boundary(
     if record["accepted_action"] is None:
         state = replay_campaign_status(run)
         assert state.status == "human_paused"
-        assert state.pause_reason == "unsafe_workflow_state"
+        assert state.pause_reason == "supervisor_requires_human"
+        assert state.paused_boundary == "supervisor_worker_prompt"
     return record
 
 
@@ -357,7 +358,8 @@ def run_referenced_paths_boundary(
     if record["accepted_action"] is None:
         state = replay_campaign_status(run)
         assert state.status == "human_paused"
-        assert state.pause_reason == "unsafe_workflow_state"
+        assert state.pause_reason == "supervisor_requires_human"
+        assert state.paused_boundary == "supervisor_worker_prompt"
     return record, run
 
 
@@ -801,7 +803,7 @@ def test_generated_required_checks_schema_permits_frozen_id(
     assert "fixed-test" in items["enum"]
     assert schema["minItems"] == 1
     assert schema["maxItems"] == 1
-    assert schema["uniqueItems"] is True
+    assert "uniqueItems" not in schema
 
 
 def test_generated_required_checks_schema_permits_exact_argv(
@@ -1436,6 +1438,54 @@ def test_rejected_initial_worker_prompt_recovers_only_to_new_worker_prompt(
         report["gold_reveal_counters"]["model_turn_count_after"]
     )
     assert report["zero_post_gold_turns"] is True
+
+
+def test_initial_worker_transport_failure_keeps_and_recovers_exact_boundary(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ],
+        failure_index=0,
+    )
+    services = campaign_services(fake, supervisor, [])
+
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    stage2_state = json.loads((stage2 / "state.json").read_text())
+
+    assert paused.status == "human_paused"
+    assert paused.paused_boundary == "supervisor_worker_prompt"
+    assert stage2_state["prompt_source_boundary"] == "initial_worker_prompt"
+    assert stage2_state["latest_worker_action_id"] is None
+    assert stage2_state["latest_audit_action_id"] is None
+    assert not list((stage2 / "actions").glob("*.json"))
+
+    completed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+
+    assert completed.status == "completed"
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
 
 
 def _rewrite_stage2_without_recorded_prompt_boundary(
@@ -2295,7 +2345,7 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
     )
     assert required_checks_schemas[0]["minItems"] == 1
     assert required_checks_schemas[0]["maxItems"] == 1
-    assert required_checks_schemas[0]["uniqueItems"] is True
+    assert "uniqueItems" not in required_checks_schemas[0]
     terminal = next(
         action
         for action in first["supervisor_instructions_and_actions"]

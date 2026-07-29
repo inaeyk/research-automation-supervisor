@@ -50,7 +50,6 @@ def build_supervisor_action_schema(
         {
             "minItems": len(tests),
             "maxItems": len(tests),
-            "uniqueItems": True,
             "items": {
                 "type": "string",
                 "enum": allowed_values,
