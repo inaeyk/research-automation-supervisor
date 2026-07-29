@@ -56,6 +56,17 @@ class WorkflowLockError(WorkflowError):
 class WorkflowPromptSourceError(WorkflowError):
     """An optional Stage 2 prompt source could not provide an authorized action."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_category: str = "prompt_source_invalid",
+        adapter_status: str = "not_available",
+    ) -> None:
+        super().__init__(message)
+        self.failure_category = failure_category
+        self.adapter_status = adapter_status
+
 
 class ShadowError(SupervisorError):
     """Base class for expected Stage 3 shadow-calibration errors."""

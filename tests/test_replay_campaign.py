@@ -18,7 +18,10 @@ import research_automation_supervisor.live_shadow_engine as live_engine
 import research_automation_supervisor.replay_campaign_engine as replay_engine
 import research_automation_supervisor.workflow_engine as workflow_engine
 from research_automation_supervisor.codex_models import CodexRunResult
-from research_automation_supervisor.errors import ReplayCampaignInputError
+from research_automation_supervisor.errors import (
+    ReplayCampaignInputError,
+    WorkflowPromptSourceError,
+)
 from research_automation_supervisor.live_shadow_isolation import (
     BubblewrapBackendIdentity,
     BubblewrapCapability,
@@ -90,6 +93,35 @@ class FakeSupervisor:
             summary="fake supervisor succeeded",
             error=None,
         )
+
+
+class FailOneSupervisorTurn(FakeSupervisor):
+    """Fail one prompt-source turn before any supervisor artifact is created."""
+
+    def __init__(
+        self,
+        actions: list[dict[str, object]],
+        *,
+        failure_index: int,
+    ) -> None:
+        super().__init__(actions)
+        self.failure_index = failure_index
+        self.failed = False
+
+    def __call__(self, prepared, **kwargs: object) -> CodexRunResult:
+        if len(self.resume_ids) == self.failure_index and not self.failed:
+            resume_id = kwargs.get("resume_thread_id")
+            self.resume_ids.append(
+                resume_id if isinstance(resume_id, str) else None
+            )
+            self.prompts.append(prepared.prompt_bytes)
+            self.failed = True
+            raise WorkflowPromptSourceError(
+                "replay prompt source failed safely",
+                failure_category="supervisor_adapter_not_started",
+                adapter_status="not_started",
+            )
+        return super().__call__(prepared, **kwargs)
 
 
 def supervisor_action(
@@ -943,6 +975,363 @@ def test_auditor_escalation_pause_reenters_the_same_supervisor_boundary(
     assert resumed.status == "human_paused"
     assert resumed.paused_boundary == "auditor_escalation"
     assert len(supervisor.resume_ids) == 4
+
+
+def test_post_audit_pass_prompt_failure_recovers_to_finish_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),  # failed call does not consume this
+            supervisor_action("finish"),
+        ],
+        failure_index=2,
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    stage2_state = json.loads((stage2 / "state.json").read_text())
+    journal_before = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+    packet = (run / "human-review-packet.md").read_text(encoding="utf-8")
+
+    assert paused.status == "human_paused"
+    assert paused.paused_boundary == "supervisor_finish"
+    assert stage2_state["latest_audit_action_id"] == "auditor-r000"
+    assert stage2_state["latest_audit_result_path"]
+    assert stage2_state["pending_action"] is None
+    assert stage2_state["tests_passed"] is True
+    assert stage2_state["scope_compliant"] is True
+    assert stage2_state["contract_satisfied"] is True
+    assert paused.gold_evaluated_task_ids == ()
+    assert paused.gold_reveal_model_turn_count is None
+    assert not list((run / "tasks").glob("*/gold-reveal.json"))
+    completion = next(
+        index
+        for index, entry in enumerate(journal_before)
+        if entry["reason"] == "auditor_action_completed"
+    )
+    validation = next(
+        index
+        for index, entry in enumerate(journal_before)
+        if entry["reason"] == "auditor_result_validated"
+    )
+    assert completion < validation
+    audit_path = Path(stage2_state["latest_audit_result_path"])
+    assert journal_before[validation]["artifact_hashes"][str(audit_path)] == (
+        hashlib.sha256(audit_path.read_bytes()).hexdigest()
+    )
+    assert "Prompt-source failure category: supervisor_adapter_not_started" in packet
+    assert "Prompt-source adapter status: not_started" in packet
+
+    completed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+    final_journal = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+    report = json.loads((run / "campaign-report.json").read_text())
+
+    assert completed.status == "completed"
+    assert sum(
+        entry["reason"] == "post_audit_finish_recovery"
+        for entry in final_journal
+    ) == 1
+    assert sum(
+        entry["reason"] == "auditor_result_validated"
+        for entry in final_journal
+    ) == 1
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 3
+    assert report["gold_reveal_counters"]["model_turn_count_before"] == (
+        report["gold_reveal_counters"]["model_turn_count_after"]
+    )
+    assert report["zero_post_gold_turns"] is True
+
+
+def test_post_audit_repairable_prompt_failure_recovers_to_repair(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_REPAIR_UUID, worker_result()),
+            codex_response(
+                "auditor",
+                AUDITOR_ONE_UUID,
+                auditor_result("fail_repairable"),
+            ),
+            codex_response(
+                "worker",
+                WORKER_REPAIR_UUID,
+                worker_result(),
+                expected_resume_thread_id=WORKER_REPAIR_UUID,
+            ),
+            codex_response("auditor", AUDITOR_TWO_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ],
+        failure_index=2,
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+
+    assert paused.paused_boundary == "supervisor_repair_prompt"
+    completed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+    journal = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+
+    assert completed.status == "completed"
+    assert sum(
+        entry["reason"] == "post_audit_repair_recovery"
+        for entry in journal
+    ) == 1
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 2
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 2
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 5
+
+
+def test_post_audit_escalate_prompt_failure_remains_human_paused(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response(
+                "auditor",
+                AUDITOR_ONE_UUID,
+                auditor_result("escalate"),
+            ),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("human_pause"),
+        ],
+        failure_index=2,
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    resumed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+
+    assert paused.paused_boundary == "auditor_escalation"
+    assert resumed.status == "human_paused"
+    assert resumed.paused_boundary == "auditor_escalation"
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize("mutation", ("missing", "hash_mismatch"))
+def test_post_audit_recovery_rejects_missing_or_changed_audit_result(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+            supervisor_action("finish"),
+        ],
+        failure_index=2,
+    )
+    services = campaign_services(fake, supervisor, [])
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    state = json.loads((stage2 / "state.json").read_text())
+    audit_path = Path(state["latest_audit_result_path"])
+    if mutation == "missing":
+        audit_path.unlink()
+    else:
+        audit = json.loads(audit_path.read_text())
+        audit["summary"] = "changed after durable validation"
+        audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    unsafe = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+
+    assert unsafe.status == "human_paused"
+    assert unsafe.pause_reason == "unsafe_workflow_state"
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+
+
+def test_post_audit_recovery_rejects_nonnull_pending_action(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+            supervisor_action("finish"),
+        ],
+        failure_index=2,
+    )
+    services = campaign_services(fake, supervisor, [])
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    journal = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+    pending = next(
+        entry["state_updates"]["pending_action"]
+        for entry in journal
+        if entry["reason"] == "auditor_action_intent"
+    )
+    state_path = stage2 / "state.json"
+    state = json.loads(state_path.read_text())
+    state["pending_action"] = pending
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    unsafe = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path),
+        services=services,
+    )
+
+    assert unsafe.status == "human_paused"
+    assert unsafe.pause_reason == "unsafe_workflow_state"
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+
+
+def test_post_audit_recovery_crash_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+            supervisor_action("finish"),
+        ],
+        failure_index=2,
+    )
+    services = campaign_services(fake, supervisor, [])
+    run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+
+    def crash(name: str) -> None:
+        if name == "after_post_audit_prompt_source_recovery":
+            raise KeyboardInterrupt(name)
+
+    monkeypatch.setattr(workflow_engine, "_snapshot_checkpoint", crash)
+    with pytest.raises(KeyboardInterrupt, match="post_audit"):
+        resume_replay_campaign(
+            run,
+            decision_path=write_resume_decision(tmp_path),
+            services=services,
+        )
+    monkeypatch.setattr(workflow_engine, "_snapshot_checkpoint", lambda _name: None)
+    completed = resume_replay_campaign(run, services=services)
+    journal = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+
+    assert completed.status == "completed"
+    assert sum(
+        entry["reason"] == "post_audit_finish_recovery"
+        for entry in journal
+    ) == 1
+    assert sum(
+        entry["reason"] == "auditor_result_validated"
+        for entry in journal
+    ) == 1
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 3
 
 
 def test_auditor_transport_failure_reaches_campaign_escalation_evidence(

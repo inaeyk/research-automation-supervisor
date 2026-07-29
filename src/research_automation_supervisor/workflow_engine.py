@@ -12,6 +12,7 @@ import secrets
 import shutil
 import socket
 import stat
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -186,11 +187,17 @@ def _build_journal_semantic_forms() -> frozenset[JournalSemanticForm]:
         "human_paused",
         "auditor_running",
         "prompt_source_human_resume",
+        "post_audit_finish_recovery",
     )
     transition(
         "human_paused",
         "repair_pending",
         "prompt_source_human_resume",
+    )
+    transition(
+        "human_paused",
+        "worker_running",
+        "post_audit_repair_recovery",
     )
     transition(
         "repair_limit_paused",
@@ -455,6 +462,15 @@ class _WorkflowContext:
     services: WorkflowServices
     continuation: HumanFile | None = None
     continuation_from_state: str | None = None
+
+
+@dataclass(frozen=True)
+class _PostAuditRecoveryProof:
+    action_id: str
+    result_path: Path
+    result_sha256: str
+    audit: AuditorModelResult
+    audit_round: int
 
 
 def validate_substage(
@@ -731,6 +747,7 @@ def resume_prompt_source_substage(
     run_directory: Path,
     *,
     services: WorkflowServices,
+    allow_post_audit_recovery: bool = False,
 ) -> WorkflowResult:
     """Re-enter the exact replay prompt boundary after an immutable human decision."""
     if services.prompt_source is None:
@@ -770,6 +787,42 @@ def resume_prompt_source_substage(
             raise WorkflowInputError(
                 "frozen inputs and repository identity must match before replay resume"
             )
+        proof = (
+            _prove_post_audit_prompt_source_pause(context, entries)
+            if allow_post_audit_recovery
+            else None
+        )
+        if proof is not None:
+            if proof.audit.verdict == "escalate":
+                return context.state.to_result()
+            if proof.audit.verdict == "pass":
+                context.state = _transition(
+                    context,
+                    "auditor_running",
+                    "post_audit_finish_recovery",
+                    pause_reason=None,
+                    summary=(
+                        "Durably validated audit resumed at the terminal "
+                        "supervisor decision."
+                    ),
+                )
+            else:
+                if proof.audit_round >= context.state.max_repair_rounds:
+                    raise WorkflowStateError(
+                        "post-audit repair recovery exceeds the frozen repair limit"
+                    )
+                context.state = _transition(
+                    context,
+                    "worker_running",
+                    "post_audit_repair_recovery",
+                    pause_reason=None,
+                    summary=(
+                        "Durably validated repairable audit resumed at the "
+                        "repair-prompt decision."
+                    ),
+                )
+            _snapshot_checkpoint("after_post_audit_prompt_source_recovery")
+            return _drive(context)
         context.state = _transition(
             context,
             cast(Any, pause_entry.previous_state),
@@ -778,6 +831,39 @@ def resume_prompt_source_substage(
             summary="Human decision resumed the exact replay prompt boundary.",
         )
         return _drive(context)
+
+
+def post_audit_prompt_source_boundary(
+    run_directory: Path,
+    *,
+    services: WorkflowServices,
+) -> Literal["finish", "repair_prompt", "human_pause"] | None:
+    """Return a post-audit boundary only when all Stage 2 proof is durable."""
+    resolved = _resolve_run_directory(run_directory)
+    state = _load_state(resolved)
+    _validate_journal(resolved, state)
+    if (
+        state.status != "human_paused"
+        or state.pause_reason != "prompt_source_invalid"
+    ):
+        return None
+    context = _load_context(resolved, state, services)
+    if not _frozen_inputs_match(context) or not _repository_matches(context):
+        raise WorkflowStateError(
+            "post-audit recovery inputs or repository identity changed"
+        )
+    proof = _prove_post_audit_prompt_source_pause(
+        context,
+        _read_valid_journal(resolved),
+    )
+    return cast(
+        Literal["finish", "repair_prompt", "human_pause"],
+        {
+            "pass": "finish",
+            "fail_repairable": "repair_prompt",
+            "escalate": "human_pause",
+        }[proof.audit.verdict],
+    )
 
 
 def substage_status(run_directory: Path) -> WorkflowResult:
@@ -1364,37 +1450,48 @@ def _consume_auditor_record(
                 "Replay auditor turn did not expose one canonical UUID.",
             )
             return
-    structured_path = record.get("structured_result_path")
-    if not isinstance(structured_path, str):
-        context.state = _pause(
+    proof = _validated_audit_recovery_proof(context, action_id)
+    if proof is None:
+        structured_path = record.get("structured_result_path")
+        if not isinstance(structured_path, str):
+            context.state = _pause(
+                context,
+                "human_paused",
+                "auditor_structured_result_invalid",
+                "Auditor structured result is missing or invalid.",
+            )
+            return
+        try:
+            audit = AuditorModelResult.model_validate(_read_json(Path(structured_path)))
+        except (OSError, ValidationError, WorkflowStateError):
+            context.state = _pause(
+                context,
+                "human_paused",
+                "auditor_structured_result_invalid",
+                "Auditor structured result is missing or invalid.",
+            )
+            return
+        prior_paths = (*context.state.prior_audit_result_paths, structured_path)
+        context.state = _update_state(
             context,
-            "human_paused",
-            "auditor_structured_result_invalid",
-            "Auditor structured result is missing or invalid.",
+            "auditor_result_validated",
+            {
+                "latest_audit_action_id": action_id,
+                "latest_audit_result_path": structured_path,
+                "prior_audit_result_paths": prior_paths,
+                "contract_satisfied": audit.contract_satisfied,
+                "summary": audit.summary or "Auditor result validated.",
+            },
         )
-        return
-    try:
-        audit = AuditorModelResult.model_validate(_read_json(Path(structured_path)))
-    except (OSError, ValidationError, WorkflowStateError):
-        context.state = _pause(
-            context,
-            "human_paused",
-            "auditor_structured_result_invalid",
-            "Auditor structured result is missing or invalid.",
-        )
-        return
-    prior_paths = (*context.state.prior_audit_result_paths, structured_path)
-    context.state = _update_state(
-        context,
-        "auditor_result_validated",
-        {
-            "latest_audit_action_id": action_id,
-            "latest_audit_result_path": structured_path,
-            "prior_audit_result_paths": prior_paths,
-            "contract_satisfied": audit.contract_satisfied,
-            "summary": audit.summary or "Auditor result validated.",
-        },
-    )
+    else:
+        audit = proof.audit
+    _apply_validated_audit_decision(context, audit)
+
+
+def _apply_validated_audit_decision(
+    context: _WorkflowContext,
+    audit: AuditorModelResult,
+) -> None:
     if audit.verdict == "escalate":
         if not _source_terminal_action(context, "human_pause"):
             return
@@ -1426,6 +1523,26 @@ def _consume_auditor_record(
             pause_reason=(reason if context.state.checkpoint_after else None),
             summary=audit.summary or "Substage completed after deterministic audit pass.",
         )
+
+
+def _validated_audit_recovery_proof(
+    context: _WorkflowContext,
+    action_id: str,
+) -> _PostAuditRecoveryProof | None:
+    """Reuse one already-validated audit only after an explicit recovery transition."""
+    if (
+        context.state.latest_audit_action_id != action_id
+        or context.state.latest_audit_result_path is None
+    ):
+        return None
+    entries = _read_valid_journal(context.run_directory)
+    if not any(
+        entry.event_type == "transition"
+        and entry.reason == "post_audit_finish_recovery"
+        for entry in entries
+    ):
+        return None
+    return _prove_validated_audit_evidence(context, entries)
 
 
 def _worker_prompt(context: _WorkflowContext) -> RenderedWorkflowPrompt:
@@ -1537,6 +1654,10 @@ def _call_prompt_source(
             "human_paused",
             "prompt_source_invalid",
             str(exc) or "The replay prompt source rejected the supervisor action.",
+            escalation_evidence={
+                "prompt_source_failure_category": exc.failure_category,
+                "prompt_source_adapter_status": exc.adapter_status,
+            },
         )
         return WorkflowPromptDecision(
             action="human_pause",
@@ -1549,6 +1670,12 @@ def _call_prompt_source(
             "human_paused",
             "prompt_source_invalid",
             "The replay prompt source failed safely.",
+            escalation_evidence={
+                "prompt_source_failure_category": (
+                    "unexpected_prompt_source_exception"
+                ),
+                "prompt_source_adapter_status": "not_available",
+            },
         )
         return WorkflowPromptDecision(
             action="human_pause",
@@ -2214,6 +2341,8 @@ def _pause(
     status: str,
     reason: str,
     summary: str,
+    *,
+    escalation_evidence: Mapping[str, str] | None = None,
     **updates: object,
 ) -> WorkflowState:
     _, _, sensitive_values = build_subprocess_environment(context.services.environ)
@@ -2238,7 +2367,12 @@ def _pause(
         utc_now=context.services.utc_now,
     )
     context.state = state
-    escalation_paths = _write_escalation(context, reason, sanitized_summary)
+    escalation_paths = _write_escalation(
+        context,
+        reason,
+        sanitized_summary,
+        escalation_evidence=escalation_evidence,
+    )
     state = _journal_event(
         context.run_directory,
         context.state,
@@ -3689,6 +3823,286 @@ def _prior_audits(context: _WorkflowContext) -> tuple[AuditorModelResult, ...]:
         raise WorkflowStateError("prior auditor evidence is invalid") from exc
 
 
+def _prove_post_audit_prompt_source_pause(
+    context: _WorkflowContext,
+    entries: Sequence[JournalEntry],
+) -> _PostAuditRecoveryProof:
+    """Prove that a prompt-source pause occurred after durable audit validation."""
+    if (
+        context.state.status != "human_paused"
+        or context.state.pause_reason != "prompt_source_invalid"
+        or context.state.pending_action is not None
+    ):
+        raise WorkflowStateError(
+            "workflow is not an unambiguous post-audit prompt-source pause"
+        )
+    proof = _prove_validated_audit_evidence(context, entries)
+    validation_index = next(
+        index
+        for index, entry in enumerate(entries)
+        if entry.event_type == "evidence"
+        and entry.reason == "auditor_result_validated"
+        and entry.state_updates.get("latest_audit_action_id") == proof.action_id
+    )
+    later = entries[validation_index + 1 :]
+    pause_entries = [
+        entry
+        for entry in later
+        if entry.event_type == "transition"
+        and entry.new_state == "human_paused"
+        and entry.reason == "prompt_source_invalid"
+    ]
+    if len(pause_entries) != 1 or pause_entries[0] is not next(
+        (
+            entry
+            for entry in reversed(entries)
+            if entry.event_type == "transition"
+        ),
+        None,
+    ):
+        raise WorkflowStateError(
+            "post-audit prompt-source pause ordering is ambiguous"
+        )
+    expected_reasons = {
+        "pass": {
+            "prompt_source_invalid",
+            "escalation_package_written",
+        },
+        "fail_repairable": {
+            "auditor_repairable_failure",
+            "automatic_repair_worker_resume",
+            "prompt_source_invalid",
+            "escalation_package_written",
+        },
+        "escalate": {
+            "prompt_source_invalid",
+            "escalation_package_written",
+        },
+    }[proof.audit.verdict]
+    if any(entry.reason not in expected_reasons for entry in later):
+        raise WorkflowStateError(
+            "post-audit pause contains an unsupported later transition"
+        )
+    if proof.audit.verdict == "fail_repairable":
+        transition_reasons = [
+            entry.reason for entry in later if entry.event_type == "transition"
+        ]
+        if transition_reasons != [
+            "auditor_repairable_failure",
+            "automatic_repair_worker_resume",
+            "prompt_source_invalid",
+        ]:
+            raise WorkflowStateError(
+                "repairable post-audit pause ordering is invalid"
+            )
+        if (
+            proof.audit_round >= context.state.max_repair_rounds
+            or context.state.repair_round != proof.audit_round + 1
+            or context.state.repair_trigger != "audit"
+        ):
+            raise WorkflowStateError(
+                "repairable post-audit pause contradicts the repair limit"
+            )
+    elif context.state.repair_round != proof.audit_round:
+        raise WorkflowStateError(
+            "post-audit pause changed the validated audit round"
+        )
+    return proof
+
+
+def _prove_validated_audit_evidence(
+    context: _WorkflowContext,
+    entries: Sequence[JournalEntry],
+) -> _PostAuditRecoveryProof:
+    """Verify one immutable audit validation and unchanged supporting evidence."""
+    state = context.state
+    action_id = state.latest_audit_action_id
+    result_value = state.latest_audit_result_path
+    if (
+        action_id is None
+        or result_value is None
+        or action_id not in state.completed_action_ids
+        or state.pending_action is not None
+        or state.latest_worker_action_id is None
+        or state.latest_worker_action_id not in state.completed_action_ids
+        or state.latest_worker_result_path is None
+        or state.latest_git_evidence_path is None
+        or state.latest_tests_path is None
+    ):
+        raise WorkflowStateError(
+            "post-audit recovery lacks complete durable action evidence"
+        )
+    completion_indices = [
+        index
+        for index, entry in enumerate(entries)
+        if entry.event_type == "action_completion"
+        and entry.action_kind == "auditor"
+        and entry.action_id == action_id
+    ]
+    validation_indices = [
+        index
+        for index, entry in enumerate(entries)
+        if entry.event_type == "evidence"
+        and entry.reason == "auditor_result_validated"
+        and entry.state_updates.get("latest_audit_action_id") == action_id
+        and entry.state_updates.get("latest_audit_result_path") == result_value
+    ]
+    if (
+        len(completion_indices) != 1
+        or len(validation_indices) != 1
+        or completion_indices[0] >= validation_indices[0]
+    ):
+        raise WorkflowStateError(
+            "auditor validation is not ordered after one completed auditor action"
+        )
+    validation_index = validation_indices[0]
+    validation = entries[validation_index]
+    result_path = Path(result_value)
+    try:
+        result_sha256 = sha256_regular_file(result_path)
+    except WorkflowStateError as exc:
+        raise WorkflowStateError(
+            "validated auditor result is missing"
+        ) from exc
+    if validation.artifact_hashes.get(result_value) != result_sha256:
+        raise WorkflowStateError(
+            "validated auditor result hash is missing or mismatched"
+        )
+    record = _read_action_record(context.run_directory, action_id)
+    if (
+        record is None
+        or record.get("structured_result_path") != result_value
+        or _adapter_result_from_record(record).status != "succeeded"
+    ):
+        raise WorkflowStateError(
+            "completed auditor record contradicts the validated result"
+        )
+    try:
+        audit = AuditorModelResult.model_validate(_read_json(result_path))
+    except ValidationError as exc:
+        raise WorkflowStateError(
+            "validated auditor result is invalid"
+        ) from exc
+    if (
+        state.contract_satisfied != audit.contract_satisfied
+        or not state.prior_audit_result_paths
+        or state.prior_audit_result_paths[-1] != result_value
+        or state.prior_audit_result_paths.count(result_value) != 1
+    ):
+        raise WorkflowStateError(
+            "validated auditor verdict contradicts durable workflow state"
+        )
+    frozen_fields = {
+        "latest_worker_action_id",
+        "latest_worker_result_path",
+        "latest_git_evidence_path",
+        "latest_tests_path",
+        "tests_passed",
+        "scope_compliant",
+    }
+    if any(
+        frozen_fields.intersection(entry.state_updates)
+        for entry in entries[validation_index + 1 :]
+    ):
+        raise WorkflowStateError(
+            "worker, Git-scope, or fixed-test evidence changed after audit validation"
+        )
+    if any(
+        entry.event_type in {"action_intent", "action_completion"}
+        for entry in entries[validation_index + 1 :]
+    ) or any(
+        entry.event_type == "transition"
+        and entry.new_state in {"completed", "checkpoint_paused", "failed", "aborted"}
+        for entry in entries[validation_index + 1 :]
+    ):
+        raise WorkflowStateError(
+            "a later model, test, or terminal action follows audit validation"
+        )
+    evidence_paths = {
+        state.latest_worker_result_path,
+        state.latest_git_evidence_path,
+        state.latest_tests_path,
+        result_value,
+    }
+    recorded_before_validation = {
+        locator
+        for entry in entries[: validation_index + 1]
+        for locator in entry.artifact_hashes
+    }
+    if not evidence_paths.issubset(recorded_before_validation):
+        raise WorkflowStateError(
+            "supporting post-audit evidence was not durably hash-recorded"
+        )
+    worker_completion = next(
+        (
+            index
+            for index, entry in enumerate(entries)
+            if entry.event_type == "action_completion"
+            and entry.action_kind == "worker"
+            and entry.action_id == state.latest_worker_action_id
+        ),
+        None,
+    )
+    if worker_completion is None or worker_completion >= completion_indices[0]:
+        raise WorkflowStateError(
+            "latest worker action is not ordered before the completed audit"
+        )
+    git_evidence = _latest_git(context)
+    tests = _latest_tests(context)
+    if (
+        git_evidence.scope_compliant != state.scope_compliant
+        or tests.passed != state.tests_passed
+        or (
+            audit.verdict == "pass"
+            and (
+                not state.tests_passed
+                or not state.scope_compliant
+                or not state.contract_satisfied
+            )
+        )
+        or not _workspace_matches_git_evidence(context, git_evidence)
+    ):
+        raise WorkflowStateError(
+            "workspace, Git-scope, tests, or verdict changed after the audit"
+        )
+    intent = _intent_for_action(context.run_directory, action_id)
+    if intent.kind != "auditor":
+        raise WorkflowStateError("validated audit action intent kind is invalid")
+    return _PostAuditRecoveryProof(
+        action_id=action_id,
+        result_path=result_path,
+        result_sha256=result_sha256,
+        audit=audit,
+        audit_round=intent.repair_round,
+    )
+
+
+def _workspace_matches_git_evidence(
+    context: _WorkflowContext,
+    expected: GitEvidence,
+) -> bool:
+    """Compare current worktree evidence without writing into the workflow run."""
+    _, _, sensitive_values = build_subprocess_environment(context.services.environ)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-post-audit-evidence-"
+        ) as temporary:
+            observed = collect_git_evidence(
+                context.prepared.workspace,
+                context.baseline,
+                context.prepared.specification.allowed_paths,
+                context.prepared.specification.protected_paths,
+                Path(temporary) / "git",
+                sensitive_values=sensitive_values,
+                environ=context.services.environ,
+            )
+    except (OSError, WorkflowDependencyError, WorkflowInputError):
+        return False
+    return observed.model_dump(exclude={"patch_artifact"}) == expected.model_dump(
+        exclude={"patch_artifact"}
+    )
+
+
 def _test_action_id(
     repair_round: int,
     index: int,
@@ -3755,6 +4169,8 @@ def _write_escalation(
     context: _WorkflowContext,
     reason: str,
     summary: str,
+    *,
+    escalation_evidence: Mapping[str, str] | None = None,
 ) -> tuple[Path, ...]:
     root = context.run_directory / "escalation"
     directory = root / f"{context.state.journal_sequence:06d}-{reason}"
@@ -3762,6 +4178,16 @@ def _write_escalation(
         context,
         reason,
     )
+    _, _, sensitive_values = build_subprocess_environment(context.services.environ)
+    safe_prompt_source_evidence = {
+        key: redact_text(value, sensitive_values)[:256]
+        for key, value in (escalation_evidence or {}).items()
+        if key
+        in {
+            "prompt_source_failure_category",
+            "prompt_source_adapter_status",
+        }
+    }
     package = {
         "schema_version": 1,
         "substage_id": context.state.substage_id,
@@ -3776,6 +4202,7 @@ def _write_escalation(
         "latest_tests_path": context.state.latest_tests_path,
         "updated_at": context.state.updated_at,
         **transport_evidence,
+        **safe_prompt_source_evidence,
     }
     package_path = directory / "package.json"
     readme_path = directory / "README.md"
@@ -3790,6 +4217,12 @@ def _write_escalation(
     ]
     error_category = transport_evidence.get("transport_error_category")
     stderr_tail = transport_evidence.get("transport_stderr_tail")
+    prompt_failure = safe_prompt_source_evidence.get(
+        "prompt_source_failure_category"
+    )
+    prompt_adapter = safe_prompt_source_evidence.get(
+        "prompt_source_adapter_status"
+    )
     if isinstance(error_category, str):
         markdown_lines.append(f"- Transport error category: `{error_category}`")
     if isinstance(stderr_tail, str) and stderr_tail:
@@ -3802,6 +4235,14 @@ def _write_escalation(
                 stderr_tail,
                 "```",
             )
+        )
+    if isinstance(prompt_failure, str):
+        markdown_lines.append(
+            f"- Prompt-source failure category: `{prompt_failure}`"
+        )
+    if isinstance(prompt_adapter, str):
+        markdown_lines.append(
+            f"- Prompt-source adapter status: `{prompt_adapter}`"
         )
     markdown_lines.append("")
     markdown = "\n".join(markdown_lines)

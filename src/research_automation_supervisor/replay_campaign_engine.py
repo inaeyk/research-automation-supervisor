@@ -90,6 +90,7 @@ from research_automation_supervisor.workflow_engine import (
     _utc_string,
     _write_json,
     continue_substage,
+    post_audit_prompt_source_boundary,
     resume_prompt_source_substage,
     resume_substage,
     run_substage,
@@ -626,7 +627,21 @@ def _drive(
         if workflow.status != "completed":
             _write_paused_task_summary(context, task, workflow)
             category = _workflow_pause_category(workflow)
-            boundary = _paused_boundary(context, task, workflow)
+            try:
+                boundary = _paused_boundary(
+                    context,
+                    task,
+                    workflow,
+                    workflow_services,
+                )
+            except (ReplayCampaignStateError, WorkflowStateError) as exc:
+                return _pause_campaign(
+                    context,
+                    "unsafe_workflow_state",
+                    str(exc),
+                    task,
+                    context.state.paused_boundary or "worker_continuation",
+                )
             return _pause_campaign(
                 context,
                 category,
@@ -741,6 +756,44 @@ def _resume_stored_continuation(
         raise ReplayCampaignStateError(
             "stored human continuation has no exact paused boundary"
         )
+    if observed.status in _ACTIVE_WORKFLOW_STATUSES and _post_audit_recovery_started(
+        stage2_run,
+        boundary,
+    ):
+        _validate_campaign_post_audit_recovery(
+            context,
+            task,
+            stage2_run,
+            boundary,
+        )
+        return resume_substage(stage2_run, services=services)
+    post_audit = post_audit_prompt_source_boundary(
+        stage2_run,
+        services=services,
+    )
+    if post_audit is not None:
+        expected_boundary = {
+            "finish": "supervisor_finish",
+            "repair_prompt": "supervisor_repair_prompt",
+            "human_pause": "auditor_escalation",
+        }[post_audit]
+        if boundary != expected_boundary:
+            raise ReplayCampaignStateError(
+                "campaign boundary contradicts the validated post-audit verdict"
+            )
+        _validate_campaign_post_audit_recovery(
+            context,
+            task,
+            stage2_run,
+            boundary,
+        )
+        if post_audit == "human_pause":
+            return observed
+        return resume_prompt_source_substage(
+            stage2_run,
+            services=services,
+            allow_post_audit_recovery=True,
+        )
     if _stage2_accepted_continuation(
         context,
         task,
@@ -760,6 +813,154 @@ def _resume_stored_continuation(
             services=services,
         )
     raise ReplayCampaignStateError("stored paused boundary is unsupported")
+
+
+def _post_audit_recovery_started(
+    stage2_run: Path,
+    boundary: str,
+) -> bool:
+    expected_reason = {
+        "supervisor_finish": "post_audit_finish_recovery",
+        "supervisor_repair_prompt": "post_audit_repair_recovery",
+    }.get(boundary)
+    if expected_reason is None:
+        return False
+    try:
+        entries = [
+            json.loads(line.decode("ascii"))
+            for line in (stage2_run / "journal.jsonl").read_bytes().splitlines()
+        ]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReplayCampaignStateError(
+            "post-audit recovery journal could not be read"
+        ) from exc
+    return any(
+        isinstance(entry, dict) and entry.get("reason") == expected_reason
+        for entry in entries
+    )
+
+
+def _validate_campaign_post_audit_recovery(
+    context: _CampaignContext,
+    task: PreparedReplayTask,
+    stage2_run: Path,
+    boundary: str,
+) -> None:
+    """Reject recovery unless campaign evidence proves pre-gold model state."""
+    task_id = task.specification.task_id
+    if (
+        context.state.pending_human_decision is not None
+        or context.state.gold_evaluated_task_ids
+        or context.state.gold_reveal_model_turn_count is not None
+        or context.state.post_gold_model_turn_count is not None
+        or task_id in context.state.model_terminal_task_ids
+        or task_id in context.state.completed_task_ids
+    ):
+        raise ReplayCampaignStateError(
+            "post-audit recovery is forbidden after gold or model termination"
+        )
+    campaign_entries = _read_campaign_journal(context.run_directory)
+    if any(
+        entry.get("reason")
+        in {
+            "campaign_model_turns_frozen",
+            "task_gold_evaluated",
+            "campaign_gold_turns_verified",
+            "campaign_completed",
+        }
+        for entry in campaign_entries
+    ):
+        raise ReplayCampaignStateError(
+            "campaign journal contains later terminal or gold evidence"
+        )
+    if list((context.run_directory / "tasks").glob("*/gold-reveal.json")) or any(
+        path.is_file()
+        for path in (context.run_directory / "tasks").glob("*/gold/**/*")
+    ):
+        raise ReplayCampaignStateError(
+            "post-audit recovery found untracked gold evaluation artifacts"
+        )
+    actions = _supervisor_actions_for_task(context.run_directory, task_id)
+    if not actions:
+        raise ReplayCampaignStateError(
+            "post-audit recovery has no durable auditor supervisor action"
+        )
+    recovery_started = _post_audit_recovery_started(stage2_run, boundary)
+    expected_source_boundary = {
+        "supervisor_finish": "finish",
+        "supervisor_repair_prompt": "repair_prompt",
+        "auditor_escalation": "human_pause",
+    }[boundary]
+    latest = actions[-1]
+    accepted = latest.get("accepted_action")
+    latest_boundary = latest.get("boundary")
+    allowed_latest = (
+        latest_boundary == "auditor_prompt"
+        and isinstance(accepted, dict)
+        and accepted.get("action") == "auditor_prompt"
+    ) or (
+        recovery_started
+        and latest_boundary == expected_source_boundary
+        and isinstance(accepted, dict)
+        and accepted.get("action") == expected_source_boundary
+        and isinstance(latest.get("key"), str)
+        and cast(str, latest["key"]).endswith(
+            f"-h{context.state.human_decision_count:03d}"
+        )
+    )
+    if not allowed_latest:
+        raise ReplayCampaignStateError(
+            "a later supervisor action follows the validated auditor prompt"
+        )
+    recorded_action_ids = {
+        action_id
+        for action in actions
+        for action_id in (action.get("action_id"),)
+        if isinstance(action_id, str)
+    }
+    requests = _read_matching(context.run_directory / "decisions", "*/request.json")
+    for request in requests:
+        if (
+            request.get("task_id") != task_id
+            or request.get("boundary") not in {"finish", "repair_prompt", "human_pause"}
+        ):
+            continue
+        action_id = request.get("action_id")
+        if not isinstance(action_id, str):
+            raise ReplayCampaignStateError(
+                "later supervisor intent identity is malformed"
+            )
+        if action_id in recorded_action_ids:
+            continue
+        artifact = context.run_directory / "supervisor" / "codex" / action_id
+        if not artifact.exists():
+            continue
+        if not recovery_started:
+            raise ReplayCampaignStateError(
+                "a later supervisor model action is present or ambiguous"
+            )
+        try:
+            durable_result = CodexRunResult.model_validate(
+                _read_json(artifact / "result.json")
+            )
+        except (ReplayCampaignStateError, ValidationError) as exc:
+            raise ReplayCampaignStateError(
+                "a later supervisor model action is present or ambiguous"
+            ) from exc
+        if (
+            durable_result.status != "succeeded"
+            or Path(durable_result.artifact_directory) != artifact
+        ):
+            raise ReplayCampaignStateError(
+                "later supervisor model completion is not safely reusable"
+            )
+    stage2_action_count = len(
+        list((stage2_run / "actions").glob("worker-*.json"))
+    ) + len(list((stage2_run / "actions").glob("auditor-*.json")))
+    if stage2_action_count < 2:
+        raise ReplayCampaignStateError(
+            "post-audit recovery lacks worker and auditor action evidence"
+        )
 
 
 def _stage2_accepted_continuation(
@@ -833,27 +1034,32 @@ class _CampaignPromptSource:
                 accepted = record["accepted_action"]
                 if accepted is None:
                     raise WorkflowPromptSourceError(
-                        "durable supervisor action was rejected"
+                        "durable supervisor action was rejected",
+                        failure_category="durable_supervisor_action_rejected",
                     )
                 action = SupervisorAction.model_validate(accepted)
             except (KeyError, ValidationError) as exc:
                 raise WorkflowPromptSourceError(
-                    "durable supervisor action is invalid"
+                    "durable supervisor action is invalid",
+                    failure_category="durable_supervisor_action_invalid",
                 ) from exc
             session = record.get("supervisor_session_id")
             if not isinstance(session, str):
                 raise WorkflowPromptSourceError(
-                    "durable supervisor session UUID is missing"
+                    "durable supervisor session UUID is missing",
+                    failure_category="durable_supervisor_session_missing",
                 )
             try:
                 canonical_supervisor_uuid(session)
             except ValueError as exc:
                 raise WorkflowPromptSourceError(
-                    "durable supervisor session UUID is noncanonical"
+                    "durable supervisor session UUID is noncanonical",
+                    failure_category="durable_supervisor_session_noncanonical",
                 ) from exc
             if self.context.state.supervisor_session_id not in {None, session}:
                 raise WorkflowPromptSourceError(
-                    "durable supervisor session UUID contradicts campaign state"
+                    "durable supervisor session UUID contradicts campaign state",
+                    failure_category="durable_supervisor_session_mismatch",
                 )
             if self.context.state.supervisor_session_id is None:
                 self.context.state = _event(
@@ -914,7 +1120,8 @@ class _CampaignPromptSource:
             or _read_json(schema_path) != SUPERVISOR_ACTION_SCHEMA
         ):
             raise WorkflowPromptSourceError(
-                "durable supervisor action intent changed"
+                "durable supervisor action intent changed",
+                failure_category="durable_supervisor_intent_changed",
             )
         prepared = _prepared_supervisor_request(
             self.context,
@@ -934,7 +1141,8 @@ class _CampaignPromptSource:
                 result = CodexRunResult.model_validate(_read_json(result_path))
             except ValidationError as exc:
                 raise WorkflowPromptSourceError(
-                    "durable supervisor result is invalid"
+                    "durable supervisor result is invalid",
+                    failure_category="durable_supervisor_result_invalid",
                 ) from exc
         elif newly_prepared:
             result = _invoke_supervisor(
@@ -948,11 +1156,14 @@ class _CampaignPromptSource:
             )
         else:
             raise WorkflowPromptSourceError(
-                "supervisor action intent has no provable completion"
+                "supervisor action intent has no provable completion",
+                failure_category="supervisor_completion_unproven",
             )
         if result.status != "succeeded":
             raise WorkflowPromptSourceError(
-                f"supervisor transport failed safely: {result.status}"
+                f"supervisor transport failed safely: {result.status}",
+                failure_category="supervisor_transport_failure",
+                adapter_status=result.status,
             )
         session_id = _exact_supervisor_session(result, resume_id)
         raw_action, raw_typed_action = _parse_supervisor_action(result)
@@ -1012,7 +1223,9 @@ class _CampaignPromptSource:
         if rejection_reasons:
             raise WorkflowPromptSourceError(
                 "Supervisor action rejected by deterministic authority metadata: "
-                + ", ".join(rejection_reasons)
+                + ", ".join(rejection_reasons),
+                failure_category="supervisor_authority_rejection",
+                adapter_status=result.status,
             )
         return _workflow_decision(action, self.human_note)
 
@@ -1718,6 +1931,8 @@ def _pause_campaign(
     transport_lines = ""
     error_category = escalation.get("transport_error_category")
     stderr_tail = escalation.get("transport_stderr_tail")
+    prompt_failure = escalation.get("prompt_source_failure_category")
+    prompt_adapter = escalation.get("prompt_source_adapter_status")
     if isinstance(error_category, str):
         transport_lines += f"- Transport error category: {error_category}\n"
     if isinstance(stderr_tail, str) and stderr_tail:
@@ -1726,6 +1941,14 @@ def _pause_campaign(
             "```text\n"
             f"{stderr_tail}\n"
             "```\n"
+        )
+    if isinstance(prompt_failure, str):
+        transport_lines += (
+            f"- Prompt-source failure category: {prompt_failure}\n"
+        )
+    if isinstance(prompt_adapter, str):
+        transport_lines += (
+            f"- Prompt-source adapter status: {prompt_adapter}\n"
         )
     worker_id = context.state.task_worker_session_ids.get(
         task.specification.task_id,
@@ -1771,7 +1994,7 @@ def _pause_campaign(
 def _stage2_escalation_evidence(
     stage2_run: Path | None,
 ) -> dict[str, str]:
-    """Load only the bounded auditor transport fields from Stage 2 evidence."""
+    """Load only bounded safe failure fields from Stage 2 evidence."""
     if stage2_run is None:
         return {}
     path = stage2_run / "escalation" / "package.json"
@@ -1781,14 +2004,23 @@ def _stage2_escalation_evidence(
         return {}
     category = value.get("transport_error_category")
     tail = value.get("transport_stderr_tail")
-    if not isinstance(category, str) or not category.startswith("auditor_"):
-        return {}
-    return {
-        "transport_error_category": category[:256],
-        "transport_stderr_tail": (
-            tail[-4096:] if isinstance(tail, str) else ""
-        ),
-    }
+    prompt_failure = value.get("prompt_source_failure_category")
+    prompt_adapter = value.get("prompt_source_adapter_status")
+    evidence: dict[str, str] = {}
+    if isinstance(category, str) and category.startswith("auditor_"):
+        evidence.update(
+            {
+                "transport_error_category": category[:256],
+                "transport_stderr_tail": (
+                    tail[-4096:] if isinstance(tail, str) else ""
+                ),
+            }
+        )
+    if isinstance(prompt_failure, str):
+        evidence["prompt_source_failure_category"] = prompt_failure[:256]
+    if isinstance(prompt_adapter, str):
+        evidence["prompt_source_adapter_status"] = prompt_adapter[:256]
+    return evidence
 
 
 def _record_notification(
@@ -2218,6 +2450,7 @@ def _paused_boundary(
     context: _CampaignContext,
     task: PreparedReplayTask,
     result: WorkflowResult,
+    services: WorkflowServices,
 ) -> str:
     reason = result.pause_reason or result.status
     if result.status == "repair_limit_paused" or reason.endswith("repair_limit"):
@@ -2225,6 +2458,17 @@ def _paused_boundary(
     if reason == "auditor_escalated":
         return "auditor_escalation"
     if reason.startswith("prompt_source"):
+        if reason == "prompt_source_invalid":
+            recovered = post_audit_prompt_source_boundary(
+                Path(result.artifact_directory),
+                services=services,
+            )
+            if recovered is not None:
+                return {
+                    "finish": "supervisor_finish",
+                    "repair_prompt": "supervisor_repair_prompt",
+                    "human_pause": "auditor_escalation",
+                }[recovered]
         actions = _supervisor_actions_for_task(
             context.run_directory,
             task.specification.task_id,
