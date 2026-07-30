@@ -1284,9 +1284,18 @@ def _validate_evaluation_package(root: Path) -> dict[str, object]:
                 raise OfflineEvaluationError(
                     "evaluation package contains an unsupported object"
                 )
-            if stat.S_ISREG(status.st_mode) and stat.S_IMODE(status.st_mode) & 0o111:
+            relative = path.relative_to(root)
+            executable_dependency = (
+                bool(relative.parts)
+                and relative.parts[0] == "dependencies"
+            )
+            if (
+                stat.S_ISREG(status.st_mode)
+                and stat.S_IMODE(status.st_mode) & 0o111
+                and not executable_dependency
+            ):
                 raise OfflineEvaluationError(
-                    "evaluation package files must be non-executable"
+                    "only dependency snapshot files may be executable"
                 )
             if stat.S_ISREG(status.st_mode) and status.st_nlink != 1:
                 raise OfflineEvaluationError(

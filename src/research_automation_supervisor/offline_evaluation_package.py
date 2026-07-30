@@ -8,6 +8,8 @@ authority and produces a sealed input for ``evaluate-historical-replay``.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import ctypes
 import errno
@@ -40,7 +42,9 @@ TASK_IDS = (
 )
 _DEPENDENCY_NAMES = ("chombo-dependency", "grchombo-dependency")
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_MAX_GIT_SYMLINK_DEPTH = 40
 _GIT_ENV = {
+    "GIT_NO_REPLACE_OBJECTS": "1",
     "GIT_OPTIONAL_LOCKS": "0",
     "LC_ALL": "C",
     "PATH": "/usr/bin:/bin",
@@ -73,6 +77,14 @@ class _DependencySource:
     commit: str
     tree: str
     namespace_path: str
+
+
+@dataclass(frozen=True)
+class _GitTreeEntry:
+    path: str
+    mode: str
+    object_type: str
+    object_id: str
 
 
 @dataclass(frozen=True)
@@ -146,8 +158,14 @@ def _prepare_loaded_source(
                     evaluator_sha256=evaluator_sha256,
                 )
             )
-        runtime = _materialize_dependencies(source.dependencies, staging)
-        provenance = _provenance_record(source)
+        runtime, dependency_materialization = _materialize_dependencies(
+            source.dependencies,
+            staging,
+        )
+        provenance = _provenance_record(
+            source,
+            dependency_materialization,
+        )
         provenance_path = staging / "provenance/source-authority.json"
         provenance_path.parent.mkdir(parents=True)
         _write_json(provenance_path, provenance)
@@ -300,11 +318,14 @@ def verify_evaluation_package(
                 "evaluation package entry",
             )
             entry_status = entry_path.lstat()
-            expected_mode = (
-                0o500 if entry["object_type"] == "directory" else 0o400
-            )
+            if entry["object_type"] == "directory":
+                allowed_modes = {0o500}
+            elif str(entry["path"]).startswith("dependencies/"):
+                allowed_modes = {0o400, 0o500}
+            else:
+                allowed_modes = {0o400}
             if (
-                entry["mode"] != expected_mode
+                entry["mode"] not in allowed_modes
                 or entry_status.st_uid != os.geteuid()
                 or entry_status.st_gid != os.getegid()
             ):
@@ -513,13 +534,25 @@ def _validate_production_package(
                 "namespace_path",
             }
             or set(source_record)
-            != {"name", "source_commit", "source_tree"}
+            != {
+                "name",
+                "source_commit",
+                "source_tree",
+                "source_commit_object_base64",
+                "materialized_tree",
+                "canonicalized_symlinks",
+            }
             or name != source_record.get("name")
             or dependency.get("source_commit")
             != source_record.get("source_commit")
             or dependency.get("source_tree") != source_record.get("source_tree")
             or not _is_git_oid(dependency.get("source_commit"))
             or not _is_git_oid(dependency.get("source_tree"))
+            or not _is_git_oid(source_record.get("materialized_tree"))
+            or not isinstance(
+                source_record.get("source_commit_object_base64"),
+                str,
+            )
             or dependency.get("path") != f"dependencies/{name}"
         ):
             raise EvaluationPackageError(
@@ -530,9 +563,43 @@ def _validate_production_package(
             str(dependency["path"]),
             "dependency snapshot",
         )
-        if _git_tree_oid(dependency_root) != dependency["source_tree"]:
+        if (
+            _git_tree_oid(dependency_root)
+            != source_record["materialized_tree"]
+        ):
             raise EvaluationPackageError(
                 "dependency snapshot tree contradicts its provenance"
+            )
+        try:
+            commit_object = base64.b64decode(
+                str(source_record["source_commit_object_base64"]),
+                validate=True,
+            )
+        except (ValueError, binascii.Error) as exc:
+            raise EvaluationPackageError(
+                "dependency commit provenance is invalid"
+            ) from exc
+        if (
+            _git_object_oid(b"commit", commit_object)
+            != source_record["source_commit"]
+            or _commit_tree_oid(commit_object) != source_record["source_tree"]
+        ):
+            raise EvaluationPackageError(
+                "dependency commit provenance does not match"
+            )
+        original_symlinks = _validate_canonicalized_symlink_provenance(
+            dependency_root,
+            source_record.get("canonicalized_symlinks"),
+        )
+        if (
+            _git_tree_oid(
+                dependency_root,
+                original_symlinks=original_symlinks,
+            )
+            != source_record["source_tree"]
+        ):
+            raise EvaluationPackageError(
+                "dependency original tree contradicts its provenance"
             )
     required_roots = {
         "baseline-archives",
@@ -1077,17 +1144,70 @@ def _materialize_task(
 def _materialize_dependencies(
     dependencies: tuple[_DependencySource, ...],
     staging: Path,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     records: list[dict[str, object]] = []
+    materialization: dict[str, dict[str, object]] = {}
     for dependency in dependencies:
-        with tempfile.TemporaryDirectory(
-            prefix=f"{dependency.name}-archive-"
-        ) as temporary:
-            archive = Path(temporary) / "dependency.tar"
-            _git_archive(dependency.repository, dependency.commit, archive)
-            destination = staging / "dependencies" / dependency.name
-            destination.mkdir(parents=True)
-            _extract_regular_archive(archive, destination)
+        repository_fd = _pin_source_directory(
+            dependency.repository,
+            f"{dependency.name} repository",
+        )
+        try:
+            pinned_repository = Path(f"/proc/self/fd/{repository_fd}")
+            commit_object = _git_bytes(
+                pinned_repository,
+                "cat-file",
+                "commit",
+                dependency.commit,
+            )
+            if (
+                _git_object_oid(b"commit", commit_object)
+                != dependency.commit
+                or _commit_tree_oid(commit_object) != dependency.tree
+                or _git(
+                    pinned_repository,
+                    "rev-parse",
+                    f"{dependency.commit}^{{tree}}",
+                )
+                != dependency.tree
+            ):
+                raise EvaluationPackageError(
+                    f"{dependency.name} commit provenance changed"
+                )
+            with tempfile.TemporaryDirectory(
+                prefix=f"{dependency.name}-archive-"
+            ) as temporary:
+                archive = Path(temporary) / "dependency.tar"
+                _git_archive(
+                    pinned_repository,
+                    dependency.commit,
+                    archive,
+                )
+                destination = staging / "dependencies" / dependency.name
+                destination.mkdir(parents=True)
+                canonicalized_symlinks = _extract_dependency_archive(
+                    pinned_repository,
+                    dependency.commit,
+                    archive,
+                    destination,
+                )
+            if (
+                _path_identity(dependency.repository)
+                != _descriptor_identity(repository_fd)
+            ):
+                raise EvaluationPackageError(
+                    f"{dependency.name} repository changed during materialization"
+                )
+        finally:
+            os.close(repository_fd)
+        materialized_tree = _git_tree_oid(destination)
+        materialization[dependency.name] = {
+            "materialized_tree": materialized_tree,
+            "canonicalized_symlinks": canonicalized_symlinks,
+            "source_commit_object_base64": base64.b64encode(
+                commit_object
+            ).decode("ascii"),
+        }
         records.append(
             {
                 "role": dependency.name,
@@ -1097,13 +1217,19 @@ def _materialize_dependencies(
                 "namespace_path": dependency.namespace_path,
             }
         )
-    return {
-        "profile": "gl_historical_replay_v1",
-        "dependency_roots": records,
-    }
+    return (
+        {
+            "profile": "gl_historical_replay_v1",
+            "dependency_roots": records,
+        },
+        materialization,
+    )
 
 
-def _provenance_record(source: _SourceAuthority) -> dict[str, object]:
+def _provenance_record(
+    source: _SourceAuthority,
+    dependency_materialization: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "campaign_id": source.campaign_id,
@@ -1129,6 +1255,15 @@ def _provenance_record(source: _SourceAuthority) -> dict[str, object]:
                 "name": dependency.name,
                 "source_commit": dependency.commit,
                 "source_tree": dependency.tree,
+                "source_commit_object_base64": dependency_materialization[
+                    dependency.name
+                ]["source_commit_object_base64"],
+                "materialized_tree": dependency_materialization[
+                    dependency.name
+                ]["materialized_tree"],
+                "canonicalized_symlinks": dependency_materialization[
+                    dependency.name
+                ]["canonicalized_symlinks"],
             }
             for dependency in source.dependencies
         ],
@@ -1484,6 +1619,363 @@ def _git_archive(repository: Path, commit: str, output: Path) -> None:
         raise EvaluationPackageError("committed source archive could not be created")
 
 
+def _git_tree_entries(
+    repository: Path,
+    commit: str,
+) -> dict[str, _GitTreeEntry]:
+    payload = _git_bytes(
+        repository,
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        commit,
+    )
+    entries: dict[str, _GitTreeEntry] = {}
+    try:
+        raw_records = payload.split(b"\0")
+        for raw in raw_records:
+            if not raw:
+                continue
+            metadata, raw_path = raw.split(b"\t", 1)
+            raw_mode, raw_type, raw_oid = metadata.split(b" ")
+            path = raw_path.decode("utf-8", errors="strict")
+            mode = raw_mode.decode("ascii", errors="strict")
+            object_type = raw_type.decode("ascii", errors="strict")
+            object_id = raw_oid.decode("ascii", errors="strict")
+            _validate_git_path(path, "committed Git path")
+            if path in entries:
+                raise EvaluationPackageError(
+                    "committed Git tree contains a duplicate path"
+                )
+            if mode not in {"100644", "100755", "120000"}:
+                if mode == "160000" or object_type == "commit":
+                    raise EvaluationPackageError(
+                        "committed dependency contains a submodule"
+                    )
+                raise EvaluationPackageError(
+                    "committed dependency contains an unsupported Git object"
+                )
+            if object_type != "blob" or not _is_git_oid(object_id):
+                raise EvaluationPackageError(
+                    "committed dependency contains an ambiguous Git object"
+                )
+            entries[path] = _GitTreeEntry(
+                path=path,
+                mode=mode,
+                object_type=object_type,
+                object_id=object_id,
+            )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EvaluationPackageError(
+            "committed Git tree metadata is invalid"
+        ) from exc
+    if not entries:
+        raise EvaluationPackageError("committed dependency tree is empty")
+    for path in entries:
+        parts = path.split("/")
+        for length in range(1, len(parts)):
+            if "/".join(parts[:length]) in entries:
+                raise EvaluationPackageError(
+                    "committed Git tree contains an ambiguous path"
+                )
+    return entries
+
+
+def _git_bytes(repository: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ("/usr/bin/git", "-C", str(repository), *arguments),
+        cwd=None,
+        env=_GIT_ENV,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        close_fds=True,
+        pass_fds=_proc_path_fds(repository),
+        timeout=300,
+    )
+    if completed.returncode != 0:
+        raise EvaluationPackageError("committed Git object could not be read")
+    return completed.stdout
+
+
+def _git_blob(
+    repository: Path,
+    object_id: str,
+    cache: dict[str, bytes],
+) -> bytes:
+    if object_id not in cache:
+        content = _git_bytes(repository, "cat-file", "blob", object_id)
+        if _git_blob_oid(content) != object_id:
+            raise EvaluationPackageError(
+                "committed Git blob identity does not match"
+            )
+        cache[object_id] = content
+    return cache[object_id]
+
+
+def _resolve_committed_symlink(
+    repository: Path,
+    entries: Mapping[str, _GitTreeEntry],
+    directories: set[str],
+    original: _GitTreeEntry,
+    blob_cache: dict[str, bytes],
+) -> tuple[_GitTreeEntry, bytes, bytes]:
+    original_target = _git_blob(
+        repository,
+        original.object_id,
+        blob_cache,
+    )
+    current = original
+    seen = {original.path}
+    for _depth in range(_MAX_GIT_SYMLINK_DEPTH):
+        target_bytes = _git_blob(
+            repository,
+            current.object_id,
+            blob_cache,
+        )
+        target = _decode_git_link_target(target_bytes)
+        normalized = _normalize_git_link_target(current.path, target)
+        if normalized in directories and normalized not in entries:
+            raise EvaluationPackageError(
+                "committed symlink resolves to a directory"
+            )
+        normalized_parts = normalized.split("/")
+        if any(
+            "/".join(normalized_parts[:length]) in entries
+            for length in range(1, len(normalized_parts))
+        ):
+            raise EvaluationPackageError(
+                "committed symlink target is ambiguous"
+            )
+        resolved = entries.get(normalized)
+        if resolved is None:
+            raise EvaluationPackageError(
+                "committed symlink target is dangling"
+            )
+        if resolved.mode in {"100644", "100755"}:
+            return (
+                resolved,
+                _git_blob(repository, resolved.object_id, blob_cache),
+                original_target,
+            )
+        if resolved.mode != "120000":
+            raise EvaluationPackageError(
+                "committed symlink target has an unsupported type"
+            )
+        if resolved.path in seen:
+            raise EvaluationPackageError("committed symlink chain contains a cycle")
+        seen.add(resolved.path)
+        current = resolved
+    raise EvaluationPackageError("committed symlink chain exceeds the depth limit")
+
+
+def _decode_git_link_target(target: bytes) -> str:
+    try:
+        decoded = target.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EvaluationPackageError(
+            "committed symlink target is not a POSIX path"
+        ) from exc
+    if (
+        not decoded
+        or "\0" in decoded
+        or decoded.endswith("/")
+        or PurePosixPath(decoded).is_absolute()
+    ):
+        raise EvaluationPackageError(
+            "committed symlink target must be a nonempty relative POSIX path"
+        )
+    return decoded
+
+
+def _normalize_git_link_target(link_path: str, target: str) -> str:
+    stack = link_path.split("/")[:-1]
+    for part in target.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not stack:
+                raise EvaluationPackageError(
+                    "committed symlink target escapes the repository"
+                )
+            stack.pop()
+            continue
+        stack.append(part)
+    if not stack:
+        raise EvaluationPackageError(
+            "committed symlink target resolves to the repository root"
+        )
+    normalized = "/".join(stack)
+    _validate_git_path(normalized, "normalized committed symlink target")
+    return normalized
+
+
+def _validate_git_path(path: str, label: str) -> None:
+    if (
+        not path
+        or "\0" in path
+        or path.startswith("/")
+        or path.endswith("/")
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        raise EvaluationPackageError(f"{label} is invalid")
+
+
+def _git_blob_oid(content: bytes) -> str:
+    return _git_object_oid(b"blob", content)
+
+
+def _git_object_oid(object_type: bytes, content: bytes) -> str:
+    header = object_type + b" " + str(len(content)).encode("ascii") + b"\0"
+    return hashlib.sha1(header + content).hexdigest()  # noqa: S324
+
+
+def _commit_tree_oid(content: bytes) -> str:
+    first_line = content.split(b"\n", 1)[0]
+    if (
+        not first_line.startswith(b"tree ")
+        or len(first_line) != 45
+    ):
+        raise EvaluationPackageError("committed dependency commit is invalid")
+    try:
+        tree = first_line[5:].decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EvaluationPackageError(
+            "committed dependency tree identity is invalid"
+        ) from exc
+    if not _is_git_oid(tree):
+        raise EvaluationPackageError(
+            "committed dependency tree identity is invalid"
+        )
+    return tree
+
+
+def _extract_dependency_archive(
+    repository: Path,
+    commit: str,
+    archive: Path,
+    destination: Path,
+) -> list[dict[str, object]]:
+    entries = _git_tree_entries(repository, commit)
+    directories = {
+        "/".join(path.split("/")[:length])
+        for path in entries
+        for length in range(1, len(path.split("/")))
+    }
+    blob_cache: dict[str, bytes] = {}
+    resolved_links: dict[str, tuple[_GitTreeEntry, bytes, bytes]] = {}
+    for tree_entry in entries.values():
+        if tree_entry.mode == "120000":
+            resolved_links[tree_entry.path] = _resolve_committed_symlink(
+                repository,
+                entries,
+                directories,
+                tree_entry,
+                blob_cache,
+            )
+    seen_entries: set[str] = set()
+    seen_members: set[str] = set()
+    try:
+        with tarfile.open(archive, mode="r:*") as opened:
+            for member in opened.getmembers():
+                raw_name = member.name[:-1] if member.name.endswith("/") else member.name
+                _validate_git_path(raw_name, "committed archive path")
+                if raw_name in seen_members:
+                    raise EvaluationPackageError(
+                        "committed archive contains a duplicate entry"
+                    )
+                seen_members.add(raw_name)
+                target = destination.joinpath(*raw_name.split("/"))
+                if member.isdir():
+                    if raw_name not in directories:
+                        raise EvaluationPackageError(
+                            "committed archive contains an ambiguous directory"
+                        )
+                    target.mkdir(parents=True, exist_ok=True)
+                    target.chmod(stat.S_IMODE(member.mode) & 0o755)
+                    continue
+                entry = entries.get(raw_name)
+                if entry is None:
+                    raise EvaluationPackageError(
+                        "committed archive contains an undeclared entry"
+                    )
+                seen_entries.add(raw_name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if entry.mode == "120000":
+                    if not member.issym():
+                        raise EvaluationPackageError(
+                            "committed symlink archive entry is ambiguous"
+                        )
+                    resolved, content, link_target = resolved_links[raw_name]
+                    try:
+                        archived_target = member.linkname.encode("utf-8")
+                    except UnicodeEncodeError as exc:
+                        raise EvaluationPackageError(
+                            "committed symlink archive target is invalid"
+                        ) from exc
+                    if archived_target != link_target:
+                        raise EvaluationPackageError(
+                            "committed symlink archive target changed"
+                        )
+                    with target.open("xb") as output:
+                        output.write(content)
+                    target.chmod(0o500 if resolved.mode == "100755" else 0o400)
+                    continue
+                if not member.isreg():
+                    raise EvaluationPackageError(
+                        "committed archive contains an unsafe entry"
+                    )
+                source = opened.extractfile(member)
+                if source is None:
+                    raise EvaluationPackageError(
+                        "committed archive entry is unavailable"
+                    )
+                with source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output)
+                content = target.read_bytes()
+                if _git_blob_oid(content) != entry.object_id:
+                    raise EvaluationPackageError(
+                        "committed archive blob identity changed"
+                    )
+                target.chmod(0o500 if entry.mode == "100755" else 0o400)
+    except (OSError, tarfile.TarError) as exc:
+        raise EvaluationPackageError(
+            "committed dependency archive could not be materialized"
+        ) from exc
+    if seen_entries != set(entries):
+        raise EvaluationPackageError(
+            "committed dependency archive is incomplete"
+        )
+    provenance: list[dict[str, object]] = []
+    for original_path, (resolved, content, link_target) in sorted(
+        resolved_links.items()
+    ):
+        materialized = destination.joinpath(*original_path.split("/"))
+        status = materialized.lstat()
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+            or _sha256_file(materialized) != hashlib.sha256(content).hexdigest()
+        ):
+            raise EvaluationPackageError(
+                "canonicalized dependency symlink is invalid"
+            )
+        provenance.append(
+            {
+                "original_git_path": original_path,
+                "link_target": link_target.decode("utf-8", errors="strict"),
+                "link_target_sha256": hashlib.sha256(link_target).hexdigest(),
+                "link_blob_oid": entries[original_path].object_id,
+                "resolved_git_path": resolved.path,
+                "resolved_blob_oid": resolved.object_id,
+                "resolved_content_sha256": hashlib.sha256(content).hexdigest(),
+                "result_mode": 0o500 if resolved.mode == "100755" else 0o400,
+            }
+        )
+    return provenance
+
+
 def _extract_regular_archive(archive: Path, destination: Path) -> None:
     try:
         with tarfile.open(archive, mode="r:*") as opened:
@@ -1551,7 +2043,9 @@ def _make_payload_read_only(root: Path) -> None:
         if stat.S_ISDIR(status.st_mode):
             path.chmod(0o500)
         elif stat.S_ISREG(status.st_mode):
-            path.chmod(0o400)
+            path.chmod(
+                0o500 if stat.S_IMODE(status.st_mode) & 0o111 else 0o400
+            )
         else:
             raise EvaluationPackageError(
                 "evaluation package contains an unsupported object"
@@ -1682,6 +2176,139 @@ def _validate_package_configuration(
             path = _source_path(root, relative, "dependency root")
             if not path.is_dir() or path.is_symlink():
                 raise EvaluationPackageError("dependency root is not a directory")
+
+
+def _validate_canonicalized_symlink_provenance(
+    dependency_root: Path,
+    value: object,
+) -> dict[str, str]:
+    records = _required_object_list(
+        value,
+        "canonicalized dependency symlinks",
+    )
+    expected_keys = {
+        "original_git_path",
+        "link_target",
+        "link_target_sha256",
+        "link_blob_oid",
+        "resolved_git_path",
+        "resolved_blob_oid",
+        "resolved_content_sha256",
+        "result_mode",
+    }
+    previous = ""
+    by_path: dict[str, Mapping[str, object]] = {}
+    for record in records:
+        original = record.get("original_git_path")
+        link_target = record.get("link_target")
+        resolved = record.get("resolved_git_path")
+        if (
+            set(record) != expected_keys
+            or not isinstance(original, str)
+            or not isinstance(link_target, str)
+            or not isinstance(resolved, str)
+            or original <= previous
+            or not _is_sha256(record.get("link_target_sha256"))
+            or not _is_git_oid(record.get("link_blob_oid"))
+            or not _is_git_oid(record.get("resolved_blob_oid"))
+            or not _is_sha256(record.get("resolved_content_sha256"))
+            or record.get("result_mode") not in {0o400, 0o500}
+        ):
+            raise EvaluationPackageError(
+                "canonicalized dependency symlink provenance is invalid"
+        )
+        _validate_git_path(original, "canonicalized dependency symlink path")
+        _validate_git_path(resolved, "canonicalized dependency target path")
+        target_bytes = link_target.encode("utf-8")
+        _decode_git_link_target(target_bytes)
+        if (
+            hashlib.sha256(target_bytes).hexdigest()
+            != record["link_target_sha256"]
+            or _git_blob_oid(target_bytes) != record["link_blob_oid"]
+        ):
+            raise EvaluationPackageError(
+                "canonicalized dependency link target does not match"
+            )
+        materialized = _source_path(
+            dependency_root,
+            original,
+            "canonicalized dependency symlink",
+        )
+        resolved_file = _source_path(
+            dependency_root,
+            resolved,
+            "canonicalized dependency target",
+        )
+        for selected in (materialized, resolved_file):
+            status = selected.lstat()
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or stat.S_ISLNK(status.st_mode)
+                or status.st_nlink != 1
+                or stat.S_IMODE(status.st_mode) != record["result_mode"]
+                or _sha256_file(selected)
+                != record["resolved_content_sha256"]
+                or _git_blob_oid(selected.read_bytes())
+                != record["resolved_blob_oid"]
+            ):
+                raise EvaluationPackageError(
+                    "canonicalized dependency symlink identity does not match"
+                )
+        by_path[original] = record
+        previous = original
+    directories = {
+        path.relative_to(dependency_root).as_posix()
+        for path in dependency_root.rglob("*")
+        if path.is_dir()
+    }
+    for original, record in by_path.items():
+        current = original
+        seen = {current}
+        for _depth in range(_MAX_GIT_SYMLINK_DEPTH):
+            link_record = by_path[current]
+            target = str(link_record["link_target"])
+            normalized = _normalize_git_link_target(current, target)
+            parts = normalized.split("/")
+            if any(
+                "/".join(parts[:length]) in by_path
+                for length in range(1, len(parts))
+            ):
+                raise EvaluationPackageError(
+                    "canonicalized dependency symlink target is ambiguous"
+                )
+            if normalized in directories:
+                raise EvaluationPackageError(
+                    "canonicalized dependency symlink resolves to a directory"
+                )
+            if normalized not in by_path:
+                resolved_path = _source_path(
+                    dependency_root,
+                    normalized,
+                    "canonicalized dependency target",
+                )
+                if not resolved_path.is_file() or resolved_path.is_symlink():
+                    raise EvaluationPackageError(
+                        "canonicalized dependency symlink target is dangling"
+                    )
+                break
+            if normalized in seen:
+                raise EvaluationPackageError(
+                    "canonicalized dependency symlink chain contains a cycle"
+                )
+            seen.add(normalized)
+            current = normalized
+        else:
+            raise EvaluationPackageError(
+                "canonicalized dependency symlink chain exceeds the depth limit"
+            )
+        if normalized != record["resolved_git_path"]:
+            raise EvaluationPackageError(
+                "canonicalized dependency symlink resolution does not match"
+            )
+    return {
+        original: str(record["link_blob_oid"])
+        for original, record in by_path.items()
+    }
 
 
 def _verified_package_file(
@@ -1848,6 +2475,28 @@ def _exact_directory(path: Path, label: str) -> Path:
     if absolute != resolved or not resolved.is_dir() or resolved.is_symlink():
         raise EvaluationPackageError(f"{label} is not an exact directory")
     return resolved
+
+
+def _pin_source_directory(path: Path, label: str) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise EvaluationPackageError(f"{label} could not be pinned") from exc
+    try:
+        if _descriptor_identity(descriptor) != _path_identity(path):
+            raise EvaluationPackageError(
+                f"{label} changed while it was pinned"
+            )
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -2050,14 +2699,24 @@ def _sha256_json(value: object) -> str:
     ).hexdigest()
 
 
-def _git_tree_oid(root: Path) -> str:
+def _git_tree_oid(
+    root: Path,
+    *,
+    original_symlinks: Mapping[str, str] | None = None,
+) -> str:
     """Derive a Git tree identity from regular files without Git metadata."""
+
+    replacements = dict(original_symlinks or {})
+    seen_replacements: set[str] = set()
 
     def object_oid(kind: bytes, content: bytes) -> bytes:
         header = kind + b" " + str(len(content)).encode("ascii") + b"\0"
         return hashlib.sha1(header + content).digest()  # noqa: S324
 
-    def directory_oid(directory: Path) -> tuple[bytes, bool]:
+    def directory_oid(
+        directory: Path,
+        prefix: str,
+    ) -> tuple[bytes, bool]:
         entries: list[tuple[bytes, bytes]] = []
         try:
             children = tuple(directory.iterdir())
@@ -2067,26 +2726,45 @@ def _git_tree_oid(root: Path) -> str:
             ) from exc
         for child in children:
             name = os.fsencode(child.name)
+            relative = f"{prefix}/{child.name}" if prefix else child.name
             if b"\0" in name or b"/" in name:
                 raise EvaluationPackageError(
                     "packaged source tree contains an invalid name"
                 )
             status = child.lstat()
             if stat.S_ISDIR(status.st_mode):
-                nested, has_entries = directory_oid(child)
+                if relative in replacements:
+                    raise EvaluationPackageError(
+                        "original symlink provenance selects a directory"
+                    )
+                nested, has_entries = directory_oid(child, relative)
                 if not has_entries:
                     continue
                 mode = b"40000"
                 oid = nested
                 sort_key = name + b"/"
             elif stat.S_ISREG(status.st_mode):
-                content = child.read_bytes()
-                mode = (
-                    b"100755"
-                    if stat.S_IMODE(status.st_mode) & 0o111
-                    else b"100644"
-                )
-                oid = object_oid(b"blob", content)
+                if relative in replacements:
+                    mode = b"120000"
+                    try:
+                        oid = bytes.fromhex(replacements[relative])
+                    except ValueError as exc:
+                        raise EvaluationPackageError(
+                            "original symlink object identity is invalid"
+                        ) from exc
+                    if len(oid) != 20:
+                        raise EvaluationPackageError(
+                            "original symlink object identity is invalid"
+                        )
+                    seen_replacements.add(relative)
+                else:
+                    content = child.read_bytes()
+                    mode = (
+                        b"100755"
+                        if stat.S_IMODE(status.st_mode) & 0o111
+                        else b"100644"
+                    )
+                    oid = object_oid(b"blob", content)
                 sort_key = name
             else:
                 raise EvaluationPackageError(
@@ -2098,7 +2776,11 @@ def _git_tree_oid(root: Path) -> str:
         payload = b"".join(entry for _key, entry in sorted(entries))
         return object_oid(b"tree", payload), bool(entries)
 
-    oid, _has_entries = directory_oid(root)
+    oid, _has_entries = directory_oid(root, "")
+    if seen_replacements != set(replacements):
+        raise EvaluationPackageError(
+            "original symlink provenance contains an unknown path"
+        )
     return oid.hex()
 
 

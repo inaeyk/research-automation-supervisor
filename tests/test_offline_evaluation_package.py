@@ -4,7 +4,9 @@ import ast
 import hashlib
 import json
 import os
+import posixpath
 import shutil
+import stat
 import subprocess
 import tarfile
 from collections.abc import Sequence
@@ -24,6 +26,27 @@ from research_automation_supervisor.offline_evaluation_package import (
 from research_automation_supervisor.offline_replay_evaluator import (
     evaluate_historical_replay,
 )
+
+_GRCHOMBO_LINKS = {
+    "Source/CCZ4/CCZ4.hpp": "CCZ4RHS.hpp",
+    "Source/Matter/MatterCCZ4.hpp": "MatterCCZ4RHS.hpp",
+    "Tests/SphericalExtractionUniformTest/SetHarmonic.hpp": (
+        "../SphericalExtractionTest/SetHarmonic.hpp"
+    ),
+    "Tests/SphericalExtractionUniformTest/SetHarmonic.impl.hpp": (
+        "../SphericalExtractionTest/SetHarmonic.impl.hpp"
+    ),
+    "Tests/SphericalExtractionUniformTest/SimulationParameters.hpp": (
+        "../SphericalExtractionTest/SimulationParameters.hpp"
+    ),
+    (
+        "Tests/SphericalExtractionUniformTest/"
+        "SphericalExtractionUniformTestLevel.hpp"
+    ): "../SphericalExtractionTest/SphericalExtractionTestLevel.hpp",
+    "Tests/SphericalExtractionUniformTest/UserVariables.hpp": (
+        "../SphericalExtractionTest/UserVariables.hpp"
+    ),
+}
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -58,6 +81,65 @@ def _repository(path: Path, files: dict[str, str]) -> tuple[str, str]:
         "rev-parse",
         "HEAD^{tree}",
     )
+
+
+def _repository_with_links(
+    path: Path,
+    *,
+    files: dict[str, bytes],
+    links: dict[str, str],
+    executable: set[str] | None = None,
+) -> tuple[str, str]:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q")
+    for relative, content in files.items():
+        target = path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o755 if relative in (executable or set()) else 0o644)
+    for relative, link_target in links.items():
+        target = path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(link_target)
+    _git(path, "add", ".")
+    _git(path, "commit", "-q", "-m", "synthetic linked dependency")
+    return _git(path, "rev-parse", "HEAD"), _git(
+        path,
+        "rev-parse",
+        "HEAD^{tree}",
+    )
+
+
+def _replace_dependency_repository(
+    source: Path,
+    *,
+    files: dict[str, bytes],
+    links: dict[str, str],
+    executable: set[str] | None = None,
+) -> tuple[Path, str, str]:
+    repository = source / "external/GRChombo"
+    shutil.rmtree(repository)
+    commit, tree = _repository_with_links(
+        repository,
+        files=files,
+        links=links,
+        executable=executable,
+    )
+    source_state_path = (
+        source / "engine-only/historical-audits/source-state.json"
+    )
+    source_state = json.loads(source_state_path.read_text(encoding="utf-8"))
+    for record in source_state["repositories"]:
+        if record["name"] == "grchombo-dependency":
+            record["path"] = str(repository)
+            record["head"] = commit
+            record["status"] = []
+            break
+    source_state_path.write_text(
+        json.dumps(source_state, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return repository, commit, tree
 
 
 def _synthetic_source(tmp_path: Path) -> Path:
@@ -230,6 +312,53 @@ def _build_package(tmp_path: Path) -> tuple[Path, Path]:
     return source, package
 
 
+def _files_for_links(links: dict[str, str]) -> dict[str, bytes]:
+    resolved = {
+        posixpath.normpath(
+            posixpath.join(posixpath.dirname(link_path), link_target)
+        )
+        for link_path, link_target in links.items()
+    }
+    return {
+        path: f"synthetic target {path}\n".encode()
+        for path in sorted(resolved)
+    }
+
+
+def _materialize_linked_dependency(
+    tmp_path: Path,
+    *,
+    files: dict[str, bytes],
+    links: dict[str, str],
+    executable: set[str] | None = None,
+) -> tuple[Path, Path, dict[str, object]]:
+    repository = tmp_path / "repository"
+    commit, tree = _repository_with_links(
+        repository,
+        files=files,
+        links=links,
+        executable=executable,
+    )
+    staging = tmp_path / "staging"
+    _runtime, materialization = package_builder._materialize_dependencies(
+        (
+            package_builder._DependencySource(
+                name="grchombo-dependency",
+                repository=repository,
+                commit=commit,
+                tree=tree,
+                namespace_path="/synthetic/external/GRChombo",
+            ),
+        ),
+        staging,
+    )
+    return (
+        repository,
+        staging / "dependencies/grchombo-dependency",
+        materialization["grchombo-dependency"],
+    )
+
+
 def _reseal_package(package: Path) -> None:
     manifest_path = package / package_builder.PACKAGE_MANIFEST_NAME
     package.chmod(0o700)
@@ -376,6 +505,373 @@ def test_package_creation_is_deterministic_and_maps_all_five_tasks(
     assert all(task["tests"] for task in config["tasks"])
     assert all(task["exact_reference_archive"] for task in config["tasks"])
     assert all(task["production_profile"] for task in config["tasks"])
+
+
+def test_dependency_links_are_canonicalized_from_committed_blobs(
+    tmp_path: Path,
+) -> None:
+    links = {
+        "same/link.hpp": "target.hpp",
+        "uniform/sibling.hpp": "../base/sibling.hpp",
+        "chain/first": "second",
+        "chain/second": "final.sh",
+    }
+    files = {
+        "same/target.hpp": b"same-directory\n",
+        "base/sibling.hpp": b"safe-sibling\n",
+        "chain/final.sh": b"#!/bin/sh\nexit 0\n",
+    }
+    repository, dependency, metadata = _materialize_linked_dependency(
+        tmp_path,
+        files=files,
+        links=links,
+        executable={"chain/final.sh"},
+    )
+
+    expected = {
+        "same/link.hpp": ("same/target.hpp", 0o400),
+        "uniform/sibling.hpp": ("base/sibling.hpp", 0o400),
+        "chain/first": ("chain/final.sh", 0o500),
+        "chain/second": ("chain/final.sh", 0o500),
+    }
+    provenance = {
+        record["original_git_path"]: record
+        for record in metadata["canonicalized_symlinks"]
+    }
+    assert set(provenance) == set(expected)
+    for original, (resolved, mode) in expected.items():
+        output = dependency / original
+        target = repository / resolved
+        assert output.is_file()
+        assert not output.is_symlink()
+        assert output.read_bytes() == target.read_bytes()
+        assert stat.S_IMODE(output.stat().st_mode) == mode
+        assert output.stat().st_nlink == 1
+        assert (output.stat().st_dev, output.stat().st_ino) != (
+            target.stat().st_dev,
+            target.stat().st_ino,
+        )
+        assert provenance[original]["resolved_git_path"] == resolved
+        assert provenance[original]["result_mode"] == mode
+        assert provenance[original]["link_target"] == links[original]
+        assert provenance[original]["link_target_sha256"] == hashlib.sha256(
+            links[original].encode()
+        ).hexdigest()
+        assert provenance[original]["link_blob_oid"] == _git(
+            repository,
+            "rev-parse",
+            f"HEAD:{original}",
+        )
+        assert provenance[original]["resolved_content_sha256"] == (
+            hashlib.sha256(target.read_bytes()).hexdigest()
+        )
+
+
+def test_dependency_link_resolution_ignores_live_checkout_changes(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    commit, tree = _repository_with_links(
+        repository,
+        files={"target": b"committed target\n"},
+        links={"link": "target"},
+    )
+    (repository / "target").write_bytes(b"uncommitted checkout content\n")
+    (repository / "link").unlink()
+    (repository / "other").write_bytes(b"uncommitted link destination\n")
+    (repository / "link").symlink_to("other")
+
+    staging = tmp_path / "staging"
+    package_builder._materialize_dependencies(
+        (
+            package_builder._DependencySource(
+                name="grchombo-dependency",
+                repository=repository,
+                commit=commit,
+                tree=tree,
+                namespace_path="/synthetic/external/GRChombo",
+            ),
+        ),
+        staging,
+    )
+
+    dependency = staging / "dependencies/grchombo-dependency"
+    assert (dependency / "target").read_bytes() == b"committed target\n"
+    assert (dependency / "link").read_bytes() == b"committed target\n"
+    assert not (dependency / "other").exists()
+
+
+def test_dependency_repository_path_replacement_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    commit, tree = _repository_with_links(
+        repository,
+        files={"target": b"committed target\n"},
+        links={"link": "target"},
+    )
+    parked = tmp_path / "parked"
+    original = package_builder._git_archive
+
+    def replace_then_archive(
+        pinned_repository: Path,
+        selected_commit: str,
+        archive: Path,
+    ) -> None:
+        repository.rename(parked)
+        shutil.copytree(parked, repository, copy_function=shutil.copy2)
+        original(pinned_repository, selected_commit, archive)
+
+    monkeypatch.setattr(
+        package_builder,
+        "_git_archive",
+        replace_then_archive,
+    )
+
+    with pytest.raises(EvaluationPackageError, match="repository changed"):
+        package_builder._materialize_dependencies(
+            (
+                package_builder._DependencySource(
+                    name="grchombo-dependency",
+                    repository=repository,
+                    commit=commit,
+                    tree=tree,
+                    namespace_path="/synthetic/external/GRChombo",
+                ),
+            ),
+            tmp_path / "staging",
+        )
+
+
+def test_dependency_replacement_refs_cannot_change_pinned_commit(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path / "source")
+    repository, original_commit, _tree = _replace_dependency_repository(
+        source,
+        files={"target": b"ORIGINAL\n"},
+        links={"link": "target"},
+    )
+    (repository / "target").write_bytes(b"REPLACEMENT\n")
+    _git(repository, "add", "target")
+    _git(repository, "commit", "-q", "-m", "replacement content")
+    replacement_commit = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "reset", "--hard", "-q", original_commit)
+    _git(repository, "replace", original_commit, replacement_commit)
+
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "package",
+    )
+
+    dependency = package / "dependencies/grchombo-dependency"
+    assert (dependency / "target").read_bytes() == b"ORIGINAL\n"
+    assert (dependency / "link").read_bytes() == b"ORIGINAL\n"
+
+
+@pytest.mark.parametrize(
+    ("links", "files", "message"),
+    (
+        (
+            {"link": "/absolute/target"},
+            {"target": b"target\n"},
+            "relative POSIX path",
+        ),
+        (
+            {"nested/link": "../../outside"},
+            {"outside": b"target\n"},
+            "escapes the repository",
+        ),
+        (
+            {"link": "missing"},
+            {"target": b"target\n"},
+            "dangling",
+        ),
+        (
+            {"first": "second", "second": "first"},
+            {"target": b"target\n"},
+            "cycle",
+        ),
+        (
+            {"link": "directory"},
+            {"directory/file": b"target\n"},
+            "directory",
+        ),
+    ),
+)
+def test_unsafe_committed_dependency_links_are_rejected(
+    tmp_path: Path,
+    links: dict[str, str],
+    files: dict[str, bytes],
+    message: str,
+) -> None:
+    with pytest.raises(EvaluationPackageError, match=message):
+        _materialize_linked_dependency(
+            tmp_path,
+            files=files,
+            links=links,
+        )
+
+
+def test_committed_dependency_symlink_depth_limit_is_enforced(
+    tmp_path: Path,
+) -> None:
+    links = {
+        f"chain/link-{index}": (
+            f"link-{index + 1}"
+            if index < package_builder._MAX_GIT_SYMLINK_DEPTH
+            else "target"
+        )
+        for index in range(package_builder._MAX_GIT_SYMLINK_DEPTH + 1)
+    }
+    with pytest.raises(EvaluationPackageError, match="depth limit"):
+        _materialize_linked_dependency(
+            tmp_path,
+            files={"chain/target": b"target\n"},
+            links=links,
+        )
+
+
+def test_committed_dependency_submodule_is_rejected(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit, _tree = _repository(repository, {"regular.txt": "regular\n"})
+    _git(
+        repository,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000",
+        commit,
+        "vendor/submodule",
+    )
+    _git(repository, "commit", "-q", "-m", "add synthetic gitlink")
+    dependency = package_builder._DependencySource(
+        name="grchombo-dependency",
+        repository=repository,
+        commit=_git(repository, "rev-parse", "HEAD"),
+        tree=_git(repository, "rev-parse", "HEAD^{tree}"),
+        namespace_path="/synthetic/external/GRChombo",
+    )
+
+    with pytest.raises(EvaluationPackageError, match="submodule"):
+        package_builder._materialize_dependencies(
+            (dependency,),
+            tmp_path / "staging",
+        )
+
+
+def test_exact_grchombo_link_shapes_are_deterministic_and_evaluable(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path / "source")
+    files = _files_for_links(_GRCHOMBO_LINKS)
+    repository, _commit, _tree = _replace_dependency_repository(
+        source,
+        files=files,
+        links=_GRCHOMBO_LINKS,
+        executable={"Source/CCZ4/CCZ4RHS.hpp"},
+    )
+    first, first_digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "package-one",
+    )
+    second, second_digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "package-two",
+    )
+
+    assert first_digest == second_digest
+    assert (first / package_builder.PACKAGE_MANIFEST_NAME).read_bytes() == (
+        second / package_builder.PACKAGE_MANIFEST_NAME
+    ).read_bytes()
+    provenance = json.loads(
+        (first / "provenance/source-authority.json").read_text(
+            encoding="ascii"
+        )
+    )
+    grchombo = next(
+        dependency
+        for dependency in provenance["dependencies"]
+        if dependency["name"] == "grchombo-dependency"
+    )
+    records = grchombo["canonicalized_symlinks"]
+    assert [record["original_git_path"] for record in records] == sorted(
+        _GRCHOMBO_LINKS
+    )
+    dependency = first / "dependencies/grchombo-dependency"
+    for original, link_target in _GRCHOMBO_LINKS.items():
+        resolved = posixpath.normpath(
+            posixpath.join(posixpath.dirname(original), link_target)
+        )
+        materialized = dependency / original
+        live_target = repository / resolved
+        assert materialized.is_file() and not materialized.is_symlink()
+        assert materialized.read_bytes() == live_target.read_bytes()
+        assert (materialized.stat().st_dev, materialized.stat().st_ino) != (
+            live_target.stat().st_dev,
+            live_target.stat().st_ino,
+        )
+    assert all(
+        path.is_dir() or (path.is_file() and not path.is_symlink())
+        for path in first.rglob("*")
+    )
+    verify_evaluation_package(first)
+    candidate = _synthetic_candidate(
+        first,
+        tmp_path / "campaign/final-candidate",
+    )
+    report = evaluate_historical_replay(
+        candidate,
+        first,
+        tmp_path / "evaluation-report",
+    )
+    assert report.is_file()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("forged_commit_and_tree", "removed_link_records"),
+)
+def test_dependency_provenance_cannot_be_resealed_inconsistently(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source = _synthetic_source(tmp_path / "source")
+    _replace_dependency_repository(
+        source,
+        files={"target": b"committed target\n"},
+        links={"link": "target"},
+    )
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "package",
+    )
+    package.chmod(0o700)
+    provenance_path = package / "provenance/source-authority.json"
+    provenance_path.chmod(0o600)
+    provenance = json.loads(provenance_path.read_text(encoding="ascii"))
+    dependency = next(
+        record
+        for record in provenance["dependencies"]
+        if record["name"] == "grchombo-dependency"
+    )
+    if mutation == "forged_commit_and_tree":
+        dependency["source_commit"] = "0" * 40
+        dependency["source_tree"] = dependency["materialized_tree"]
+    else:
+        dependency["canonicalized_symlinks"] = []
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_package(package)
+
+    with pytest.raises(
+        EvaluationPackageError,
+        match="(dependency provenance|commit provenance|original tree)",
+    ):
+        verify_evaluation_package(package)
 
 
 def test_package_uses_independent_inodes_and_does_not_modify_campaign(
