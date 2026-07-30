@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -13,8 +16,14 @@ import sys
 import tarfile
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from research_automation_supervisor.offline_evaluation_package import (
+    EvaluationPackageError,
+    verify_evaluation_package,
+)
 
 CONFIG_RELATIVE_PATH = Path("evaluation-config/offline-evaluation.json")
 REPORT_NAME = "historical-replay-report.json"
@@ -23,8 +32,11 @@ MAX_CAPTURE_BYTES = 1_048_576
 _BUBBLEWRAP = Path("/usr/bin/bwrap")
 _PYTHON = Path("/usr/bin/python3").resolve(strict=True)
 _CPP = Path("/usr/bin/g++").resolve(strict=True)
+_FORTRAN = Path("/usr/bin/x86_64-linux-gnu-gfortran-15").resolve(strict=True)
+_MAKE = Path("/usr/bin/make").resolve(strict=True)
 _ASSEMBLER = Path("/usr/bin/as").resolve(strict=True)
 _LINKER = Path("/usr/bin/ld").resolve(strict=True)
+_SHELL = Path("/bin/sh").resolve(strict=True)
 _DYNAMIC_LOADER = Path("/lib64/ld-linux-x86-64.so.2").resolve(strict=True)
 _SYSTEM_RUNTIME_DIRECTORIES = (
     Path("/usr/include"),
@@ -39,40 +51,130 @@ class OfflineEvaluationError(RuntimeError):
     """Raised when standalone evaluation authority or evidence is invalid."""
 
 
+@dataclass
+class _OutputDirectory:
+    path: Path
+    descriptor: int
+    identity: tuple[int, int, int]
+    staging_path: Path
+    staging_name: str
+    parent: Path
+    parent_descriptor: int
+    parent_identity: tuple[int, int, int]
+    candidate: Path
+    package: Path
+    published: bool = False
+
+
 def evaluate_historical_replay(
     candidate: Path,
     evaluation_package: Path,
     output: Path,
 ) -> Path:
     """Evaluate a finalized candidate without importing campaign/model runtime code."""
-    candidate_root = _exact_directory(candidate, "candidate")
-    package_root = _exact_directory(evaluation_package, "evaluation package")
-    _validate_evaluation_package(package_root)
-    output_root = _new_output_directory(output, candidate_root, package_root)
-    candidate_manifest = _verify_candidate(candidate_root)
-    candidate_record = _read_object(candidate_root / "candidate.json")
-    config_path = package_root / CONFIG_RELATIVE_PATH
-    config = _read_object(config_path)
-    _require_exact_keys(
-        config,
-        required={"schema_version", "package_id", "tasks"},
-        optional=set(),
-        label="evaluation configuration",
+    source_candidate = _exact_directory(candidate, "candidate")
+    source_package = _exact_directory(
+        evaluation_package,
+        "evaluation package",
     )
-    if config["schema_version"] != SCHEMA_VERSION:
-        raise OfflineEvaluationError("unsupported evaluation configuration schema")
-    raw_tasks = config["tasks"]
-    if not isinstance(raw_tasks, list) or not raw_tasks:
-        raise OfflineEvaluationError("evaluation configuration has no tasks")
-    candidate_tasks = _candidate_tasks(candidate_record)
-    configured_ids = tuple(_task_id(item) for item in raw_tasks)
-    if configured_ids != tuple(candidate_tasks):
-        raise OfflineEvaluationError(
-            "evaluation task order does not match the candidate"
+    candidate_fd = _pin_directory(source_candidate, "candidate")
+    package_fd = _pin_directory(source_package, "evaluation package")
+    output_target: _OutputDirectory | None = None
+    try:
+        initial_candidate_manifest = _verify_candidate(source_candidate)
+        initial_package_manifest = _validate_evaluation_package(source_package)
+        _require_pinned_path(source_candidate, candidate_fd, "candidate")
+        _require_pinned_path(
+            source_package,
+            package_fd,
+            "evaluation package",
         )
-    results: list[dict[str, object]] = []
-    with tempfile.TemporaryDirectory(prefix="historical-replay-evaluation-") as temporary:
-        scratch = Path(temporary)
+        output_target = _new_output_directory(
+            output,
+            source_candidate,
+            source_package,
+        )
+        return _evaluate_pinned_authority(
+            source_candidate,
+            source_package,
+            candidate_fd,
+            package_fd,
+            initial_candidate_manifest,
+            initial_package_manifest,
+            output_target,
+        )
+    finally:
+        if output_target is not None:
+            _cleanup_output_staging(output_target)
+            os.close(output_target.descriptor)
+            os.close(output_target.parent_descriptor)
+        os.close(package_fd)
+        os.close(candidate_fd)
+
+
+def _evaluate_pinned_authority(
+    source_candidate: Path,
+    source_package: Path,
+    candidate_fd: int,
+    package_fd: int,
+    initial_candidate_manifest: Mapping[str, object],
+    initial_package_manifest: Mapping[str, object],
+    output_target: _OutputDirectory,
+) -> Path:
+    with tempfile.TemporaryDirectory(
+        prefix="historical-replay-evaluation-"
+    ) as temporary:
+        temporary_root = Path(temporary)
+        candidate_root = temporary_root / "candidate"
+        package_root = temporary_root / "evaluation-package"
+        _copy_authority_tree(
+            Path(f"/proc/self/fd/{candidate_fd}"),
+            candidate_root,
+        )
+        _copy_authority_tree(
+            Path(f"/proc/self/fd/{package_fd}"),
+            package_root,
+        )
+        candidate_manifest = _verify_candidate(candidate_root)
+        package_manifest = _validate_evaluation_package(package_root)
+        if (
+            candidate_manifest != initial_candidate_manifest
+            or package_manifest != initial_package_manifest
+        ):
+            raise OfflineEvaluationError(
+                "offline authority changed while it was snapshotted"
+            )
+        candidate_record = _read_object(candidate_root / "candidate.json")
+        config_path = package_root / CONFIG_RELATIVE_PATH
+        config = _read_object(config_path)
+        _require_exact_keys(
+            config,
+            required={"schema_version", "package_id", "tasks"},
+            optional={"runtime"},
+            label="evaluation configuration",
+        )
+        if config["schema_version"] != SCHEMA_VERSION:
+            raise OfflineEvaluationError(
+                "unsupported evaluation configuration schema"
+            )
+        raw_tasks = config["tasks"]
+        if not isinstance(raw_tasks, list) or not raw_tasks:
+            raise OfflineEvaluationError(
+                "evaluation configuration has no tasks"
+            )
+        candidate_tasks = _candidate_tasks(candidate_record)
+        configured_ids = tuple(_task_id(item) for item in raw_tasks)
+        if configured_ids != tuple(candidate_tasks):
+            raise OfflineEvaluationError(
+                "evaluation task order does not match the candidate"
+            )
+        runtime_mounts = _runtime_dependency_mounts(
+            config.get("runtime"),
+            package_root,
+        )
+        results: list[dict[str, object]] = []
+        scratch = temporary_root / "scratch"
+        scratch.mkdir()
         for raw_task in raw_tasks:
             assert isinstance(raw_task, dict)
             results.append(
@@ -82,27 +184,60 @@ def evaluate_historical_replay(
                     candidate_root,
                     package_root,
                     scratch,
+                    runtime_mounts,
                 )
             )
-    passed = all(result["passed"] is True for result in results)
-    report: dict[str, object] = {
-        "schema_version": SCHEMA_VERSION,
-        "package_id": config["package_id"],
-        "candidate_manifest_sha256": candidate_manifest[
-            "candidate_manifest_sha256"
-        ],
-        "evaluation_configuration_sha256": _sha256_file(config_path),
-        "passed": passed,
-        "tasks": results,
-        "score": {
-            "passed_tasks": sum(result["passed"] is True for result in results),
-            "total_tasks": len(results),
-        },
-    }
-    report["report_sha256"] = _sha256_json(report)
-    report_path = output_root / REPORT_NAME
-    _write_json(report_path, report)
+        passed = all(result["passed"] is True for result in results)
+        report: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "package_id": config["package_id"],
+            "candidate_manifest_sha256": candidate_manifest[
+                "candidate_manifest_sha256"
+            ],
+            "evaluation_configuration_sha256": _sha256_file(config_path),
+            "evaluation_package_manifest_sha256": package_manifest[
+                "package_manifest_sha256"
+            ],
+            "passed": passed,
+            "tasks": results,
+            "score": {
+                "passed_tasks": sum(
+                    result["passed"] is True for result in results
+                ),
+                "total_tasks": len(results),
+            },
+        }
+        report["report_sha256"] = _sha256_json(report)
+        _require_pinned_path(source_candidate, candidate_fd, "candidate")
+        _require_pinned_path(
+            source_package,
+            package_fd,
+            "evaluation package",
+        )
+        if (
+            _verify_candidate(source_candidate) != initial_candidate_manifest
+            or _validate_evaluation_package(source_package)
+            != initial_package_manifest
+        ):
+            raise OfflineEvaluationError(
+                "offline authority changed during evaluation"
+            )
+        report_path = _write_output_report(output_target, report)
     return report_path
+
+
+def _copy_authority_tree(source: Path, destination: Path) -> None:
+    try:
+        shutil.copytree(
+            source,
+            destination,
+            symlinks=True,
+            copy_function=shutil.copy2,
+        )
+    except OSError as exc:
+        raise OfflineEvaluationError(
+            "offline evaluation authority could not be snapshotted"
+        ) from exc
 
 
 def _evaluate_task(
@@ -111,6 +246,7 @@ def _evaluate_task(
     candidate_root: Path,
     package_root: Path,
     scratch: Path,
+    runtime_mounts: tuple[tuple[Path, Path], ...],
 ) -> dict[str, object]:
     _require_exact_keys(
         task,
@@ -126,6 +262,7 @@ def _evaluate_task(
             "exact_reference_archive",
             "exact_reference_archive_sha256",
             "expected_changed_paths",
+            "production_profile",
         },
         label="evaluation task",
     )
@@ -153,12 +290,6 @@ def _evaluate_task(
         task["baseline_archive_sha256"],
         "baseline archive",
     )
-    if task["baseline_archive_sha256"] != provenance.get(
-        "baseline_archive_sha256"
-    ):
-        raise OfflineEvaluationError(
-            "evaluation baseline does not match candidate source provenance"
-        )
     _extract_regular_archive(baseline, workspace)
     if _git_tree_oid(workspace) != provenance.get("source_tree"):
         raise OfflineEvaluationError(
@@ -182,9 +313,19 @@ def _evaluate_task(
     if not isinstance(raw_tests, list):
         raise OfflineEvaluationError("evaluation tests must be a list")
     tests = [
-        _run_test(item, workspace, package_root, task_scratch)
+        _run_test(
+            item,
+            workspace,
+            package_root,
+            task_scratch,
+            runtime_mounts,
+        )
         for item in raw_tests
     ]
+    production_profile = _production_profile_analysis(
+        task.get("production_profile"),
+        changed_paths,
+    )
     exact_result: dict[str, object] | None = None
     reference_name = task.get("exact_reference_archive")
     reference_sha = task.get("exact_reference_archive_sha256")
@@ -211,6 +352,7 @@ def _evaluate_task(
         }
     passed = (
         changed_paths_passed
+        and production_profile["passed"] is True
         and all(test["passed"] is True for test in tests)
         and (exact_result is None or exact_result["passed"] is True)
     )
@@ -219,6 +361,7 @@ def _evaluate_task(
         "passed": passed,
         "changed_paths": changed_paths,
         "changed_paths_passed": changed_paths_passed,
+        "production_profile": production_profile,
         "tests": tests,
         "exact_comparison": exact_result,
     }
@@ -229,6 +372,7 @@ def _run_test(
     workspace: Path,
     package_root: Path,
     scratch: Path,
+    runtime_mounts: tuple[tuple[Path, Path], ...],
 ) -> dict[str, object]:
     del scratch
     if not isinstance(raw, dict):
@@ -279,6 +423,7 @@ def _run_test(
         workspace,
         package_root,
         inner,
+        runtime_mounts,
     )
     timeout = _bounded_int(raw.get("timeout_seconds", 300), 1, 3600, "timeout")
     stdout_limit = _bounded_int(
@@ -338,13 +483,17 @@ def _offline_bubblewrap_command(
     workspace: Path,
     package_root: Path,
     inner: Sequence[str],
+    runtime_mounts: tuple[tuple[Path, Path], ...] = (),
 ) -> tuple[str, ...]:
     for executable, label in (
         (_BUBBLEWRAP, "Bubblewrap"),
         (_PYTHON, "Python"),
         (_CPP, "C++ compiler"),
+        (_FORTRAN, "Fortran compiler"),
+        (_MAKE, "make"),
         (_ASSEMBLER, "assembler"),
         (_LINKER, "linker"),
+        (_SHELL, "POSIX shell"),
         (_DYNAMIC_LOADER, "dynamic loader"),
     ):
         if (
@@ -398,12 +547,17 @@ def _offline_bubblewrap_command(
         "/usr/lib64",
         "--dir",
         "/lib64",
+        "--dir",
+        "/bin",
     ]
     for source, destination in (
         (_PYTHON, Path("/usr/bin/python3")),
         (_CPP, Path("/usr/bin/g++")),
+        (_FORTRAN, Path("/usr/bin/x86_64-linux-gnu-gfortran-15")),
+        (_MAKE, Path("/usr/bin/make")),
         (_ASSEMBLER, Path("/usr/bin/as")),
         (_LINKER, Path("/usr/bin/ld")),
+        (_SHELL, Path("/bin/sh")),
         (_DYNAMIC_LOADER, Path("/lib64/ld-linux-x86-64.so.2")),
     ):
         command.extend(("--ro-bind", str(source), str(destination)))
@@ -425,12 +579,37 @@ def _offline_bubblewrap_command(
             "--ro-bind",
             str(package_root),
             "/evaluation",
-            "--chdir",
-            "/workspace",
-            "--",
-            *inner,
         )
     )
+    created: set[Path] = {
+        Path("/"),
+        Path("/dev"),
+        Path("/proc"),
+        Path("/tmp"),
+        Path("/tmp/home"),
+        Path("/usr"),
+        Path("/usr/bin"),
+        Path("/usr/lib"),
+        Path("/usr/libexec"),
+        Path("/usr/include"),
+        Path("/usr/lib64"),
+        Path("/lib64"),
+        Path("/bin"),
+        Path("/bin/sh"),
+        Path("/workspace"),
+        Path("/evaluation"),
+    }
+    for _source, destination in runtime_mounts:
+        for parent in reversed(destination.parents):
+            if parent not in created:
+                command.extend(("--dir", str(parent)))
+                created.add(parent)
+        if destination not in created:
+            command.extend(("--dir", str(destination)))
+            created.add(destination)
+    for source, destination in runtime_mounts:
+        command.extend(("--ro-bind", str(source), str(destination)))
+    command.extend(("--chdir", "/workspace", "--", *inner))
     return tuple(command)
 
 
@@ -446,14 +625,42 @@ def _verify_candidate(root: Path) -> dict[str, object]:
     if (
         stat.S_ISLNK(root_status.st_mode)
         or not stat.S_ISDIR(root_status.st_mode)
+        or stat.S_IMODE(root_status.st_mode) != 0o500
+        or root_status.st_uid != os.geteuid()
+        or root_status.st_gid != os.getegid()
         or stat.S_ISLNK(manifest_status.st_mode)
         or not stat.S_ISREG(manifest_status.st_mode)
         or manifest_status.st_nlink != 1
+        or stat.S_IMODE(manifest_status.st_mode) != 0o400
+        or manifest_status.st_uid != os.geteuid()
+        or manifest_status.st_gid != os.getegid()
     ):
         raise OfflineEvaluationError(
             "candidate root and manifest must be exact non-symlink objects"
         )
     manifest = _read_object(manifest_path)
+    if (
+        set(manifest)
+        != {
+            "schema_version",
+            "snapshot_id",
+            "campaign_id",
+            "entries",
+            "candidate_manifest_sha256",
+        }
+        or manifest.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(manifest.get("campaign_id"), str)
+        or not manifest["campaign_id"]
+        or manifest.get("snapshot_id")
+        != f"{manifest['campaign_id']}:candidate-v1"
+    ):
+        raise OfflineEvaluationError(
+            "candidate manifest schema or identity is invalid"
+        )
+    if manifest_path.read_bytes() != _json_bytes(manifest):
+        raise OfflineEvaluationError(
+            "candidate manifest encoding is not canonical"
+        )
     claimed = manifest.get("candidate_manifest_sha256")
     payload = {
         key: value
@@ -464,6 +671,25 @@ def _verify_candidate(root: Path) -> dict[str, object]:
         raise OfflineEvaluationError("candidate manifest digest is invalid")
     if payload.get("entries") != _package_entries(root):
         raise OfflineEvaluationError("candidate package changed after finalization")
+    candidate_record = _read_object(root / "candidate.json")
+    if (
+        candidate_record.get("schema_version") != SCHEMA_VERSION
+        or candidate_record.get("campaign_id") != manifest["campaign_id"]
+    ):
+        raise OfflineEvaluationError(
+            "candidate manifest does not match candidate identity"
+        )
+    for path in root.rglob("*"):
+        status = path.lstat()
+        expected_mode = 0o500 if stat.S_ISDIR(status.st_mode) else 0o400
+        if (
+            stat.S_IMODE(status.st_mode) != expected_mode
+            or status.st_uid != os.geteuid()
+            or status.st_gid != os.getegid()
+        ):
+            raise OfflineEvaluationError(
+                "candidate package ownership or mode is not canonical"
+            )
     return manifest
 
 
@@ -762,7 +988,11 @@ def _git_tree_oid(root: Path) -> str:
     return oid.hex()
 
 
-def _new_output_directory(output: Path, candidate: Path, package: Path) -> Path:
+def _new_output_directory(
+    output: Path,
+    candidate: Path,
+    package: Path,
+) -> _OutputDirectory:
     absolute = Path(os.path.abspath(output))
     if output.exists() or output.is_symlink():
         raise OfflineEvaluationError("output directory already exists")
@@ -788,19 +1018,248 @@ def _new_output_directory(output: Path, candidate: Path, package: Path) -> Path:
         raise OfflineEvaluationError(
             "output must be separate from campaign, candidate, and evaluation package"
         )
+    parent_descriptor = _pin_directory(resolved_parent, "output parent")
     try:
-        prospective.mkdir(mode=0o700, exist_ok=False)
-        if prospective.resolve(strict=True) != prospective:
-            raise OfflineEvaluationError(
-                "output directory changed identity during creation"
+        staging_path = Path(
+            tempfile.mkdtemp(
+                prefix=f".{absolute.name}.staging-",
+                dir=resolved_parent,
             )
-    except FileExistsError as exc:
-        raise OfflineEvaluationError("output directory already exists") from exc
+        )
+        descriptor = _pin_directory(staging_path, "output staging directory")
+        identity = _descriptor_identity(descriptor)
+        target = _OutputDirectory(
+            path=prospective,
+            descriptor=descriptor,
+            identity=identity,
+            staging_path=staging_path,
+            staging_name=staging_path.name,
+            parent=resolved_parent,
+            parent_descriptor=parent_descriptor,
+            parent_identity=_descriptor_identity(parent_descriptor),
+            candidate=candidate,
+            package=package,
+        )
+        _verify_output_directory(target)
+        return target
+    except Exception:
+        with contextlib.suppress(UnboundLocalError, OSError):
+            os.close(descriptor)
+        os.close(parent_descriptor)
+        raise
+
+
+def _pin_directory(path: Path, label: str) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise OfflineEvaluationError(f"{label} could not be pinned") from exc
+    try:
+        _require_pinned_path(path, descriptor, label)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _descriptor_identity(descriptor: int) -> tuple[int, int, int]:
+    status = os.fstat(descriptor)
+    if not stat.S_ISDIR(status.st_mode):
+        raise OfflineEvaluationError("pinned authority is not a directory")
+    return status.st_dev, status.st_ino, stat.S_IMODE(status.st_mode)
+
+
+def _require_pinned_path(path: Path, descriptor: int, label: str) -> None:
+    try:
+        status = path.lstat()
+    except OSError as exc:
+        raise OfflineEvaluationError(f"{label} pathname changed") from exc
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or not stat.S_ISDIR(status.st_mode)
+        or (
+            status.st_dev,
+            status.st_ino,
+            stat.S_IMODE(status.st_mode),
+        )
+        != _descriptor_identity(descriptor)
+    ):
+        raise OfflineEvaluationError(f"{label} pathname identity changed")
+
+
+def _verify_output_directory(target: _OutputDirectory) -> None:
+    _require_pinned_path(
+        target.staging_path,
+        target.descriptor,
+        "output staging directory",
+    )
+    _require_pinned_path(
+        target.parent,
+        target.parent_descriptor,
+        "output parent",
+    )
+    if (
+        _descriptor_identity(target.descriptor) != target.identity
+        or _descriptor_identity(target.parent_descriptor)
+        != target.parent_identity
+        or target.path.exists()
+        or target.path.is_symlink()
+        or _overlaps(target.path, target.candidate.parent)
+        or _overlaps(target.path, target.candidate)
+        or _overlaps(target.path, target.package)
+    ):
+        raise OfflineEvaluationError(
+            "output directory identity or separation changed"
+        )
+
+
+def _cleanup_output_staging(target: _OutputDirectory) -> None:
+    """Remove an unpublished, still-pinned report staging directory."""
+    if target.published:
+        return
+    try:
+        target.staging_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    try:
+        _require_pinned_path(
+            target.parent,
+            target.parent_descriptor,
+            "output parent",
+        )
+        staging_status = os.stat(
+            target.staging_name,
+            dir_fd=target.parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            _descriptor_identity(target.parent_descriptor)
+            != target.parent_identity
+            or not stat.S_ISDIR(staging_status.st_mode)
+            or (staging_status.st_dev, staging_status.st_ino)
+            != target.identity[:2]
+            or _descriptor_identity(target.descriptor)[:2]
+            != target.identity[:2]
+        ):
+            return
+        os.fchmod(target.descriptor, 0o700)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(REPORT_NAME, dir_fd=target.descriptor)
+        os.rmdir(
+            target.staging_name,
+            dir_fd=target.parent_descriptor,
+        )
+        os.fsync(target.parent_descriptor)
+    except (OSError, OfflineEvaluationError):
+        return
+
+
+def _write_output_report(
+    target: _OutputDirectory,
+    report: Mapping[str, object],
+) -> Path:
+    _verify_output_directory(target)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(
+            REPORT_NAME,
+            flags,
+            0o600,
+            dir_fd=target.descriptor,
+        )
+        try:
+            encoded = _json_bytes(report)
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(target.descriptor)
+        _verify_output_directory(target)
+        os.chmod(
+            REPORT_NAME,
+            0o400,
+            dir_fd=target.descriptor,
+            follow_symlinks=False,
+        )
+        os.fchmod(target.descriptor, 0o500)
+        _rename_output_noreplace(target)
     except OfflineEvaluationError:
         raise
     except OSError as exc:
-        raise OfflineEvaluationError("output directory could not be created") from exc
-    return prospective
+        raise OfflineEvaluationError(
+            "offline evaluation report could not be published"
+        ) from exc
+    return target.path / REPORT_NAME
+
+
+def _rename_output_noreplace(target: _OutputDirectory) -> None:
+    parent_real = Path(
+        os.path.realpath(f"/proc/self/fd/{target.parent_descriptor}")
+    )
+    if (
+        parent_real != target.parent
+        or parent_real == target.candidate.parent
+        or target.candidate.parent in parent_real.parents
+        or parent_real == target.candidate
+        or target.candidate in parent_real.parents
+        or parent_real == target.package
+        or target.package in parent_real.parents
+    ):
+        raise OfflineEvaluationError(
+            "output parent entered campaign or evaluation authority"
+        )
+    library = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = library.renameat2
+    except AttributeError as exc:
+        raise OfflineEvaluationError(
+            "atomic output publication is unavailable"
+        ) from exc
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        target.parent_descriptor,
+        os.fsencode(target.staging_name),
+        target.parent_descriptor,
+        os.fsencode(target.path.name),
+        1,
+    )
+    if result == 0:
+        target.published = True
+        with contextlib.suppress(OSError):
+            os.fsync(target.parent_descriptor)
+        return
+    selected_errno = ctypes.get_errno()
+    if selected_errno == errno.EEXIST:
+        raise OfflineEvaluationError(
+            "output directory appeared during publication"
+        )
+    raise OfflineEvaluationError(
+        f"atomic output publication failed with errno {selected_errno}"
+    )
 
 
 def _exact_directory(path: Path, label: str) -> Path:
@@ -814,8 +1273,9 @@ def _exact_directory(path: Path, label: str) -> Path:
     return resolved
 
 
-def _validate_evaluation_package(root: Path) -> None:
+def _validate_evaluation_package(root: Path) -> dict[str, object]:
     try:
+        manifest = verify_evaluation_package(root)
         for path in root.rglob("*"):
             status = path.lstat()
             if stat.S_ISLNK(status.st_mode) or not (
@@ -834,10 +1294,141 @@ def _validate_evaluation_package(root: Path) -> None:
                 )
     except OfflineEvaluationError:
         raise
+    except EvaluationPackageError as exc:
+        raise OfflineEvaluationError(str(exc)) from exc
     except OSError as exc:
         raise OfflineEvaluationError(
             "evaluation package could not be validated"
         ) from exc
+    return manifest
+
+
+def _runtime_dependency_mounts(
+    value: object,
+    package_root: Path,
+) -> tuple[tuple[Path, Path], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict) or set(value) != {
+        "profile",
+        "dependency_roots",
+    }:
+        raise OfflineEvaluationError("offline runtime profile is invalid")
+    if value["profile"] != "gl_historical_replay_v1":
+        raise OfflineEvaluationError("offline runtime profile is not registered")
+    raw_dependencies = value["dependency_roots"]
+    if not isinstance(raw_dependencies, list):
+        raise OfflineEvaluationError("offline dependency roots are invalid")
+    expected = {
+        "chombo-dependency": "Chombo",
+        "grchombo-dependency": "GRChombo",
+    }
+    mounts: dict[str, tuple[Path, Path]] = {}
+    common_external_parent: Path | None = None
+    for raw in raw_dependencies:
+        if not isinstance(raw, dict) or set(raw) != {
+            "role",
+            "path",
+            "source_commit",
+            "source_tree",
+            "namespace_path",
+        }:
+            raise OfflineEvaluationError("offline dependency record is invalid")
+        role = raw["role"]
+        if not isinstance(role, str) or role not in expected or role in mounts:
+            raise OfflineEvaluationError("offline dependency role is invalid")
+        source = _beneath(
+            package_root,
+            raw["path"] if isinstance(raw["path"], str) else "",
+            "offline dependency",
+        )
+        if not source.is_dir() or source.is_symlink():
+            raise OfflineEvaluationError("offline dependency is not a directory")
+        commit = raw["source_commit"]
+        tree = raw["source_tree"]
+        namespace = raw["namespace_path"]
+        if not (
+            isinstance(commit, str)
+            and len(commit) == 40
+            and isinstance(tree, str)
+            and len(tree) == 40
+            and isinstance(namespace, str)
+        ):
+            raise OfflineEvaluationError("offline dependency identity is invalid")
+        destination = Path(namespace)
+        if (
+            not destination.is_absolute()
+            or ".." in destination.parts
+            or destination.name != expected[role]
+            or destination.parent.name != "external"
+            or any(
+                destination == reserved
+                or destination.is_relative_to(reserved)
+                for reserved in (
+                    Path("/dev"),
+                    Path("/evaluation"),
+                    Path("/proc"),
+                    Path("/sys"),
+                    Path("/usr"),
+                    Path("/workspace"),
+                )
+            )
+        ):
+            raise OfflineEvaluationError(
+                "offline dependency namespace path is invalid"
+            )
+        if common_external_parent is None:
+            common_external_parent = destination.parent
+        elif destination.parent != common_external_parent:
+            raise OfflineEvaluationError(
+                "offline dependency namespace paths are inconsistent"
+            )
+        mounts[role] = (source, destination)
+    if set(mounts) != set(expected):
+        raise OfflineEvaluationError("offline dependency roots are incomplete")
+    return tuple(mounts[role] for role in sorted(mounts))
+
+
+def _production_profile_analysis(
+    value: object,
+    changed_paths: list[str],
+) -> dict[str, object]:
+    if value is None:
+        return {
+            "passed": True,
+            "classified_paths": {},
+            "unclassified_paths": [],
+        }
+    if not isinstance(value, dict) or set(value) != {
+        "hot_path",
+        "post_update",
+        "validation_only",
+    }:
+        raise OfflineEvaluationError("production profile is invalid")
+    patterns: dict[str, list[str]] = {}
+    for role in ("hot_path", "post_update", "validation_only"):
+        patterns[role] = _string_list(
+            value[role],
+            f"production profile {role}",
+        )
+    classified: dict[str, list[str]] = {}
+    unclassified: list[str] = []
+    for changed in changed_paths:
+        path = PurePosixPath(changed)
+        roles = [
+            role
+            for role, role_patterns in patterns.items()
+            if any(path.match(pattern) for pattern in role_patterns)
+        ]
+        if roles:
+            classified[changed] = roles
+        else:
+            unclassified.append(changed)
+    return {
+        "passed": not unclassified,
+        "classified_paths": classified,
+        "unclassified_paths": unclassified,
+    }
 
 
 def _beneath(root: Path, relative: str, label: str) -> Path:
@@ -915,7 +1506,11 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(
+    path.write_bytes(_json_bytes(value))
+
+
+def _json_bytes(value: object) -> bytes:
+    return (
         json.dumps(
             value,
             ensure_ascii=True,
@@ -923,9 +1518,8 @@ def _write_json(path: Path, value: object) -> None:
             indent=2,
             sort_keys=True,
         )
-        + "\n",
-        encoding="ascii",
-    )
+        + "\n"
+    ).encode("ascii")
 
 
 def _sha256_file(path: Path) -> str:

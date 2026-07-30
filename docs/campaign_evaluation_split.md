@@ -45,11 +45,38 @@ Source provenance and execution identity are deliberately separate. A task
 records the original source commit/tree/archive digest and the fresh
 one-commit execution repository's baseline commit/tree. Their commit IDs may
 differ after archive reconstruction; their tree IDs must match. The offline
-package repeats the original source commit/tree and archive digest, and the
-evaluator independently derives the extracted archive's Git tree before any
-test runs.
+package repeats the original source commit/tree and independently archives the
+qualified one-commit tree. Those archive bytes are package-manifest pinned,
+and the evaluator independently derives the extracted archive's Git tree
+before any test runs.
 
 ## Offline evaluator
+
+Historical authority is first materialized by a separate host-side command
+after campaign completion:
+
+```text
+prepare-historical-replay-evaluation-package \
+  --source-prepared-campaign /preserved/pre-split-campaign \
+  --output /private/gl-five-historical-replay-v1
+```
+
+The preparer imports no campaign engine or model adapter. It recognizes the
+legacy five-task manifest structurally, requires clean one-commit task
+workspaces, archives committed Git trees, copies functional fixtures and the
+historical evaluator with independent inodes, constructs deterministic exact
+reference archives, snapshots pinned dependency commits, and records source
+provenance and production-profile authority. Source identity and content are
+fingerprinted before and after preparation. Publication is atomic and fails
+if source authority changes, contains unsupported objects or links, has
+ambiguous task mappings, or is incomplete.
+
+Every package contains `evaluation-package-manifest.json`. Its canonical,
+versioned payload records ordered paths, file roles, object types, modes, byte
+lengths, and SHA-256 values. Prepared payload files are mode `0400`,
+directories are mode `0500`, and the evaluator verifies the complete manifest
+before extracting an archive or running a functional test. Preparation output
+contains only the package path and manifest digest, never protected content.
 
 `evaluate-historical-replay` is a separate console program:
 
@@ -78,8 +105,10 @@ and no network. Arbitrary package-defined host commands are not supported.
 Optional exact-reference archives and expected changed paths are also digest-
 or value-pinned.
 
-The offline runner mounts an audited Python/C++ runtime profile rather than the
-host `/usr` tree. Python starts isolated without site packages; shells, Node,
+The offline runner mounts an audited Python, C++, Fortran, assembler, linker,
+and `make` runtime profile rather than the host `/usr` tree. Python starts
+isolated without site packages. A single read-only `/bin/sh` is present for
+declared test-tool compatibility, while package-selected host commands, Node,
 campaign packages, model adapters, user installation roots, and host campaign
 state are absent. Evaluation output must be a new child of an existing exact,
 non-symlink parent disjoint from both inputs.
@@ -87,6 +116,13 @@ non-symlink parent disjoint from both inputs.
 Evaluation results never create campaign transitions, resume a campaign, or
 feed a model. The evaluator is intended to be invoked only after all campaign
 model processes have terminated.
+
+`report-historical-replay-evaluation-commands` reports next steps from
+explicit host paths. When the package is missing it emits both the exact
+preparation command and the subsequent evaluation command. It reports direct
+evaluation readiness only after an existing package manifest validates.
+Visible campaign reports record offline evaluation as `not_performed` and do
+not invent an evaluation-package path.
 
 ## Physical layout
 
@@ -102,11 +138,14 @@ runs/prepared-campaigns/gl-five-visible-campaign-v1/
   final-candidate/
 
 offline-evaluation/gl-five-historical-replay-v1/
+  evaluation-package-manifest.json
+  baseline-archives/
+  dependencies/
   evaluation-config/
-  hidden-tests/
+  protected-fixtures/
   exact-reference/
   evaluators/
-  reports/
+  provenance/
 ```
 
 An offline-evaluation root is never passed to the visible campaign loader or a

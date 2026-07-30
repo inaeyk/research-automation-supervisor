@@ -2669,6 +2669,11 @@ def _write_report(context: _CampaignContext) -> None:
             "candidate_finalized_model_turn_count": (
                 context.state.candidate_finalized_model_turn_count
             ),
+            "offline_evaluation": {
+                "status": "not_performed",
+                "evaluation_package_status": "not_supplied",
+                "commands": [],
+            },
             "no_model_action_after_candidate_finalization": (
                 context.state.candidate_finalized_model_turn_count is not None
                 and _campaign_model_turn_count(context)

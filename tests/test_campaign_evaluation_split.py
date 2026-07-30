@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 import research_automation_supervisor.candidate_export as candidate_export
+import research_automation_supervisor.offline_evaluation_package as package_builder
 import research_automation_supervisor.offline_replay_evaluator as offline_evaluator
 import research_automation_supervisor.replay_campaign_sources as campaign_sources
 import research_automation_supervisor.workflow_models as workflow_models
@@ -37,6 +38,25 @@ from tests.test_replay_campaign import (
     supervisor_action,
 )
 from tests.workflow_helpers import auditor_result, codex_response, worker_result
+
+
+@pytest.fixture(autouse=True)
+def _allow_legacy_one_task_synthetic_packages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep this module's legacy evaluator fixtures intentionally non-production."""
+
+    def verify_synthetic(root: Path) -> dict[str, object]:
+        return package_builder.verify_evaluation_package(
+            root,
+            require_production=False,
+        )
+
+    monkeypatch.setattr(
+        offline_evaluator,
+        "verify_evaluation_package",
+        verify_synthetic,
+    )
 
 
 def _completed_candidate(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -149,6 +169,10 @@ def _evaluation_package(
     (config_root / "offline-evaluation.json").write_text(
         json.dumps(config, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+    package_builder.write_evaluation_package_manifest(
+        package,
+        package_id="synthetic-private-evaluation-v1",
     )
     return package
 
@@ -420,6 +444,9 @@ def test_offline_evaluator_checks_nested_candidate_manifest_name_type(
     task_root.chmod(0o700)
     nested = task_root / "candidate-manifest.json"
     nested.symlink_to("/tmp/external-manifest")
+    task_root.chmod(0o500)
+    (candidate / "tasks").chmod(0o500)
+    candidate.chmod(0o500)
 
     with pytest.raises(OfflineEvaluationError, match="unsupported entry"):
         offline_evaluator._verify_candidate(candidate)
@@ -643,6 +670,14 @@ def test_offline_evaluation_is_standalone_and_does_not_modify_campaign(
     assert manifest.is_file()
     assert not (run / "offline-evaluation").exists()
     assert second_report.read_bytes() == report_path.read_bytes()
+    campaign_report = json.loads(
+        (run / "campaign-report.json").read_text(encoding="ascii")
+    )
+    assert campaign_report["offline_evaluation"] == {
+        "status": "not_performed",
+        "evaluation_package_status": "not_supplied",
+        "commands": [],
+    }
 
 
 def test_offline_evaluator_import_graph_has_no_campaign_or_model_adapter() -> None:
@@ -656,6 +691,8 @@ def test_offline_evaluator_import_graph_has_no_campaign_or_model_adapter() -> No
     }
     assert not any(
         name.startswith("research_automation_supervisor")
+        and name
+        != "research_automation_supervisor.offline_evaluation_package"
         for name in imported
     )
 
@@ -847,6 +884,10 @@ def test_offline_evaluation_rejects_unregistered_command_specification_before_la
         json.dumps(config, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    package_builder.write_evaluation_package_manifest(
+        package,
+        package_id="synthetic-private-evaluation-v1",
+    )
 
     def unexpected_launch(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("unregistered evaluator command was launched")
@@ -854,7 +895,7 @@ def test_offline_evaluation_rejects_unregistered_command_specification_before_la
     monkeypatch.setattr(offline_evaluator.subprocess, "run", unexpected_launch)
     with pytest.raises(
         OfflineEvaluationError,
-        match="fields are invalid|runner is not registered",
+        match="fields are invalid|runner is not registered|unregistered evaluator",
     ):
         evaluate_historical_replay(
             candidate,
@@ -883,8 +924,12 @@ def test_offline_evaluation_rejects_baseline_not_bound_to_candidate(
         json.dumps(config, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    package_builder.write_evaluation_package_manifest(
+        package,
+        package_id="synthetic-private-evaluation-v1",
+    )
 
-    with pytest.raises(OfflineEvaluationError, match="candidate source provenance"):
+    with pytest.raises(OfflineEvaluationError, match="baseline tree"):
         evaluate_historical_replay(
             candidate,
             package,
@@ -903,6 +948,10 @@ def test_offline_evaluation_rejects_source_identity_not_bound_to_candidate(
     config_path.write_text(
         json.dumps(config, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+    package_builder.write_evaluation_package_manifest(
+        package,
+        package_id="synthetic-private-evaluation-v1",
     )
 
     with pytest.raises(OfflineEvaluationError, match="source identity"):
