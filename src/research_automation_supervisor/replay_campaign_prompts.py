@@ -1,4 +1,4 @@
-"""Model-visible Stage 5A supervisor requests with no gold-derived evidence."""
+"""Model-visible supervisor requests built only from campaign authority."""
 
 from __future__ import annotations
 
@@ -146,12 +146,11 @@ def build_supervisor_request(
             "fixed_tests": _read_optional_json(request.latest_tests_path),
             "final_diff": _read_patch(request.latest_git_evidence_path),
         },
-        "gold_evidence": "withheld_until_terminal_and_never_model_visible",
     }
     evidence = _portable_supervisor_evidence(evidence, campaign, request)
     policy = campaign.supervisor_policy.content.decode("utf-8")
     content = (
-        "You are the one persistent historical-replay supervisor.\n"
+        "You are the one persistent visible-campaign supervisor.\n"
         "The manifest and Stage 2 engine are authoritative and immutable. "
         "Do not request contract, scope, permission, acceptance-test, or convention changes.\n"
         f"Return action {request.action!r}, unless judgment is genuinely required, in which "
@@ -159,12 +158,11 @@ def build_supervisor_request(
         "the Stage 2 engine supplies the complete authoritative worker or auditor wrapper. "
         "Terminal actions must use an empty prompt.\n"
         "In referenced_paths, include only concrete paths permitted by the output schema; "
-        "omit contextual files outside frozen allowed/protected path authority.\n"
-        "Never mention, infer, or request hidden/gold evaluation material.\n\n"
+        "omit contextual files outside frozen allowed/protected path authority.\n\n"
         "[BEGIN SUPERVISOR POLICY]\n"
         + policy
         + "\n[END SUPERVISOR POLICY]\n"
-        "[BEGIN VISIBLE REPLAY EVIDENCE]\n"
+        "[BEGIN VISIBLE CAMPAIGN EVIDENCE]\n"
         + json.dumps(
             evidence,
             ensure_ascii=False,
@@ -172,7 +170,7 @@ def build_supervisor_request(
             separators=(",", ":"),
             sort_keys=True,
         )
-        + "\n[END VISIBLE REPLAY EVIDENCE]\n"
+        + "\n[END VISIBLE CAMPAIGN EVIDENCE]\n"
         "Return only one JSON object satisfying the engine-owned output schema.\n"
     ).encode("utf-8")
     return RenderedSupervisorRequest(
@@ -197,6 +195,9 @@ def _portable_supervisor_evidence(
         )
         for prepared_task in campaign.tasks
     ]
+    replacements.append(
+        (str(campaign.visible_package_root), "<VISIBLE_CAMPAIGN>")
+    )
     replacements.append((str(request.run_directory), "<STAGE2_RUN>"))
     replacements.sort(key=lambda item: len(item[0]), reverse=True)
 

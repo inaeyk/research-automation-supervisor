@@ -46,7 +46,6 @@ ReplayTaskVerdict = Literal[
     "autonomous",
     "human_assisted",
     "passed",
-    "gold_mismatch",
     "failed",
 ]
 SupervisorActionName = Literal[
@@ -76,8 +75,19 @@ class ProductionProfile(BaseModel):
         return normalized
 
 
+class CampaignSourceProvenance(BaseModel):
+    """Visible identity of the committed baseline export used for one task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    repository_id: Identifier
+    source_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    source_tree: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    baseline_archive_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
 class ReplayTaskSpecification(BaseModel):
-    """One fixed historical replay task in campaign order."""
+    """One visible campaign task in fixed execution order."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -94,32 +104,32 @@ class ReplayTaskSpecification(BaseModel):
         BeforeValidator(_freeze_sequence),
         Field(max_length=100),
     ] = ()
+    source_provenance: CampaignSourceProvenance
     gold_evaluations: Annotated[
         tuple[WorkflowTest, ...],
         BeforeValidator(_freeze_sequence),
-        Field(min_length=1, max_length=100),
-    ]
+        Field(max_length=100),
+    ] = ()
     gold_artifact_roots: Annotated[
         tuple[Annotated[str, Field(min_length=1)], ...],
         BeforeValidator(_freeze_sequence),
-        Field(min_length=1, max_length=100),
-    ]
+        Field(max_length=100),
+    ] = ()
     production_profile: ProductionProfile
 
     @model_validator(mode="after")
     def validate_unique_values(self) -> ReplayTaskSpecification:
-        ids = [test.id for test in self.gold_evaluations]
-        if len(ids) != len(set(ids)):
-            raise ValueError("gold evaluation IDs must be unique")
         if len(self.project_context_paths) != len(set(self.project_context_paths)):
             raise ValueError("project-context paths must be unique")
-        if len(self.gold_artifact_roots) != len(set(self.gold_artifact_roots)):
-            raise ValueError("gold artifact roots must be unique")
+        if self.gold_evaluations or self.gold_artifact_roots:
+            raise ValueError(
+                "gold evaluation belongs in a separate offline evaluation package"
+            )
         return self
 
 
 class ReplayCampaignSpecification(BaseModel):
-    """The exact schema-version-1 Stage 5A campaign manifest."""
+    """The exact schema-version-1 visible campaign manifest."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -131,6 +141,7 @@ class ReplayCampaignSpecification(BaseModel):
     schema_version: Literal[1]
     campaign_id: Identifier
     title: Annotated[str, Field(min_length=1, max_length=1024)]
+    visible_package_root: Annotated[str, Field(min_length=1)] = "."
     supervisor_policy_path: Annotated[str, Field(min_length=1)]
     supervisor_model: ModelName
     supervisor_reasoning_effort: ReasoningEffort
@@ -140,6 +151,14 @@ class ReplayCampaignSpecification(BaseModel):
         BeforeValidator(_freeze_sequence),
         Field(min_length=1, max_length=100),
     ]
+
+    @field_validator("visible_package_root")
+    @classmethod
+    def validate_visible_package_root(cls, value: str) -> str:
+        path = value.replace("\\", "/")
+        if path.startswith("/") or any(part == ".." for part in path.split("/")):
+            raise ValueError("visible package root must be a relative path")
+        return path
 
     @model_validator(mode="after")
     def validate_task_ids(self) -> ReplayCampaignSpecification:
@@ -247,7 +266,7 @@ class PendingHumanDecision(BaseModel):
 
 
 class ReplayCampaignState(BaseModel):
-    """Thin durable Stage 5A campaign snapshot."""
+    """Thin durable visible-campaign snapshot."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -278,6 +297,11 @@ class ReplayCampaignState(BaseModel):
     ] = ()
     gold_reveal_model_turn_count: Annotated[int, Field(ge=0)] | None = None
     post_gold_model_turn_count: Annotated[int, Field(ge=0)] | None = None
+    candidate_path: str | None = None
+    candidate_manifest_sha256: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    ) = None
+    candidate_finalized_model_turn_count: Annotated[int, Field(ge=0)] | None = None
     status: ReplayCampaignStatus
     pause_reason: str | None
     journal_sequence: Annotated[int, Field(ge=0)]
@@ -296,6 +320,31 @@ class ReplayCampaignState(BaseModel):
         for identifier in value.values():
             canonical_supervisor_uuid(identifier)
         return value
+
+    @model_validator(mode="after")
+    def validate_visible_completion(self) -> ReplayCampaignState:
+        if (
+            self.gold_evaluated_task_ids
+            or self.gold_reveal_model_turn_count is not None
+            or self.post_gold_model_turn_count is not None
+        ):
+            raise ValueError(
+                "legacy evaluation state is forbidden in a visible campaign"
+            )
+        candidate = (
+            self.candidate_path,
+            self.candidate_manifest_sha256,
+            self.candidate_finalized_model_turn_count,
+        )
+        if any(value is None for value in candidate) and any(
+            value is not None for value in candidate
+        ):
+            raise ValueError("candidate finalization state must be atomic")
+        if self.status == "completed" and any(value is None for value in candidate):
+            raise ValueError("completed campaign requires a finalized candidate")
+        if all(value is not None for value in candidate) and self.status != "completed":
+            raise ValueError("finalized candidate requires completed campaign status")
+        return self
 
     def to_dict(self) -> dict[str, object]:
         return self.model_dump(mode="json")

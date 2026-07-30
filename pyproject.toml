@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 research-supervisor = "research_automation_supervisor.cli:app"
+evaluate-historical-replay = "research_automation_supervisor.offline_replay_evaluator:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/research_automation_supervisor"]

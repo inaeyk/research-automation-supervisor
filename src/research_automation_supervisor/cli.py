@@ -423,9 +423,9 @@ def abort_substage_command(
     _render_workflow_result_and_exit(result, as_json)
 
 
-@app.command("run-replay-campaign")
+@app.command("run-visible-campaign")
 def run_replay_campaign_command(
-    path: Annotated[Path, typer.Argument(help="Replay campaign specification.")],
+    path: Annotated[Path, typer.Argument(help="Visible campaign specification.")],
     runs_dir: Annotated[
         Path,
         typer.Option(
@@ -437,7 +437,7 @@ def run_replay_campaign_command(
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
 ) -> None:
-    """Run an ordered historical replay campaign synchronously."""
+    """Run an ordered visible-only campaign and export its candidate."""
     try:
         result = run_replay_campaign(path, runs_dir=runs_dir)
     except ReplayCampaignInputError as exc:
@@ -451,7 +451,7 @@ def run_replay_campaign_command(
     _render_replay_result_and_exit(result, as_json)
 
 
-@app.command("resume-replay-campaign")
+@app.command("resume-visible-campaign")
 def resume_replay_campaign_command(
     run_directory: Annotated[Path, typer.Argument(help="Existing campaign run directory.")],
     decision: Annotated[
@@ -479,14 +479,14 @@ def resume_replay_campaign_command(
     _render_replay_result_and_exit(result, as_json)
 
 
-@app.command("replay-campaign-status")
+@app.command("visible-campaign-status")
 def replay_campaign_status_command(
     run_directory: Annotated[Path, typer.Argument(help="Existing campaign run directory.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
 ) -> None:
-    """Read replay campaign status without mutation."""
+    """Read visible campaign status without mutation."""
     try:
         result = replay_campaign_status(run_directory)
     except ReplayCampaignInputError as exc:

@@ -1,4 +1,4 @@
-"""Thin autonomous Stage 5A historical-replay campaign controller."""
+"""Visible-only autonomous five-stage campaign controller."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -20,10 +20,13 @@ from typing import Any, Literal, Protocol, cast
 
 from pydantic import ValidationError
 
-from research_automation_supervisor.codex_adapter import (
-    CodexProcessLaunch,
-    run_prepared_codex,
+from research_automation_supervisor.candidate_export import (
+    CANDIDATE_STAGING_NAME,
+    TASK_INPUT_MANIFEST_NAME,
+    capture_terminal_task_candidate_input,
+    export_visible_candidate,
 )
+from research_automation_supervisor.codex_adapter import run_prepared_codex
 from research_automation_supervisor.codex_models import (
     ROLE_POLICIES,
     CodexRunRequest,
@@ -38,8 +41,6 @@ from research_automation_supervisor.durable_state import (
     render_json_bytes,
 )
 from research_automation_supervisor.errors import (
-    LiveShadowDependencyError,
-    LiveShadowIntegrityError,
     ReplayCampaignDependencyError,
     ReplayCampaignInputError,
     ReplayCampaignLockError,
@@ -54,14 +55,6 @@ from research_automation_supervisor.live_shadow_engine import (
     SupervisorInvoker,
     _prepare_artifact_set,
     _snapshot_checkpoint,
-)
-from research_automation_supervisor.live_shadow_isolation import (
-    RECORDED_AUTH_SOURCE,
-    BubblewrapCapability,
-    IsolationPreflight,
-    build_bubblewrap_process_launch,
-    preflight_bubblewrap_isolation,
-    recreate_engine_runtime_home,
 )
 from research_automation_supervisor.redaction import redact_json, redact_text
 from research_automation_supervisor.replay_campaign_models import (
@@ -80,11 +73,6 @@ from research_automation_supervisor.replay_campaign_sources import (
 )
 from research_automation_supervisor.shadow_engine import _ShadowLock, _write_bytes
 from research_automation_supervisor.shadow_models import canonical_supervisor_uuid
-from research_automation_supervisor.test_runner import (
-    TestAttemptResult,
-    TestSuiteResult,
-    run_test_attempt,
-)
 from research_automation_supervisor.workflow_engine import (
     WorkflowPromptDecision,
     WorkflowPromptRequest,
@@ -103,6 +91,7 @@ from research_automation_supervisor.workflow_engine import (
 from research_automation_supervisor.workflow_integrity import sha256_regular_file
 from research_automation_supervisor.workflow_models import (
     WorkflowResult,
+    has_external_authority_locator,
     normalize_relative_path,
     path_matches_any,
 )
@@ -116,33 +105,18 @@ DEFAULT_REPLAY_RUNS_DIRECTORY = (
 )
 
 
-class GoldTestInvoker(Protocol):
-    def __call__(
-        self,
-        prepared_test: Any,
-        artifact_directory: Path,
-        action_id: str,
-        *,
-        environ: Mapping[str, str] | None,
-    ) -> TestAttemptResult: ...
-
-
 class NotificationInvoker(Protocol):
     def __call__(self, payload: Mapping[str, str]) -> None: ...
 
 
 @dataclass(frozen=True)
 class ReplayCampaignServices:
-    """Injectable process boundaries for fake-Codex campaign tests."""
+    """Injectable visible-campaign process boundaries for tests."""
 
     codex_executable: str | None = None
     supervisor_invoker: SupervisorInvoker | None = None
     workflow_services: WorkflowServices | None = None
-    gold_test_invoker: GoldTestInvoker = run_test_attempt
     notification_invoker: NotificationInvoker | None = None
-    isolation_preflight: IsolationPreflight = preflight_bubblewrap_isolation
-    bubblewrap_executable: str | None = None
-    codex_authentication_file: Path | None = None
     environ: Mapping[str, str] | None = None
     token_factory: Callable[[], str] = lambda: secrets.token_hex(16)
     utc_now: Callable[[], datetime] = lambda: datetime.now(UTC)
@@ -180,7 +154,6 @@ class _CampaignContext:
     state: ReplayCampaignState
     services: ReplayCampaignServices
     codex_executable: str
-    isolation_capability: BubblewrapCapability | None
 
 
 def run_replay_campaign(
@@ -189,7 +162,7 @@ def run_replay_campaign(
     runs_dir: Path = DEFAULT_REPLAY_RUNS_DIRECTORY,
     services: ReplayCampaignServices = DEFAULT_REPLAY_CAMPAIGN_SERVICES,
 ) -> ReplayCampaignState:
-    """Create and synchronously drive one ordered historical replay campaign."""
+    """Create and synchronously drive one ordered visible-only campaign."""
     prepared = load_replay_campaign_specification(
         path,
         environ=None if services.environ is None else dict(services.environ),
@@ -215,12 +188,7 @@ def run_replay_campaign(
         raise ReplayCampaignInputError(
             "replay campaign run directory could not be created"
         ) from exc
-    capability = _prepare_isolation(
-        prepared,
-        run_directory,
-        executable,
-        services,
-    )
+    _prepare_campaign_runtime(prepared, run_directory)
     now = _utc_string(services.utc_now())
     state = ReplayCampaignState(
         campaign_id=prepared.specification.campaign_id,
@@ -241,6 +209,9 @@ def run_replay_campaign(
         gold_evaluated_task_ids=(),
         gold_reveal_model_turn_count=None,
         post_gold_model_turn_count=None,
+        candidate_path=None,
+        candidate_manifest_sha256=None,
+        candidate_finalized_model_turn_count=None,
         status="initialized",
         pause_reason=None,
         journal_sequence=0,
@@ -250,23 +221,18 @@ def run_replay_campaign(
     )
     _write_bytes(run_directory / JOURNAL_FILE, b"")
     _persist_state(run_directory, state)
-    evaluator_record = _write_evaluator_record(run_directory, prepared)
     context = _CampaignContext(
         prepared=prepared,
         run_directory=run_directory,
         state=state,
         services=services,
         codex_executable=executable,
-        isolation_capability=capability,
     )
     context.state = _event(
         context,
         "campaign_initialized",
         {"status": "running"},
-        {
-            str(prepared.specification_path): prepared.specification_sha256,
-            str(evaluator_record): sha256_regular_file(evaluator_record),
-        },
+        {str(prepared.specification_path): prepared.specification_sha256},
     )
     with _campaign_lock(run_directory, services.utc_now):
         return _drive(context)
@@ -295,20 +261,13 @@ def resume_replay_campaign(
         if prepared.specification_sha256 != state.specification_sha256:
             raise ReplayCampaignStateError("campaign specification changed before resume")
         executable = _resolve_campaign_codex(services)
-        capability = _prepare_isolation(
-            prepared,
-            resolved,
-            executable,
-            services,
-            recovery=True,
-        )
+        _prepare_campaign_runtime(prepared, resolved)
         context = _CampaignContext(
             prepared=prepared,
             run_directory=resolved,
             state=state,
             services=services,
             codex_executable=executable,
-            isolation_capability=capability,
         )
         if state.status == "running":
             if decision_path is not None:
@@ -517,6 +476,17 @@ def _drive(
     resume_current: bool = False,
     continuation_path: Path | None = None,
 ) -> ReplayCampaignState:
+    candidate_root = context.run_directory / "final-candidate"
+    if (
+        (
+            candidate_root.exists()
+            or (context.run_directory / CANDIDATE_STAGING_NAME).exists()
+        )
+        and context.state.current_task_index < len(context.prepared.tasks)
+    ):
+        raise ReplayCampaignStateError(
+            "candidate finalization forbids any later model action"
+        )
     while context.state.current_task_index < len(context.prepared.tasks):
         task = context.prepared.tasks[context.state.current_task_index]
         task_root = (
@@ -687,70 +657,80 @@ def _drive(
             )
 
         terminal_record = _write_model_terminal_record(context, task, workflow)
+        task_report = _write_task_summary(context, task, workflow)
+        candidate_input = capture_terminal_task_candidate_input(
+            task,
+            context.run_directory,
+        )
+        candidate_input_manifest = candidate_input / TASK_INPUT_MANIFEST_NAME
         model_terminal = (
             *context.state.model_terminal_task_ids,
             task.specification.task_id,
         )
+        completed = (
+            *context.state.completed_task_ids,
+            task.specification.task_id,
+        )
         context.state = _event(
             context,
-            "task_model_terminal",
+            "visible_task_completed",
             {
                 "model_terminal_task_ids": model_terminal,
+                "completed_task_ids": completed,
                 "current_task_index": context.state.current_task_index + 1,
                 "current_task_run": None,
                 "paused_boundary": None,
             },
-            {str(terminal_record): sha256_regular_file(terminal_record)},
+            {
+                str(terminal_record): sha256_regular_file(terminal_record),
+                str(task_report): sha256_regular_file(task_report),
+                str(candidate_input_manifest): sha256_regular_file(
+                    candidate_input_manifest
+                ),
+            },
         )
         _write_report(context)
 
-    if context.state.gold_reveal_model_turn_count is None:
-        frozen_turns = _campaign_model_turn_count(context)
-        context.state = _event(
-            context,
-            "campaign_model_turns_frozen",
-            {"gold_reveal_model_turn_count": frozen_turns},
-            {},
-        )
-    for task in context.prepared.tasks:
-        task_id = task.specification.task_id
-        if task_id in context.state.gold_evaluated_task_ids:
-            continue
-        workflow = substage_status(_expected_stage2_run(context, task))
-        if workflow.status != "completed":
-            raise ReplayCampaignStateError(
-                "gold evaluation began before every task was model-terminal"
-            )
-        gold = _run_gold_evaluations(context, task)
-        task_report = _write_task_summary(context, task, workflow, gold)
-        evaluated = (*context.state.gold_evaluated_task_ids, task_id)
-        completed = (*context.state.completed_task_ids, task_id)
-        context.state = _event(
-            context,
-            "task_gold_evaluated",
-            {
-                "gold_evaluated_task_ids": evaluated,
-                "completed_task_ids": completed,
-            },
-            {str(task_report): sha256_regular_file(task_report)},
-        )
-    post_gold_turns = _campaign_model_turn_count(context)
-    if post_gold_turns != context.state.gold_reveal_model_turn_count:
+    expected_ids = tuple(
+        task.specification.task_id for task in context.prepared.tasks
+    )
+    if (
+        context.state.completed_task_ids != expected_ids
+        or context.state.model_terminal_task_ids != expected_ids
+    ):
         raise ReplayCampaignStateError(
-            "a model turn occurred after campaign-wide hidden gold reveal"
+            "candidate finalization requires every visible task to be terminal"
         )
-    if context.state.post_gold_model_turn_count is None:
-        context.state = _event(
-            context,
-            "campaign_gold_turns_verified",
-            {"post_gold_model_turn_count": post_gold_turns},
-            {},
+    finalized_turns = _campaign_model_turn_count(context)
+    candidate_path, candidate_sha256 = export_visible_candidate(
+        context.prepared,
+        context.run_directory,
+        run_token=context.state.run_token,
+        completed_task_ids=context.state.completed_task_ids,
+        human_decision_count=context.state.human_decision_count,
+        model_turn_count=finalized_turns,
+    )
+    if _campaign_model_turn_count(context) != finalized_turns:
+        raise ReplayCampaignStateError(
+            "a model action occurred during candidate finalization"
         )
     context.state = _event(
         context,
-        "campaign_completed",
-        {"status": "completed", "pause_reason": None},
-        {},
+        "candidate_exported",
+        {
+            "status": "completed",
+            "pause_reason": None,
+            "candidate_path": str(candidate_path),
+            "candidate_manifest_sha256": candidate_sha256,
+            "candidate_finalized_model_turn_count": finalized_turns,
+        },
+        {
+            str(candidate_path / "candidate-manifest.json"): (
+                sha256_regular_file(
+                    candidate_path / "candidate-manifest.json"
+                )
+            )
+        },
     )
     _record_notification(context, "campaign_completed", None)
     _write_report(context)
@@ -935,19 +915,12 @@ def _validate_campaign_prompt_source_pause(
     if (
         state.latest_worker_action_id is not None
         or state.latest_audit_action_id is not None
-        or context.state.gold_evaluated_task_ids
-        or context.state.gold_reveal_model_turn_count is not None
-        or context.state.post_gold_model_turn_count is not None
         or task_id in context.state.model_terminal_task_ids
         or task_id in context.state.completed_task_ids
-        or list((context.run_directory / "tasks").glob("*/gold-reveal.json"))
-        or any(
-            path.is_file()
-            for path in (context.run_directory / "tasks").glob("*/gold/**/*")
-        )
+        or (context.run_directory / "final-candidate").exists()
     ):
         raise ReplayCampaignStateError(
-            "initial worker-prompt recovery has later action or gold evidence"
+            "initial worker-prompt recovery has later terminal evidence"
         )
 
 
@@ -1039,39 +1012,26 @@ def _validate_campaign_post_audit_recovery(
     stage2_run: Path,
     boundary: str,
 ) -> None:
-    """Reject recovery unless campaign evidence proves pre-gold model state."""
+    """Reject recovery unless campaign evidence proves a pre-terminal state."""
     task_id = task.specification.task_id
     if (
         context.state.pending_human_decision is not None
-        or context.state.gold_evaluated_task_ids
-        or context.state.gold_reveal_model_turn_count is not None
-        or context.state.post_gold_model_turn_count is not None
         or task_id in context.state.model_terminal_task_ids
         or task_id in context.state.completed_task_ids
+        or context.state.candidate_path is not None
+        or context.state.candidate_manifest_sha256 is not None
+        or (context.run_directory / "final-candidate").exists()
     ):
         raise ReplayCampaignStateError(
-            "post-audit recovery is forbidden after gold or model termination"
+            "post-audit recovery is forbidden after model termination"
         )
     campaign_entries = _read_campaign_journal(context.run_directory)
     if any(
-        entry.get("reason")
-        in {
-            "campaign_model_turns_frozen",
-            "task_gold_evaluated",
-            "campaign_gold_turns_verified",
-            "campaign_completed",
-        }
+        entry.get("reason") == "candidate_exported"
         for entry in campaign_entries
     ):
         raise ReplayCampaignStateError(
-            "campaign journal contains later terminal or gold evidence"
-        )
-    if list((context.run_directory / "tasks").glob("*/gold-reveal.json")) or any(
-        path.is_file()
-        for path in (context.run_directory / "tasks").glob("*/gold/**/*")
-    ):
-        raise ReplayCampaignStateError(
-            "post-audit recovery found untracked gold evaluation artifacts"
+            "campaign journal contains later terminal evidence"
         )
     actions = _supervisor_actions_for_task(context.run_directory, task_id)
     if not actions:
@@ -1298,7 +1258,6 @@ class _CampaignPromptSource:
             "prompt_sha256": rendered.sha256,
             "prompt_byte_count": rendered.byte_count,
             "visible_evidence": rendered.visible_evidence,
-            "gold_evidence_included": False,
         }
         newly_prepared = not decision_directory.exists()
         if newly_prepared:
@@ -1493,6 +1452,7 @@ def _invoke_supervisor(
     schema_path: Path,
     resume_id: str | None,
 ) -> CodexRunResult:
+    _assert_model_actions_open(context)
     runs = context.run_directory / "supervisor" / "codex"
     invoker = context.services.supervisor_invoker
     confidential = (
@@ -1515,70 +1475,17 @@ def _invoke_supervisor(
             process_started=None,
             process_finished=None,
         )
-    capability = context.isolation_capability
-    if capability is None:
-        raise ReplayCampaignDependencyError("supervisor isolation is unavailable")
-    runtime_home = context.run_directory / "quarantine" / "codex-home"
-    if resume_id is None:
-        _recreate_campaign_supervisor_runtime_home(runtime_home)
-
-    def isolated_launch(
-        command: Sequence[str],
-        prepared_request: PreparedCodexRequest,
-        environment: Mapping[str, str],
-        final_message_path: Path,
-        output_schema: Path | None,
-    ) -> CodexProcessLaunch:
-        return build_bubblewrap_process_launch(
-            command,
-            prepared_request,
-            environment,
-            final_message_path,
-            output_schema,
-            capability=capability,
-            stage4_run_root=context.run_directory,
-            runtime_home=runtime_home,
-            forbidden_roots=_forbidden_roots(
-                context.prepared,
-                context.run_directory,
-            ),
-        )
-
-    try:
-        return run_prepared_codex(
-            request,
-            runs_dir=runs,
-            codex_executable=context.codex_executable,
-            environ=context.services.environ,
-            output_schema=schema_path,
-            resume_thread_id=resume_id,
-            skip_git_repo_check=True,
-            confidential_fragments=confidential,
-            rejected_confidential_fragments=(),
-            durable_command_replacements={
-                str(capability.authentication_file): RECORDED_AUTH_SOURCE,
-            },
-            process_launch_builder=isolated_launch,
-            version_probe=lambda _executable, _environment, _workspace: None,
-        )
-    except LiveShadowIntegrityError as exc:
-        raise WorkflowPromptSourceError(
-            "supervisor isolation prelaunch failed safely",
-            failure_category="supervisor_isolation_prelaunch_failed",
-            adapter_status="not_started",
-        ) from exc
-
-
-def _recreate_campaign_supervisor_runtime_home(runtime_home: Path) -> None:
-    """Use local Codex state only as disposable transport scratch."""
-    try:
-        recreate_engine_runtime_home(runtime_home)
-    except (LiveShadowIntegrityError, OSError) as exc:
-        raise WorkflowPromptSourceError(
-            "supervisor runtime scratch could not be recreated",
-            failure_category="supervisor_runtime_scratch_recreation_failed",
-            adapter_status="not_started",
-        ) from exc
+    return run_prepared_codex(
+        request,
+        runs_dir=runs,
+        codex_executable=context.codex_executable,
+        environ=context.services.environ,
+        output_schema=schema_path,
+        resume_thread_id=resume_id,
+        skip_git_repo_check=True,
+        confidential_fragments=confidential,
+        rejected_confidential_fragments=(),
+    )
 
 
 def _exact_supervisor_session(
@@ -1638,6 +1545,8 @@ def _supervisor_action_rejections(
         reasons.append("durable_boundary_mismatch")
     if referenced_path_evidence is None:
         reasons.append("referenced_path_outside_scope")
+    if not _supervisor_prompt_uses_visible_authority(action.prompt):
+        reasons.append("prompt_references_external_authority")
     expected_checks = tuple(
         test.specification.id for test in task.stage2.acceptance_tests
     )
@@ -1646,6 +1555,27 @@ def _supervisor_action_rejections(
     ) != set(expected_checks):
         reasons.append("acceptance_test_ids_mismatch")
     return tuple(reasons)
+
+
+def _supervisor_prompt_uses_visible_authority(prompt: str) -> bool:
+    normalized = prompt.replace("\\", "/")
+    lowered = normalized.casefold()
+    if any(
+        marker in lowered
+        for marker in (
+            "../",
+            "file://",
+            "engine-only",
+            "evaluation-config",
+            "exact-reference",
+            "gold",
+            "hidden-evaluator",
+            "hidden-test",
+            "offline-evaluation",
+        )
+    ):
+        return False
+    return not has_external_authority_locator(normalized)
 
 
 def _qualify_supervisor_referenced_paths(
@@ -1773,13 +1703,32 @@ def _workflow_services(
         codex_executable=context.codex_executable,
         environ=context.services.environ,
     )
+
+    def guarded_codex_invoker(*args: Any, **kwargs: Any) -> CodexRunResult:
+        _assert_model_actions_open(context)
+        return base.codex_invoker(*args, **kwargs)
+
     token = _stage2_token(context, source.task)
     return replace(
         base,
+        codex_invoker=guarded_codex_invoker,
         prompt_source=source,
         token_factory=lambda: token,
         require_canonical_thread_ids=True,
     )
+
+
+def _assert_model_actions_open(context: _CampaignContext) -> None:
+    if (
+        context.state.candidate_path is not None
+        or context.state.candidate_manifest_sha256 is not None
+        or context.state.candidate_finalized_model_turn_count is not None
+        or (context.run_directory / "final-candidate").exists()
+        or (context.run_directory / CANDIDATE_STAGING_NAME).exists()
+    ):
+        raise ReplayCampaignStateError(
+            "model actions are forbidden after candidate finalization"
+        )
 
 
 def _stage2_token(context: _CampaignContext, task: PreparedReplayTask) -> str:
@@ -1801,128 +1750,6 @@ def _expected_stage2_run(
         / "stage2"
         / f"{task.specification.task_id}-{_stage2_token(context, task)}"
     )
-
-
-def _run_gold_evaluations(
-    context: _CampaignContext,
-    task: PreparedReplayTask,
-) -> TestSuiteResult:
-    evaluator = context.prepared.evaluator_for(task.specification.task_id)
-    task_root = context.run_directory / "tasks" / task.specification.task_id
-    gold_root = task_root / "gold"
-    suite_path = gold_root / "suite.json"
-    reveal_path = task_root / "gold-reveal.json"
-    frozen_turns = context.state.gold_reveal_model_turn_count
-    if (
-        frozen_turns is None
-        or len(context.state.model_terminal_task_ids) != len(context.prepared.tasks)
-        or context.state.current_task_index != len(context.prepared.tasks)
-    ):
-        raise ReplayCampaignStateError(
-            "gold evaluation is forbidden before campaign-wide model termination"
-        )
-    if suite_path.is_file() and reveal_path.is_file():
-        try:
-            recovered_suite = TestSuiteResult.model_validate(_read_json(suite_path))
-        except ValidationError as exc:
-            raise ReplayCampaignStateError(
-                "durable gold evaluation result is invalid"
-            ) from exc
-        reveal = _read_json(reveal_path)
-        if reveal.get("model_turn_count_before") != frozen_turns:
-            raise ReplayCampaignStateError(
-                "durable gold reveal counter is invalid"
-            )
-        if _campaign_model_turn_count(context) != frozen_turns:
-            raise ReplayCampaignStateError(
-                "a model turn occurred after campaign-wide hidden gold reveal"
-            )
-        return recovered_suite
-    revealed_at = _utc_string(context.services.utc_now())
-    _write_json(
-        reveal_path,
-        {
-            "schema_version": 1,
-            "task_id": task.specification.task_id,
-            "revealed_at": revealed_at,
-            "model_turn_count_before": frozen_turns,
-            "model_turn_count_after": None,
-            "model_turns_after_reveal": None,
-            "zero_post_gold_turns": None,
-        },
-    )
-    results: list[TestAttemptResult] = []
-    failed = False
-    for index, prepared_test in enumerate(evaluator.evaluations):
-        action_id = f"gold-{index:03d}-{prepared_test.specification.id}"
-        destination = (
-            gold_root / action_id
-        )
-        result_path = destination / "result.json"
-        if result_path.is_file():
-            result = _load_gold_result(result_path, prepared_test, action_id)
-        else:
-            result = context.services.gold_test_invoker(
-                prepared_test,
-                destination,
-                action_id,
-                environ=context.services.environ,
-            )
-        results.append(result)
-        failed = failed or not result.passed
-    suite = TestSuiteResult(passed=not failed, results=tuple(results))
-    _write_json(suite_path, suite.to_dict())
-    after_turns = _campaign_model_turn_count(context)
-    post_reveal = after_turns - frozen_turns
-    completed_at = _utc_string(context.services.utc_now())
-    _write_json(
-        reveal_path,
-        {
-            "schema_version": 1,
-            "task_id": task.specification.task_id,
-            "revealed_at": revealed_at,
-            "completed_at": completed_at,
-            "model_turn_count_before": frozen_turns,
-            "model_turn_count_after": after_turns,
-            "model_turns_after_reveal": post_reveal,
-            "zero_post_gold_turns": post_reveal == 0,
-        },
-    )
-    if post_reveal != 0:
-        raise ReplayCampaignStateError(
-            "a model turn occurred after campaign-wide hidden gold reveal"
-        )
-    return suite
-
-
-def _load_gold_result(
-    path: Path,
-    prepared_test: Any,
-    action_id: str,
-) -> TestAttemptResult:
-    try:
-        result = TestAttemptResult.model_validate(_read_json(path))
-    except ValidationError as exc:
-        raise ReplayCampaignStateError("durable gold test result is invalid") from exc
-    test = prepared_test.specification
-    if (
-        result.action_id != action_id
-        or result.test_id != test.id
-        or result.argv != test.argv
-        or result.cwd != str(prepared_test.cwd)
-    ):
-        raise ReplayCampaignStateError(
-            "durable gold test result contradicts evaluator authority"
-        )
-    for artifact, expected in (
-        (result.stdout_artifact, result.stdout_sha256),
-        (result.stderr_artifact, result.stderr_sha256),
-    ):
-        if artifact is None:
-            raise ReplayCampaignStateError("durable gold test log is missing")
-        if sha256_regular_file(Path(artifact)) != expected:
-            raise ReplayCampaignStateError("durable gold test log changed")
-    return result
 
 
 def _task_model_turn_count(
@@ -1998,7 +1825,6 @@ def _write_model_terminal_record(
                 stage2 / "prompt-evidence",
                 "*.json",
             ),
-            "gold_revealed": False,
         },
     )
     return path
@@ -2008,7 +1834,6 @@ def _write_task_summary(
     context: _CampaignContext,
     task: PreparedReplayTask,
     workflow: WorkflowResult,
-    gold: TestSuiteResult,
 ) -> Path:
     stage2 = Path(workflow.artifact_directory)
     actions = _supervisor_actions_for_task(context.run_directory, task.specification.task_id)
@@ -2030,17 +1855,6 @@ def _write_task_summary(
     supervisor_processes = sum(
         1 for item in actions if _supervisor_process_launched(item)
     )
-    gold_processes = sum(
-        1
-        for result in gold.results
-        if result.status not in {"launch_failed", "skipped"}
-    )
-    reveal = _read_json(
-        context.run_directory
-        / "tasks"
-        / task.specification.task_id
-        / "gold-reveal.json"
-    )
     started_record = _read_json(
         context.run_directory
         / "tasks"
@@ -2048,16 +1862,10 @@ def _write_task_summary(
         / "task-start.json"
     )
     started_at = cast(str, started_record["started_at"])
-    ended_at = cast(str, reveal["completed_at"])
+    ended_at = workflow.updated_at
     elapsed_seconds = _duration_seconds(started_at, ended_at)
     assisted = task.specification.task_id in context.state.human_assisted_task_ids
-    verdict = (
-        "gold_mismatch"
-        if not gold.passed
-        else "human_assisted"
-        if assisted
-        else "autonomous"
-    )
+    verdict = "human_assisted" if assisted else "autonomous"
     report_path = (
         context.run_directory
         / "tasks"
@@ -2110,19 +1918,13 @@ def _write_task_summary(
             ),
             "notifications": _notifications(context.run_directory),
             "final_diff": final_diff,
-            "gold_hidden_until_terminal": True,
-            "gold_reveal_counters": reveal,
-            "model_turns_after_gold_reveal": reveal["model_turns_after_reveal"],
-            "zero_post_gold_turns": reveal["zero_post_gold_turns"],
-            "gold_evaluation": gold.to_dict(),
             "production_profile": task.specification.production_profile.model_dump(
                 mode="json"
             ),
-            "build_runtime_evidence": gold.to_dict(),
             "elapsed_seconds": elapsed_seconds,
             "started_at": started_at,
             "ended_at": ended_at,
-            "process_count": process_count + supervisor_processes + gold_processes,
+            "process_count": process_count + supervisor_processes,
             "model_turn_count": _task_model_turn_count(context, task),
             "human_assisted": assisted,
             "stage2_result": workflow.to_dict(),
@@ -2181,15 +1983,9 @@ def _write_paused_task_summary(
             ),
             "notifications": _notifications(context.run_directory),
             "final_diff": None,
-            "gold_hidden_until_terminal": True,
-            "gold_reveal_counters": None,
-            "model_turns_after_gold_reveal": None,
-            "zero_post_gold_turns": None,
-            "gold_evaluation": None,
             "production_profile": task.specification.production_profile.model_dump(
                 mode="json"
             ),
-            "build_runtime_evidence": None,
             "elapsed_seconds": _duration_seconds(
                 cast(
                     str,
@@ -2294,7 +2090,7 @@ def _pause_campaign(
             f"- Stage 2 run: {context.state.current_task_run or 'not created'}\n"
             f"- Supervisor UUID: {context.state.supervisor_session_id or 'not established'}\n"
             f"- Worker UUID: {worker_id}\n"
-            f"- Resume: resume-replay-campaign {context.run_directory} "
+            f"- Resume: resume-visible-campaign {context.run_directory} "
             "--decision DECISION.yaml\n"
         ).encode(),
     )
@@ -2349,7 +2145,7 @@ def _record_notification(
         "task_id": task_id or "-",
         "reason_category": category,
         "run_token": context.state.run_token,
-        "instruction": "Inspect replay-campaign-status for this opaque run token.",
+        "instruction": "Inspect visible-campaign-status for this opaque run token.",
     }
     redacted = redact_json(raw_payload, context.prepared.sensitive_values)
     if not isinstance(redacted, dict) or any(
@@ -2441,19 +2237,15 @@ def _windows_notification(payload: Mapping[str, str]) -> None:
         raise ReplayCampaignDependencyError("Windows notification helper failed")
 
 
-def _prepare_isolation(
+def _prepare_campaign_runtime(
     prepared: PreparedReplayCampaign,
     run_directory: Path,
-    executable: str,
-    services: ReplayCampaignServices,
-    *,
-    recovery: bool = False,
-) -> BubblewrapCapability | None:
+) -> None:
     resolved_run = run_directory.resolve(strict=False)
     for root in _forbidden_roots(prepared, run_directory):
         if _path_contains(root, resolved_run) or _path_contains(resolved_run, root):
             raise ReplayCampaignInputError(
-                "campaign run directory must be disjoint from replay and gold roots"
+                "campaign run directory must be disjoint from task workspaces"
             )
     quarantine = run_directory / "quarantine"
     workspace = quarantine / "workspace"
@@ -2469,59 +2261,21 @@ def _prepare_isolation(
         )
     except OSError as exc:
         raise ReplayCampaignInputError("supervisor quarantine could not be created") from exc
-    if services.supervisor_invoker is not None:
-        return None
-    try:
-        return services.isolation_preflight(
-            bubblewrap_executable=services.bubblewrap_executable,
-            codex_executable=executable,
-            authentication_file=services.codex_authentication_file,
-            environ=services.environ,
-            forbidden_roots=_forbidden_roots(prepared, run_directory),
-        )
-    except LiveShadowDependencyError as exc:
-        label = "recovery" if recovery else "launch"
-        raise ReplayCampaignDependencyError(
-            f"supervisor isolation unavailable during {label}"
-        ) from exc
 
 
 def _forbidden_roots(
     prepared: PreparedReplayCampaign,
     run_directory: Path,
 ) -> tuple[Path, ...]:
-    roots = [task.stage2.repository_root for task in prepared.tasks] + [
-        root for evaluator in prepared.evaluators for root in evaluator.gold_roots
-    ]
+    roots = [task.stage2.repository_root for task in prepared.tasks]
     unique: list[Path] = []
     for root in roots:
         resolved = root.resolve(strict=False)
         if resolved not in unique:
             unique.append(resolved)
-    if len(unique) < 2:
-        raise ReplayCampaignInputError(
-            "campaign isolation requires distinct replay and gold roots"
-        )
+    if not unique:
+        raise ReplayCampaignInputError("campaign has no task workspace roots")
     return tuple(unique)
-
-
-def _write_evaluator_record(
-    run_directory: Path,
-    prepared: PreparedReplayCampaign,
-) -> Path:
-    path = run_directory / "engine-only" / "evaluators.normalized.json"
-    _write_json(
-        path,
-        {
-            "schema_version": 1,
-            "campaign_specification_sha256": prepared.specification_sha256,
-            "evaluators": [
-                evaluator.normalized_record()
-                for evaluator in prepared.evaluators
-            ],
-        },
-    )
-    return path
 
 
 def _path_contains(parent: Path, child: Path) -> bool:
@@ -2662,6 +2416,9 @@ def _campaign_replay_values() -> dict[str, object]:
         "gold_evaluated_task_ids": [],
         "gold_reveal_model_turn_count": None,
         "post_gold_model_turn_count": None,
+        "candidate_path": None,
+        "candidate_manifest_sha256": None,
+        "candidate_finalized_model_turn_count": None,
         "status": "initialized",
         "pause_reason": None,
     }
@@ -2890,7 +2647,7 @@ def _duration_seconds(started_at: str, ended_at: str) -> float:
 
 
 def _write_report(context: _CampaignContext) -> None:
-    _verify_completed_gold_boundaries(context)
+    _verify_candidate_boundary(context)
     task_reports = _read_matching(context.run_directory / "tasks", "*/task-report.json")
     _write_json(
         context.run_directory / REPORT_FILE,
@@ -2904,22 +2661,18 @@ def _write_report(context: _CampaignContext) -> None:
             "model_terminal_task_ids": list(
                 context.state.model_terminal_task_ids
             ),
-            "gold_evaluated_task_ids": list(
-                context.state.gold_evaluated_task_ids
-            ),
             "paused_boundary": context.state.paused_boundary,
-            "gold_reveal_counters": {
-                "model_turn_count_before": (
-                    context.state.gold_reveal_model_turn_count
-                ),
-                "model_turn_count_after": (
-                    context.state.post_gold_model_turn_count
-                ),
-            },
-            "zero_post_gold_turns": (
-                context.state.gold_reveal_model_turn_count is not None
-                and context.state.post_gold_model_turn_count
-                == context.state.gold_reveal_model_turn_count
+            "candidate_path": context.state.candidate_path,
+            "candidate_manifest_sha256": (
+                context.state.candidate_manifest_sha256
+            ),
+            "candidate_finalized_model_turn_count": (
+                context.state.candidate_finalized_model_turn_count
+            ),
+            "no_model_action_after_candidate_finalization": (
+                context.state.candidate_finalized_model_turn_count is not None
+                and _campaign_model_turn_count(context)
+                == context.state.candidate_finalized_model_turn_count
             ),
             "supervisor_session_id": context.state.supervisor_session_id,
             "task_worker_session_ids": context.state.task_worker_session_ids,
@@ -2945,44 +2698,40 @@ def _write_report(context: _CampaignContext) -> None:
     )
 
 
-def _verify_completed_gold_boundaries(context: _CampaignContext) -> None:
-    frozen = context.state.gold_reveal_model_turn_count
-    if frozen is None:
-        if context.state.gold_evaluated_task_ids:
-            raise ReplayCampaignStateError(
-                "gold task evidence exists before the campaign-wide turn freeze"
-            )
-        return
-    if _campaign_model_turn_count(context) != frozen:
-        raise ReplayCampaignStateError(
-            "campaign gained a model turn after gold reveal"
-        )
+def _verify_candidate_boundary(context: _CampaignContext) -> None:
     if (
-        context.state.post_gold_model_turn_count is not None
-        and context.state.post_gold_model_turn_count != frozen
+        context.state.gold_evaluated_task_ids
+        or context.state.gold_reveal_model_turn_count is not None
+        or context.state.post_gold_model_turn_count is not None
     ):
         raise ReplayCampaignStateError(
-            "campaign gold turn counters are not exactly equal"
+            "visible campaign state contains forbidden legacy evaluation state"
         )
-    by_id = {
-        task.specification.task_id: task for task in context.prepared.tasks
-    }
-    for task_id in context.state.completed_task_ids:
-        task = by_id.get(task_id)
-        if task is None:
-            raise ReplayCampaignStateError(
-                "completed task has no frozen campaign authority"
-            )
-        reveal = _read_json(
-            context.run_directory / "tasks" / task_id / "gold-reveal.json"
+    candidate_values = (
+        context.state.candidate_path,
+        context.state.candidate_manifest_sha256,
+        context.state.candidate_finalized_model_turn_count,
+    )
+    if all(value is None for value in candidate_values):
+        return
+    if any(value is None for value in candidate_values):
+        raise ReplayCampaignStateError(
+            "candidate finalization state is incomplete"
         )
-        after = reveal.get("model_turn_count_after")
-        if (
-            not isinstance(after, int)
-            or isinstance(after, bool)
-            or reveal.get("model_turn_count_before") != frozen
-            or after != frozen
-        ):
-            raise ReplayCampaignStateError(
-                "a completed task gained a model turn after gold reveal"
-            )
+    if (
+        context.state.current_task_index != len(context.prepared.tasks)
+        or tuple(context.state.completed_task_ids)
+        != tuple(
+            task.specification.task_id for task in context.prepared.tasks
+        )
+    ):
+        raise ReplayCampaignStateError(
+            "candidate was finalized before every visible task completed"
+        )
+    if (
+        _campaign_model_turn_count(context)
+        != context.state.candidate_finalized_model_turn_count
+    ):
+        raise ReplayCampaignStateError(
+            "campaign gained a model action after candidate finalization"
+        )

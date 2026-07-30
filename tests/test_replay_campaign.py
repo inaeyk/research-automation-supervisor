@@ -4,8 +4,6 @@ import base64
 import hashlib
 import json
 import shlex
-import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -23,10 +21,6 @@ from research_automation_supervisor.errors import (
     WorkflowPromptSourceError,
     WorkflowStateError,
 )
-from research_automation_supervisor.live_shadow_isolation import (
-    BubblewrapBackendIdentity,
-    BubblewrapCapability,
-)
 from research_automation_supervisor.replay_campaign_engine import (
     ReplayCampaignServices,
     replay_campaign_status,
@@ -40,7 +34,6 @@ from research_automation_supervisor.replay_campaign_prompts import (
 from research_automation_supervisor.replay_campaign_sources import (
     load_replay_campaign_specification,
 )
-from research_automation_supervisor.test_runner import run_test_attempt
 from research_automation_supervisor.workflow_engine import WorkflowServices
 from tests.workflow_helpers import (
     auditor_result,
@@ -59,6 +52,7 @@ WORKER_NOTIFY_UUID = str(UUID("62345678-1234-5678-9234-567812345678"))
 AUDITOR_ONE_UUID = str(UUID("72345678-1234-5678-9234-567812345678"))
 AUDITOR_TWO_UUID = str(UUID("82345678-1234-5678-9234-567812345678"))
 AUDITOR_THREE_UUID = str(UUID("92345678-1234-5678-9234-567812345678"))
+VISIBLE_PYTHON = "/usr/bin/python3"
 
 
 class FakeSupervisor:
@@ -188,30 +182,31 @@ def create_campaign(
         raw = yaml.safe_load(spec.read_text(encoding="utf-8"))
         task_id = f"replay-task-{index + 1}"
         raw["substage_id"] = task_id
+        for acceptance_test in raw["acceptance_tests"]:
+            acceptance_test["argv"][0] = "/usr/bin/python3"
         spec.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-        gold_root = tmp_path / f"gold-{index + 1}"
-        gold_root.mkdir()
+        baseline_archive = task_root / "baseline-source.tar"
+        git(
+            project,
+            "archive",
+            "--format=tar",
+            f"--output={baseline_archive}",
+            "HEAD",
+        )
         tasks.append(
             {
                 "task_id": task_id,
                 "title": f"Replay task {index + 1}",
                 "stage2_specification_path": str(spec),
                 "project_context_paths": [],
-                "gold_evaluations": [
-                    {
-                        "id": f"gold-{index + 1}",
-                        "argv": [
-                            "python",
-                            "-c",
-                            "raise SystemExit(0)",
-                        ],
-                        "cwd": str(gold_root),
-                        "timeout_seconds": 5,
-                        "max_stdout_bytes": 4096,
-                        "max_stderr_bytes": 4096,
-                    }
-                ],
-                "gold_artifact_roots": [str(gold_root)],
+                "source_provenance": {
+                    "repository_id": f"synthetic-source-{index + 1}",
+                    "source_commit": git(project, "rev-parse", "HEAD"),
+                    "source_tree": git(project, "rev-parse", "HEAD^{tree}"),
+                    "baseline_archive_sha256": hashlib.sha256(
+                        baseline_archive.read_bytes()
+                    ).hexdigest(),
+                },
                 "production_profile": {
                     "hot_path": ["src/**"],
                     "post_update": [],
@@ -226,8 +221,8 @@ def create_campaign(
         yaml.safe_dump(
             {
                 "schema_version": 1,
-                "campaign_id": "historical-replay",
-                "title": "Historical replay",
+                "campaign_id": "visible-campaign",
+                "title": "Visible campaign",
                 "supervisor_policy_path": str(policy),
                 "supervisor_model": "gpt-5.6-sol",
                 "supervisor_reasoning_effort": "high",
@@ -253,6 +248,20 @@ def replace_fixed_acceptance_tests(
     specification["acceptance_tests"] = [
         {**base, "id": test_id, "argv": argv} for test_id, argv in tests
     ]
+    test_cwd = (specification_path.parent / base["cwd"]).resolve()
+    created: list[str] = []
+    for _test_id, argv in tests:
+        if len(argv) < 2:
+            continue
+        script = test_cwd / argv[1]
+        if script.exists():
+            continue
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        created.append(script.relative_to(test_cwd).as_posix())
+    if created:
+        git(test_cwd, "add", "--", *created)
+        git(test_cwd, "commit", "-q", "-m", "add visible acceptance fixtures")
     specification_path.write_text(
         yaml.safe_dump(specification, sort_keys=False),
         encoding="utf-8",
@@ -463,7 +472,10 @@ def test_two_task_autonomous_pass_uses_persistent_supervisor_and_workers(
     run = next((tmp_path / "runs").iterdir())
     report = json.loads((run / "campaign-report.json").read_text())
     assert len(report["tasks"]) == 2
-    assert all(task["model_turns_after_gold_reveal"] == 0 for task in report["tasks"])
+    assert report["no_model_action_after_candidate_finalization"] is True
+    assert result.candidate_path == str(run / "final-candidate")
+    assert result.candidate_manifest_sha256 is not None
+    assert (run / "final-candidate/candidate-manifest.json").is_file()
     assert replay_campaign_status(run) == result
 
 
@@ -686,7 +698,7 @@ def test_current_four_path_reproducer_is_accepted_with_separate_authority(
         protected_paths=["campaign-control/**", *protected],
         files=[*allowed, *protected],
     )
-    command = shlex.join((sys.executable, "tools/acceptance.py"))
+    command = shlex.join((VISIBLE_PYTHON, "tools/acceptance.py"))
     supervisor = FakeSupervisor(
         [
             supervisor_action(
@@ -783,7 +795,7 @@ def test_referenced_paths_reject_nonrelative_or_malformed_values(path: str) -> N
 def test_required_checks_exact_argv_string_is_uniquely_normalized(
     tmp_path: Path,
 ) -> None:
-    command = shlex.join((sys.executable, "tools/acceptance.py"))
+    command = shlex.join((VISIBLE_PYTHON, "tools/acceptance.py"))
     record = run_required_checks_boundary(tmp_path, [command])
 
     assert record["raw_supervisor_required_checks"] == [command]
@@ -812,7 +824,7 @@ def test_generated_required_checks_schema_permits_exact_argv(
     schema, _manifest = generated_required_checks_schema(tmp_path)
     items = schema["items"]
     assert isinstance(items, dict)
-    command = shlex.join((sys.executable, "tools/acceptance.py"))
+    command = shlex.join((VISIBLE_PYTHON, "tools/acceptance.py"))
 
     assert command in items["enum"]
 
@@ -827,7 +839,7 @@ def test_generated_required_checks_schema_rejects_prose_by_enum(
     assert "Confirm the final diff changes only allowed files." not in items["enum"]
     assert items["enum"] == [
         "fixed-test",
-        shlex.join((sys.executable, "tools/acceptance.py")),
+        shlex.join((VISIBLE_PYTHON, "tools/acceptance.py")),
     ]
 
 
@@ -882,7 +894,7 @@ def test_generating_authority_schema_does_not_mutate_campaign_or_runtime_state(
 
 
 def test_required_checks_unknown_command_is_rejected(tmp_path: Path) -> None:
-    command = f"{sys.executable} tools/unknown.py"
+    command = f"{VISIBLE_PYTHON} tools/unknown.py"
     record = run_required_checks_boundary(tmp_path, [command])
 
     assert record["raw_supervisor_required_checks"] == [command]
@@ -893,7 +905,7 @@ def test_required_checks_unknown_command_is_rejected(tmp_path: Path) -> None:
 
 
 def test_required_checks_partial_command_is_rejected(tmp_path: Path) -> None:
-    record = run_required_checks_boundary(tmp_path, [sys.executable])
+    record = run_required_checks_boundary(tmp_path, [VISIBLE_PYTHON])
 
     assert record["normalized_acceptance_test_ids"] is None
     assert record["required_checks_normalization_occurred"] is False
@@ -903,7 +915,7 @@ def test_required_checks_partial_command_is_rejected(tmp_path: Path) -> None:
 
 def test_required_checks_extra_argument_is_rejected(tmp_path: Path) -> None:
     command = shlex.join(
-        (sys.executable, "tools/acceptance.py", "--additional-check")
+        (VISIBLE_PYTHON, "tools/acceptance.py", "--additional-check")
     )
     record = run_required_checks_boundary(tmp_path, [command])
 
@@ -917,8 +929,8 @@ def test_required_checks_duplicate_is_rejected_as_incomplete_set(
     tmp_path: Path,
 ) -> None:
     tests = [
-        ("fixed-test", [sys.executable, "tools/acceptance.py"]),
-        ("second-test", [sys.executable, "tools/acceptance.py", "--json"]),
+        ("fixed-test", [VISIBLE_PYTHON, "tools/acceptance.py"]),
+        ("second-test", [VISIBLE_PYTHON, "tools/acceptance.py", "--json"]),
     ]
     record = run_required_checks_boundary(
         tmp_path,
@@ -936,8 +948,8 @@ def test_required_checks_duplicate_is_rejected_as_incomplete_set(
 
 def test_required_checks_missing_test_is_rejected(tmp_path: Path) -> None:
     tests = [
-        ("fixed-test", [sys.executable, "tools/acceptance.py"]),
-        ("second-test", [sys.executable, "tools/acceptance.py", "--json"]),
+        ("fixed-test", [VISIBLE_PYTHON, "tools/acceptance.py"]),
+        ("second-test", [VISIBLE_PYTHON, "tools/acceptance.py", "--json"]),
     ]
     record = run_required_checks_boundary(
         tmp_path,
@@ -962,7 +974,7 @@ def test_required_checks_additional_test_is_rejected(tmp_path: Path) -> None:
 
 
 def test_required_checks_ambiguous_argv_match_is_rejected(tmp_path: Path) -> None:
-    argv = [sys.executable, "tools/acceptance.py"]
+    argv = [VISIBLE_PYTHON, "tools/acceptance.py"]
     command = shlex.join(argv)
     record = run_required_checks_boundary(
         tmp_path,
@@ -979,8 +991,8 @@ def test_required_checks_ambiguous_argv_match_is_rejected(tmp_path: Path) -> Non
 def test_required_checks_normalizes_multiple_fixed_acceptance_tests(
     tmp_path: Path,
 ) -> None:
-    first_argv = [sys.executable, "tools/acceptance.py"]
-    second_argv = [sys.executable, "tools/acceptance.py", "--json"]
+    first_argv = [VISIBLE_PYTHON, "tools/acceptance.py"]
+    second_argv = [VISIBLE_PYTHON, "tools/acceptance.py", "--json"]
     first_command = shlex.join(first_argv)
     second_command = shlex.join(second_argv)
     record = run_required_checks_boundary(
@@ -1151,63 +1163,32 @@ def test_authority_wrapper_keeps_full_stage2_prompt_and_advisory_is_non_authorit
     assert contradictory.encode() in prompt
 
 
-def test_gold_configuration_is_disjoint_and_withheld_from_all_model_prompts(
+def test_legacy_gold_configuration_is_rejected_before_any_model_launch(
     tmp_path: Path,
 ) -> None:
-    observation = tmp_path / "worker-observation.json"
-    manifest, fake = create_campaign(
-        tmp_path,
-        [[
-            codex_response(
-                "worker",
-                WORKER_ONE_UUID,
-                worker_result(),
-                observation_path=str(observation),
-            ),
-            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
-        ]],
-    )
+    manifest, fake = create_campaign(tmp_path, [[]])
     raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-    raw["tasks"][0]["gold_evaluations"][0]["argv"] = [
-        "python",
-        "-c",
-        "print('GOLD-SECRET-MARKER')",
+    raw["tasks"][0]["gold_evaluations"] = [
+        {
+            "id": "legacy-private-test",
+            "argv": ["python", "-c", "raise SystemExit(0)"],
+            "cwd": str(tmp_path),
+            "timeout_seconds": 5,
+            "max_stdout_bytes": 4096,
+            "max_stderr_bytes": 4096,
+        }
     ]
+    raw["tasks"][0]["gold_artifact_roots"] = [str(tmp_path)]
     manifest.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    supervisor = FakeSupervisor(
-        [
-            supervisor_action("worker_prompt"),
-            supervisor_action("auditor_prompt"),
-            supervisor_action("finish"),
-        ]
-    )
+    supervisor = FakeSupervisor([])
 
-    result = run_replay_campaign(
-        manifest,
-        runs_dir=tmp_path / "runs",
-        services=campaign_services(fake, supervisor, []),
-    )
-
-    assert result.status == "completed"
-    worker_prompt = base64.b64decode(
-        json.loads(observation.read_text(encoding="utf-8"))["prompt_base64"]
-    )
-    all_supervisor_prompts = b"\n".join(supervisor.prompts)
-    assert b"GOLD-SECRET-MARKER" not in worker_prompt
-    assert b"GOLD-SECRET-MARKER" not in all_supervisor_prompts
-    run = next((tmp_path / "runs").iterdir())
-    evaluator = json.loads(
-        (run / "engine-only/evaluators.normalized.json").read_text(encoding="utf-8")
-    )
-    assert "GOLD-SECRET-MARKER" not in json.dumps(evaluator)
-    report = json.loads(
-        (run / "tasks/replay-task-1/task-report.json").read_text(encoding="utf-8")
-    )
-    assert report["gold_reveal_counters"]["model_turn_count_before"] > 0
-    assert report["gold_reveal_counters"]["model_turn_count_after"] == report[
-        "gold_reveal_counters"
-    ]["model_turn_count_before"]
-    assert report["zero_post_gold_turns"] is True
+    with pytest.raises(ReplayCampaignInputError, match="separate offline"):
+        run_replay_campaign(
+            manifest,
+            runs_dir=tmp_path / "runs",
+            services=campaign_services(fake, supervisor, []),
+        )
+    assert supervisor.resume_ids == []
 
 
 def test_manifest_inside_replay_workspace_is_rejected_before_launch(
@@ -1220,7 +1201,7 @@ def test_manifest_inside_replay_workspace_is_rejected_before_launch(
     git(inside.parent, "commit", "-q", "-m", "put manifest in replay workspace")
     supervisor = FakeSupervisor([])
 
-    with pytest.raises(ReplayCampaignInputError, match="manifest.*outside"):
+    with pytest.raises(ReplayCampaignInputError, match="visible campaign authority"):
         run_replay_campaign(
             inside,
             runs_dir=tmp_path / "runs",
@@ -1464,10 +1445,8 @@ def test_rejected_initial_worker_prompt_recovers_only_to_new_worker_prompt(
         and action["accepted_action"]["action"] == "worker_prompt"
         for action in actions
     )
-    assert report["gold_reveal_counters"]["model_turn_count_before"] == (
-        report["gold_reveal_counters"]["model_turn_count_after"]
-    )
-    assert report["zero_post_gold_turns"] is True
+    assert report["no_model_action_after_candidate_finalization"] is True
+    assert report["candidate_manifest_sha256"]
 
 
 def test_initial_worker_transport_failure_keeps_and_recovers_exact_boundary(
@@ -1763,10 +1742,8 @@ def test_post_audit_pass_prompt_failure_recovers_to_finish_without_duplicates(
     assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
     assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
     assert len(list((run / "supervisor/actions").glob("*.json"))) == 3
-    assert report["gold_reveal_counters"]["model_turn_count_before"] == (
-        report["gold_reveal_counters"]["model_turn_count_after"]
-    )
-    assert report["zero_post_gold_turns"] is True
+    assert report["no_model_action_after_candidate_finalization"] is True
+    assert report["candidate_manifest_sha256"]
 
 
 def test_post_audit_repairable_prompt_failure_recovers_to_repair(
@@ -2143,8 +2120,9 @@ def test_crash_after_stage2_continuation_acceptance_does_not_duplicate_actions(
     assert len(list((run / "supervisor/actions").glob("*.json"))) == 4
 
 
-def test_five_tasks_are_model_terminal_before_campaign_wide_gold_reveal(
+def test_five_tasks_are_model_terminal_before_candidate_export(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     responses = [
         [
@@ -2166,37 +2144,40 @@ def test_five_tasks_are_model_terminal_before_campaign_wide_gold_reveal(
         ]
     )
     services = campaign_services(fake, supervisor, [])
-    gold_turn_counts: list[int] = []
+    export_turn_counts: list[int] = []
+    real_export = replay_engine.export_visible_candidate
 
-    def gold_after_models(
-        prepared_test: object,
-        artifact_directory: Path,
-        action_id: str,
+    def export_after_models(
+        prepared: object,
+        run_directory: Path,
         **kwargs: object,
     ) -> object:
-        run = next((tmp_path / "runs").iterdir())
-        assert len(list((run / "tasks").glob("*/model-terminal.json"))) == 5
+        assert len(list((run_directory / "tasks").glob("*/model-terminal.json"))) == 5
         assert len(supervisor.resume_ids) == 15
-        gold_turn_counts.append(len(supervisor.resume_ids))
-        return run_test_attempt(
-            prepared_test,  # type: ignore[arg-type]
-            artifact_directory,
-            action_id,
-            environ=kwargs.get("environ"),  # type: ignore[arg-type]
+        export_turn_counts.append(len(supervisor.resume_ids))
+        return real_export(
+            prepared,  # type: ignore[arg-type]
+            run_directory,
+            **kwargs,  # type: ignore[arg-type]
         )
 
+    monkeypatch.setattr(
+        replay_engine,
+        "export_visible_candidate",
+        export_after_models,
+    )
     result = run_replay_campaign(
         manifest,
         runs_dir=tmp_path / "runs",
-        services=replace(services, gold_test_invoker=gold_after_models),
+        services=services,
     )
     run = next((tmp_path / "runs").iterdir())
     report = json.loads((run / "campaign-report.json").read_text())
     assert result.status == "completed"
-    assert gold_turn_counts == [15] * 5
-    assert report["gold_reveal_counters"]["model_turn_count_before"] == 25
-    assert report["gold_reveal_counters"]["model_turn_count_after"] == 25
-    assert report["zero_post_gold_turns"] is True
+    assert export_turn_counts == [15]
+    assert result.model_terminal_task_ids == result.completed_task_ids
+    assert report["candidate_finalized_model_turn_count"] == 25
+    assert report["no_model_action_after_candidate_finalization"] is True
 
 
 def test_report_contains_exact_engine_rendered_worker_and_auditor_prompts(
@@ -2256,7 +2237,7 @@ def test_report_contains_exact_engine_rendered_worker_and_auditor_prompts(
         assert recorded["round_id"] == "round-000"
 
 
-def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
+def test_repair_limit_continuation_does_not_stop_next_visible_task(
     tmp_path: Path,
 ) -> None:
     responses = [
@@ -2287,14 +2268,7 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
         max_repair_rounds=0,
         test_requires_marker=True,
     )
-    raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-    raw["tasks"][0]["gold_evaluations"][0]["argv"] = [
-        "python",
-        "-c",
-        "raise SystemExit(9)",
-    ]
-    manifest.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    acceptance_command = shlex.join((sys.executable, "tools/acceptance.py"))
+    acceptance_command = shlex.join((VISIBLE_PYTHON, "tools/acceptance.py"))
     supervisor = FakeSupervisor(
         [
             supervisor_action(
@@ -2339,7 +2313,7 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
     report = json.loads((run / "campaign-report.json").read_text(encoding="utf-8"))
     assert completed.status == "completed"
     assert completed.completed_task_ids == ("replay-task-1", "replay-task-2")
-    assert report["tasks"][0]["verdict"] == "gold_mismatch"
+    assert report["tasks"][0]["verdict"] == "human_assisted"
     assert report["tasks"][1]["verdict"] == "autonomous"
     first = report["tasks"][0]
     assert len(first["supervisor_instructions_and_actions"]) == 4
@@ -2398,7 +2372,7 @@ def test_repair_limit_continuation_and_gold_mismatch_do_not_stop_next_task(
     assert first["elapsed_seconds"] >= 0
     assert first["started_at"] <= first["ended_at"]
     assert first["human_assisted"] is True
-    assert first["zero_post_gold_turns"] is True
+    assert report["no_model_action_after_candidate_finalization"] is True
 
 
 def test_campaign_journal_uses_the_stage2_stage4_shared_helper_path() -> None:
@@ -2576,55 +2550,10 @@ def test_interrupted_running_campaign_resumes_provable_task_without_duplicates(
     assert completed.completed_task_ids == ("replay-task-1",)
 
 
-def test_production_isolation_uses_stage4_builder_for_initial_and_exact_uuid_resume(
+def test_production_adapter_uses_read_only_policy_and_exact_uuid_resume(
     tmp_path: Path,
 ) -> None:
     manifest, fake = create_campaign(tmp_path, [[]])
-    fake_bwrap = tmp_path / "fake-bwrap"
-    fake_bwrap.write_text(
-        """#!/usr/bin/env python3
-import os
-import sys
-args = sys.argv[1:]
-mounts = {}
-chdir = None
-i = 0
-while i < len(args) and args[i] != "--":
-    option = args[i]
-    if option in {"--ro-bind", "--bind"}:
-        mounts[args[i + 2]] = args[i + 1]
-        i += 3
-    elif option in {"--proc", "--dev", "--tmpfs", "--dir", "--chdir"}:
-        if option == "--chdir":
-            chdir = args[i + 1]
-        i += 2
-    else:
-        i += 1
-i += 1
-inner = args[i:]
-def translate(value):
-    for target in sorted(mounts, key=len, reverse=True):
-        if value == target or value.startswith(target + "/"):
-            return mounts[target] + value[len(target):]
-    return value
-inner = [translate(value) for value in inner]
-cwd = translate(chdir) if chdir is not None else None
-if cwd is not None:
-    os.chdir(cwd)
-environment = dict(os.environ)
-for name in ("HOME", "CODEX_HOME", "TMPDIR"):
-    if name in environment:
-        environment[name] = translate(environment[name])
-os.execve(inner[0], inner, environment)
-""",
-        encoding="utf-8",
-    )
-    fake_bwrap.chmod(0o755)
-    auth = tmp_path / "auth.json"
-    auth.write_text(
-        json.dumps({"access_token": "production-fake-auth-0123456789"}),
-        encoding="utf-8",
-    )
     combined = tmp_path / "combined-fake.json"
     combined.write_text(
         json.dumps(
@@ -2633,13 +2562,9 @@ os.execve(inner[0], inner, environment)
                 "observation_path": str(tmp_path / "combined-observation.json"),
                 "responses": [
                     {
-                        "require_stage4_policy": True,
+                        "require_stage4_policy": False,
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
-                        "persist_prompt_in_codex_home": True,
-                        "write_codex_home_files": {
-                            "sessions/resume-marker.txt": SUPERVISOR_UUID,
-                        },
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2652,12 +2577,10 @@ os.execve(inner[0], inner, environment)
                     },
                     codex_response("worker", WORKER_ONE_UUID, worker_result()),
                     {
-                        "require_stage4_policy": True,
+                        "require_stage4_policy": False,
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
                         "expected_resume_thread_id": SUPERVISOR_UUID,
-                        "persist_prompt_in_codex_home": True,
-                        "require_codex_home_file": "sessions/resume-marker.txt",
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2670,12 +2593,10 @@ os.execve(inner[0], inner, environment)
                     },
                     codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
                     {
-                        "require_stage4_policy": True,
+                        "require_stage4_policy": False,
                         "expected_sandbox": "read-only",
                         "expected_ephemeral": False,
                         "expected_resume_thread_id": SUPERVISOR_UUID,
-                        "persist_prompt_in_codex_home": True,
-                        "require_codex_home_file": "sessions/resume-marker.txt",
                         "stdout_lines": [
                             json.dumps(
                                 {
@@ -2692,17 +2613,6 @@ os.execve(inner[0], inner, environment)
         ),
         encoding="utf-8",
     )
-    capability = BubblewrapCapability(
-        identity=BubblewrapBackendIdentity(
-            schema_version=1,
-            isolation_schema_version=1,
-            backend="bubblewrap",
-            canonical_bubblewrap_path=str(fake_bwrap),
-            bubblewrap_version="fake-bubblewrap 1",
-            capability_result="passed",
-        ),
-        authentication_file=auth,
-    )
     services = ReplayCampaignServices(
         codex_executable=str(fake),
         workflow_services=WorkflowServices(
@@ -2710,7 +2620,6 @@ os.execve(inner[0], inner, environment)
             environ={"FAKE_CODEX_CONFIG": str(combined)},
         ),
         notification_invoker=lambda _payload: None,
-        isolation_preflight=lambda **_kwargs: capability,
         environ={"FAKE_CODEX_CONFIG": str(combined)},
         token_factory=lambda: "production-path",
     )
@@ -2738,10 +2647,6 @@ os.execve(inner[0], inner, environment)
         "auditor_prompt": SUPERVISOR_UUID,
         "finish": SUPERVISOR_UUID,
     }
-    runtime_home = run / "quarantine/codex-home"
-    assert (runtime_home / "sessions/resume-marker.txt").read_text(
-        encoding="utf-8"
-    ) == SUPERVISOR_UUID
     prompts = sorted((run / "decisions").glob("*/supervisor-prompt.md"))
     assert len(prompts) == 3
     forbidden = (
@@ -2758,18 +2663,3 @@ os.execve(inner[0], inner, environment)
     )
     assert "<TASK_WORKSPACE:replay-task-1>" in combined_prompts
     assert "<STAGE2_RUN>" in combined_prompts
-
-
-def test_campaign_supervisor_runtime_home_is_recreated(tmp_path: Path) -> None:
-    quarantine = tmp_path / "quarantine"
-    runtime_home = quarantine / "codex-home"
-    (quarantine / "workspace").mkdir(parents=True)
-    runtime_home.mkdir()
-    contaminated = runtime_home / "cache" / "workspace-locator.txt"
-    contaminated.parent.mkdir()
-    contaminated.write_text("/forbidden/workspace", encoding="utf-8")
-
-    replay_engine._recreate_campaign_supervisor_runtime_home(runtime_home)
-
-    assert runtime_home.is_dir()
-    assert list(runtime_home.iterdir()) == []

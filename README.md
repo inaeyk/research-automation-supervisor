@@ -15,6 +15,9 @@ Stage 4 adds live journal observation around one unchanged authoritative Stage
 2 run, point-in-time evidence envelopes, one persistent read-only supervisor
 queue in a repository-free quarantine, post-finalization comparisons, immutable
 reviews, and informational readiness while keeping automation disabled.
+Visible multi-task campaigns build on Stage 2 and complete by exporting an
+immutable candidate. Historical comparison is a separate, deterministic,
+non-model offline command and never participates in campaign transitions.
 
 See:
 
@@ -28,3 +31,4 @@ See:
 - `docs/workflow_engine.md`
 - `docs/shadow_calibration.md`
 - `docs/live_shadow.md`
+- `docs/campaign_evaluation_split.md`

@@ -124,6 +124,20 @@ def normalize_path_pattern(value: str) -> str:
     return normalized
 
 
+def has_external_authority_locator(value: str) -> bool:
+    """Detect an absolute or parent locator at a token/punctuation boundary."""
+    normalized = value.replace("\\", "/")
+    boundary = r"(?:^|(?<=[^A-Za-z0-9._/-]))"
+    return bool(
+        re.search(boundary + r"/(?!/)", normalized)
+        or re.search(boundary + r"\.\.(?:/|$)", normalized)
+        or re.search(boundary + r"~/(?:[^/]|$)", normalized)
+        or re.search(boundary + r"[A-Za-z]:/", normalized)
+        or "file://" in normalized.casefold()
+        or "//" in normalized
+    )
+
+
 PathPattern = Annotated[
     str, BeforeValidator(normalize_path_pattern), Field(min_length=1)
 ]
@@ -575,6 +589,7 @@ def load_substage_specification(
     *,
     sensitive_values: Sequence[str] = (),
     require_clean: bool = True,
+    visible_authority_root: Path | None = None,
 ) -> PreparedSubstage:
     """Read once, resolve, and fully validate a Stage 2 substage specification."""
     specification_locator = _absolute_locator(path)
@@ -603,6 +618,47 @@ def load_substage_specification(
 
     resolved_parent = specification_path.parent
     locator_parent = specification_locator.parent
+    if visible_authority_root is not None:
+        _validate_campaign_visible_path(
+            specification_path,
+            visible_authority_root,
+            "substage specification",
+            expected="file",
+        )
+        _validate_campaign_visible_path(
+            _joined_locator(resolved_parent, specification.workspace),
+            visible_authority_root,
+            "workspace",
+            expected="directory",
+        )
+        for value, label in (
+            (specification.contract_path, "contract"),
+            (specification.worker_initial_prompt_path, "worker initial prompt"),
+            (specification.worker_repair_prompt_path, "worker repair prompt"),
+            (specification.auditor_prompt_path, "auditor prompt"),
+        ):
+            _validate_campaign_visible_path(
+                _joined_locator(locator_parent, value),
+                visible_authority_root,
+                label,
+                expected="file",
+            )
+        for test_specification in specification.acceptance_tests:
+            test_cwd = _joined_locator(
+                resolved_parent,
+                test_specification.cwd,
+            )
+            _validate_campaign_visible_path(
+                test_cwd,
+                visible_authority_root,
+                "acceptance-test cwd",
+                expected="directory",
+            )
+            _validate_visible_campaign_acceptance_runner(
+                test_specification,
+                test_cwd,
+                visible_authority_root,
+            )
     workspace = _resolve_directory(
         resolved_parent, specification.workspace, "workspace"
     )
@@ -677,15 +733,15 @@ def load_substage_specification(
         structural.extend((str(human_file.path), human_file.sha256))
     structural.extend(specification.allowed_paths)
     structural.extend(specification.protected_paths)
-    for test in prepared_tests:
+    for prepared_test in prepared_tests:
         structural.extend(
             (
-                test.specification.id,
-                str(test.cwd),
-                str(test.specification.timeout_seconds),
-                str(test.specification.max_stdout_bytes),
-                str(test.specification.max_stderr_bytes),
-                *test.specification.argv,
+                prepared_test.specification.id,
+                str(prepared_test.cwd),
+                str(prepared_test.specification.timeout_seconds),
+                str(prepared_test.specification.max_stdout_bytes),
+                str(prepared_test.specification.max_stderr_bytes),
+                *prepared_test.specification.argv,
             )
         )
     if any(would_redact_text(item, sensitive_values) for item in structural):
@@ -707,6 +763,75 @@ def load_substage_specification(
         auditor_prompt=auditor,
         acceptance_tests=prepared_tests,
     )
+
+
+def _joined_locator(parent: Path, value: str) -> Path:
+    candidate = Path(value)
+    return candidate if candidate.is_absolute() else parent / candidate
+
+
+def _validate_campaign_visible_path(
+    path: Path,
+    root: Path,
+    label: str,
+    *,
+    expected: Literal["file", "directory"],
+) -> None:
+    try:
+        canonical_root = root.resolve(strict=True)
+        absolute = Path(os.path.abspath(path))
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(canonical_root)
+        status = resolved.lstat()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkflowInputError(
+            f"{label} must remain inside visible campaign authority"
+        ) from exc
+    if absolute != resolved:
+        raise WorkflowInputError(
+            f"{label} must not traverse a symlink or alternate path"
+        )
+    if expected == "file" and not stat.S_ISREG(status.st_mode):
+        raise WorkflowInputError(f"{label} is not a regular file")
+    if expected == "directory" and not stat.S_ISDIR(status.st_mode):
+        raise WorkflowInputError(f"{label} is not a directory")
+
+
+def _validate_visible_campaign_acceptance_runner(
+    test: WorkflowTest,
+    cwd: Path,
+    root: Path,
+) -> None:
+    """Allow only a visible, file-backed Python acceptance runner."""
+    if len(test.argv) < 2 or test.argv[0] != "/usr/bin/python3":
+        raise WorkflowInputError(
+            "visible campaign acceptance tests require the registered "
+            "/usr/bin/python3 file runner"
+        )
+    script = PurePosixPath(test.argv[1])
+    if (
+        script.is_absolute()
+        or not script.parts
+        or any(part in {"", ".", ".."} for part in script.parts)
+    ):
+        raise WorkflowInputError(
+            "visible campaign acceptance script must be a relative visible file"
+        )
+    _validate_campaign_visible_path(
+        cwd.joinpath(*script.parts),
+        root,
+        "acceptance-test script",
+        expected="file",
+    )
+    for argument in test.argv[2:]:
+        candidate = PurePosixPath(argument.replace("\\", "/"))
+        if has_external_authority_locator(argument) or any(
+            part == ".." for part in candidate.parts
+        ):
+            raise WorkflowInputError(
+                "visible campaign acceptance arguments must not reference "
+                "external authority"
+            )
 
 
 def load_continuation_instruction(
