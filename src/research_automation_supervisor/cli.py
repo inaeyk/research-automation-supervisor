@@ -45,6 +45,10 @@ from research_automation_supervisor.errors import (
     WorkflowLockError,
     WorkflowStateError,
 )
+from research_automation_supervisor.example_bundle import (
+    ExampleBundleError,
+    materialize_synthetic_example,
+)
 from research_automation_supervisor.live_shadow_engine import (
     DEFAULT_LIVE_SHADOW_RUNS_DIRECTORY,
     abort_live_shadow,
@@ -161,6 +165,23 @@ def doctor(
         typer.echo(_format_doctor(report))
     if not report.ok:
         raise typer.Exit(code=3)
+
+
+@app.command("init-example")
+def init_example_command(
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="New directory for the synthetic quick start."),
+    ],
+) -> None:
+    """Materialize the bundled non-model synthetic workflow example."""
+    try:
+        destination = materialize_synthetic_example(output)
+    except ExampleBundleError as exc:
+        typer.echo(f"Could not create example: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"Synthetic example created: {destination}")
+    typer.echo(f"Next: read {destination / 'README.md'}")
 
 
 @app.command("validate-contract")

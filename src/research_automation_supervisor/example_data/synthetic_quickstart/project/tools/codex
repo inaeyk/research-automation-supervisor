@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Deterministic Codex CLI test double for the installed synthetic example."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--version"]:
+        print("codex-cli 0.200.0")
+        return 0
+    arguments = sys.argv[1:]
+    try:
+        sandbox = arguments[arguments.index("--sandbox") + 1]
+        final_path = Path(arguments[arguments.index("--output-last-message") + 1])
+    except (ValueError, IndexError):
+        print("synthetic Codex received an unsupported command", file=sys.stderr)
+        return 2
+    sys.stdin.buffer.read()
+    if sandbox == "workspace-write":
+        target = Path("src/ready.txt")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ready\n", encoding="utf-8")
+        final = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "synthetic worker completed",
+            "changed_files": ["src/ready.txt"],
+            "assumptions": [],
+            "questions": [],
+        }
+        thread = "11111111-1111-4111-8111-111111111111"
+    elif sandbox == "read-only":
+        passed = Path("src/ready.txt").read_bytes() == b"ready\n"
+        final = {
+            "schema_version": 1,
+            "verdict": "pass" if passed else "fail_repairable",
+            "summary": "synthetic auditor completed",
+            "scope_compliant": True,
+            "contract_satisfied": passed,
+            "findings": [],
+            "human_questions": [],
+        }
+        thread = "22222222-2222-4222-8222-222222222222"
+    else:
+        print("synthetic Codex received an unsupported sandbox", file=sys.stderr)
+        return 2
+    print(json.dumps({"type": "thread.started", "thread_id": thread}, sort_keys=True))
+    final_path.write_text(json.dumps(final, sort_keys=True), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

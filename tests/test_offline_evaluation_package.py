@@ -9,6 +9,7 @@ import posixpath
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -66,6 +67,34 @@ def _git(repository: Path, *arguments: str) -> str:
         text=True,
     )
     return completed.stdout.strip()
+
+
+def test_experimental_evaluator_help_does_not_qualify_toolchain_at_import() -> None:
+    program = """
+import pathlib
+
+original_resolve = pathlib.Path.resolve
+
+def guarded_resolve(self, strict=False):
+    if strict:
+        raise AssertionError("strict toolchain resolution during CLI import")
+    return original_resolve(self, strict=False)
+
+pathlib.Path.resolve = guarded_resolve
+from research_automation_supervisor.offline_replay_evaluator import main
+raise SystemExit(main(["--help"]))
+"""
+
+    completed = subprocess.run(
+        (sys.executable, "-c", program),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "EXPERIMENTAL" in completed.stdout
+    assert "run-direct-historical-replay" in "".join(completed.stdout.split())
 
 
 def _repository(path: Path, files: dict[str, str]) -> tuple[str, str]:
@@ -1912,10 +1941,12 @@ def test_cell_storage_environment_qualification_uses_exact_production_namespace(
 
     assert set(by_name) == {"Chombo", "GRChombo"}
     assert by_name["Chombo"][1] == Path(
-        "/home/inaeyk/researchrepo/GL-with-AI/external/Chombo"
+        "/opt/research-automation-supervisor/experimental-runtime/"
+        "GL-with-AI/external/Chombo"
     )
     assert by_name["GRChombo"][1] == Path(
-        "/home/inaeyk/researchrepo/GL-with-AI/external/GRChombo"
+        "/opt/research-automation-supervisor/experimental-runtime/"
+        "GL-with-AI/external/GRChombo"
     )
     assert by_name["Chombo"][1].parent == by_name["GRChombo"][1].parent
     assert by_name["Chombo"][0] == (

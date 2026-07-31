@@ -10,7 +10,7 @@ reaches the authoritative worker or auditor.
 cd ~/researchrepo/research-automation-supervisor
 
 unzip -o \
-  /mnt/c/Users/inaeyk/Downloads/research-automation-supervisor-stage4.zip \
+  /mnt/c/Users/<WINDOWS_USERNAME>/Downloads/research-automation-supervisor-stage4.zip \
   -d .
 
 chmod +x run_stage4_codex.sh

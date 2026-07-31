@@ -1,8 +1,10 @@
-"""Prepare and verify private historical replay evaluation packages.
+"""Prepare and verify experimental private historical replay packages.
 
 This module is deliberately independent from campaign execution and model
 adapters.  It accepts a preserved, pre-split prepared campaign as host-side
-authority and produces a sealed input for ``evaluate-historical-replay``.
+authority and produces a sealed input for ``evaluate-historical-replay``. The
+packaged Bubblewrap path is research infrastructure, not the authoritative
+campaign evaluation method.
 """
 
 from __future__ import annotations
@@ -44,10 +46,12 @@ TASK_IDS = (
 _DEPENDENCY_NAMES = ("chombo-dependency", "grchombo-dependency")
 _QUALIFIED_DEPENDENCY_NAMESPACES = {
     "chombo-dependency": (
-        "/home/inaeyk/researchrepo/GL-with-AI/external/Chombo"
+        "/opt/research-automation-supervisor/experimental-runtime/"
+        "GL-with-AI/external/Chombo"
     ),
     "grchombo-dependency": (
-        "/home/inaeyk/researchrepo/GL-with-AI/external/GRChombo"
+        "/opt/research-automation-supervisor/experimental-runtime/"
+        "GL-with-AI/external/GRChombo"
     ),
 }
 _CHOMBO_INSTALLATION_PATHS = (
@@ -806,6 +810,9 @@ def historical_replay_command_report(
         manifest = verify_evaluation_package(evaluation_package)
         return {
             "schema_version": 1,
+            "experimental": True,
+            "authority": "non_authoritative_research_infrastructure",
+            "authoritative_command": "run-direct-historical-replay",
             "evaluation_package_status": "validated",
             "evaluation_package_manifest_sha256": manifest[
                 "package_manifest_sha256"
@@ -815,6 +822,9 @@ def historical_replay_command_report(
         }
     return {
         "schema_version": 1,
+        "experimental": True,
+        "authority": "non_authoritative_research_infrastructure",
+        "authoritative_command": "run-direct-historical-replay",
         "evaluation_package_status": "missing",
         "evaluation_package_manifest_sha256": None,
         "package_preparation_command": prepare_command,
@@ -3185,7 +3195,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point that prints only package identity, never protected content."""
     parser = argparse.ArgumentParser(
         prog="prepare-historical-replay-evaluation-package",
-        description="Prepare a sealed non-model historical replay package.",
+        description=(
+            "EXPERIMENTAL: prepare a sealed Bubblewrap historical replay package. "
+            "Use run-direct-historical-replay for authoritative campaign evaluation."
+        ),
     )
     parser.add_argument("--source-prepared-campaign", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -3214,7 +3227,10 @@ def command_report_main(argv: Sequence[str] | None = None) -> int:
     """Report one or two exact commands according to package availability."""
     parser = argparse.ArgumentParser(
         prog="report-historical-replay-evaluation-commands",
-        description="Report deterministic offline replay next commands.",
+        description=(
+            "EXPERIMENTAL: report packaged Bubblewrap replay commands. "
+            "Use run-direct-historical-replay for authoritative campaign evaluation."
+        ),
     )
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--source-prepared-campaign", required=True, type=Path)

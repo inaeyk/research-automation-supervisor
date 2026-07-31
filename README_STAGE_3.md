@@ -6,7 +6,7 @@ supervisor proposal to a worker or auditor.
 ```bash
 cd ~/researchrepo/research-automation-supervisor
 
-unzip -o /mnt/c/Users/inaeyk/Downloads/research-automation-supervisor-stage3.zip -d .
+unzip -o /mnt/c/Users/<WINDOWS_USERNAME>/Downloads/research-automation-supervisor-stage3.zip -d .
 chmod +x run_stage3_codex.sh
 
 less STAGE_3_CONTRACT.md

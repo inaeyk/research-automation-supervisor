@@ -1,0 +1,66 @@
+{
+  "campaign_id": "gl-five-visible-campaign-v1",
+  "candidate_manifest_sha256": "7f891080fc205341dba3b9b0e0e56f24c9fb55d0e8a9b8173baef2056d6b7405",
+  "date": "2026-07-31",
+  "evaluator_authority": "Direct original historical functional evaluator replay on the qualified host after all model processes stopped; packaged Bubblewrap evaluator results are experimental and non-authoritative.",
+  "exact_match_total": {
+    "passed": 0,
+    "total": 5
+  },
+  "functional_total": {
+    "passed": 5,
+    "total": 5
+  },
+  "qualification_caveats": [
+    "The prepared campaign, protected fixtures, gold, exact references, and raw hidden-test source are not included in this record.",
+    "The first hidden-cleanup attempt was unevaluated because mode 0400 candidate files in the disposable workspace blocked hidden overlay; making only the disposable workspace user-writable allowed the unchanged candidate to pass.",
+    "Exact historical identity is distinct from functional correctness and was false for every task."
+  ],
+  "repository_provenance": {
+    "qualified_commit": "d3bcadd47aacf522e842c076b7915de330bfe289"
+  },
+  "run_token": "3283da26577c167ed3f93dd5be0aae09",
+  "schema_version": 1,
+  "tasks": [
+    {
+      "changed_path_match": true,
+      "exact_historical_identity": false,
+      "functional_passed": true,
+      "hidden_acceptance_passed": true,
+      "task_id": "reduced-vars-gp",
+      "visible_acceptance_passed": true
+    },
+    {
+      "changed_path_match": true,
+      "exact_historical_identity": false,
+      "functional_passed": true,
+      "hidden_acceptance_passed": true,
+      "task_id": "hidden-cleanup",
+      "visible_acceptance_passed": true
+    },
+    {
+      "changed_path_match": true,
+      "exact_historical_identity": false,
+      "functional_passed": true,
+      "hidden_acceptance_passed": true,
+      "task_id": "cell-storage",
+      "visible_acceptance_passed": true
+    },
+    {
+      "changed_path_match": true,
+      "exact_historical_identity": false,
+      "functional_passed": true,
+      "hidden_acceptance_passed": true,
+      "task_id": "hat-gamma-x",
+      "visible_acceptance_passed": true
+    },
+    {
+      "changed_path_match": true,
+      "exact_historical_identity": false,
+      "functional_passed": true,
+      "hidden_acceptance_passed": true,
+      "task_id": "stage4ao-b",
+      "visible_acceptance_passed": true
+    }
+  ]
+}

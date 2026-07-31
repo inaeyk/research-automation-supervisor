@@ -4,12 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "research-automation-supervisor"
-version = "0.1.0"
-description = "Deterministic orchestration foundation for supervised Codex workflows."
+version = "0.2.0"
+description = "Deterministic, auditable orchestration for supervised Codex research workflows."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Michael Yan" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
   "packaging>=24,<26",
   "pydantic>=2.8,<3",
@@ -19,6 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2,<2",
   "mypy>=1.10,<2",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
@@ -27,12 +40,34 @@ dev = [
 
 [project.scripts]
 research-supervisor = "research_automation_supervisor.cli:app"
+run-direct-historical-replay = "research_automation_supervisor.direct_historical_replay:main"
 evaluate-historical-replay = "research_automation_supervisor.offline_replay_evaluator:main"
 prepare-historical-replay-evaluation-package = "research_automation_supervisor.offline_evaluation_package:main"
 report-historical-replay-evaluation-commands = "research_automation_supervisor.offline_evaluation_package:command_report_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/research_automation_supervisor"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/README.md",
+  "/pyproject.toml",
+  "/docs",
+  "/examples",
+  "/src",
+]
+exclude = [
+  "/dist",
+  "/runs",
+  "/**/.mypy_cache",
+  "/**/.pytest_cache",
+  "/**/.ruff_cache",
+  "/**/.venv",
+  "/**/__pycache__",
+  "/**/*.egg-info",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

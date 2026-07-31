@@ -1,4 +1,8 @@
-"""Deterministic, non-model evaluation of an exported campaign candidate."""
+"""Experimental packaged Bubblewrap evaluation of an exported candidate.
+
+The supported authoritative path is the original prepared-campaign evaluator
+invoked by ``run-direct-historical-replay`` after all model processes stop.
+"""
 
 from __future__ import annotations
 
@@ -36,22 +40,29 @@ MAX_CONTRACT_TAIL_BYTES = 131_072
 ENVIRONMENT_QUALIFICATION_TIMEOUT_SECONDS = 300
 _BUBBLEWRAP = Path("/usr/bin/bwrap")
 _GIT = Path("/usr/bin/git")
-_PYTHON = Path("/usr/bin/python3").resolve(strict=True)
-_CPP = Path("/usr/bin/g++").resolve(strict=True)
-_FORTRAN = Path("/usr/bin/x86_64-linux-gnu-gfortran-15").resolve(strict=True)
-_MAKE = Path("/usr/bin/make").resolve(strict=True)
-_ASSEMBLER = Path("/usr/bin/as").resolve(strict=True)
-_LINKER = Path("/usr/bin/ld").resolve(strict=True)
-_SHELL = Path("/bin/sh").resolve(strict=True)
-_CSH = Path("/bin/csh").resolve(strict=True)
-_AWK = Path("/usr/bin/awk").resolve(strict=True)
-_SED = Path("/usr/bin/sed").resolve(strict=True)
-_TR = Path("/usr/bin/tr").resolve(strict=True)
-_UNAME = Path("/usr/bin/uname").resolve(strict=True)
-_MKDIR = Path("/usr/bin/mkdir").resolve(strict=True)
-_TOUCH = Path("/usr/bin/touch").resolve(strict=True)
-_PERL = Path("/usr/bin/perl").resolve(strict=True)
-_DYNAMIC_LOADER = Path("/lib64/ld-linux-x86-64.so.2").resolve(strict=True)
+
+
+def _declared_runtime_path(value: str | Path) -> Path:
+    """Canonicalize a declared runtime path without qualifying it at import time."""
+    return Path(value).resolve(strict=False)
+
+
+_PYTHON = _declared_runtime_path("/usr/bin/python3")
+_CPP = _declared_runtime_path("/usr/bin/g++")
+_FORTRAN = _declared_runtime_path("/usr/bin/x86_64-linux-gnu-gfortran-15")
+_MAKE = _declared_runtime_path("/usr/bin/make")
+_ASSEMBLER = _declared_runtime_path("/usr/bin/as")
+_LINKER = _declared_runtime_path("/usr/bin/ld")
+_SHELL = _declared_runtime_path("/bin/sh")
+_CSH = _declared_runtime_path("/bin/csh")
+_AWK = _declared_runtime_path("/usr/bin/awk")
+_SED = _declared_runtime_path("/usr/bin/sed")
+_TR = _declared_runtime_path("/usr/bin/tr")
+_UNAME = _declared_runtime_path("/usr/bin/uname")
+_MKDIR = _declared_runtime_path("/usr/bin/mkdir")
+_TOUCH = _declared_runtime_path("/usr/bin/touch")
+_PERL = _declared_runtime_path("/usr/bin/perl")
+_DYNAMIC_LOADER = _declared_runtime_path("/lib64/ld-linux-x86-64.so.2")
 _SYSTEM_RUNTIME_DIRECTORIES = (
     Path("/usr/include"),
     Path("/usr/lib/python3.14"),
@@ -59,7 +70,7 @@ _SYSTEM_RUNTIME_DIRECTORIES = (
     Path("/usr/lib/gcc"),
 )
 _COMPILER_RUNTIME_FILES = tuple(
-    Path("/usr/libexec/gcc/x86_64-linux-gnu/15", name).resolve(strict=True)
+    _declared_runtime_path(Path("/usr/libexec/gcc/x86_64-linux-gnu/15", name))
     for name in (
         "cc1plus",
         "collect2",
@@ -94,10 +105,12 @@ _GIT_ENVIRONMENT = {
 }
 _QUALIFIED_DEPENDENCY_NAMESPACES = {
     "chombo-dependency": Path(
-        "/home/inaeyk/researchrepo/GL-with-AI/external/Chombo"
+        "/opt/research-automation-supervisor/experimental-runtime/"
+        "GL-with-AI/external/Chombo"
     ),
     "grchombo-dependency": Path(
-        "/home/inaeyk/researchrepo/GL-with-AI/external/GRChombo"
+        "/opt/research-automation-supervisor/experimental-runtime/"
+        "GL-with-AI/external/GRChombo"
     ),
 }
 _SAFE_DIAGNOSTIC_EXCEPTION_TYPES = {
@@ -324,6 +337,9 @@ def _evaluate_pinned_authority(
         )
         report: dict[str, object] = {
             "schema_version": REPORT_SCHEMA_VERSION,
+            "experimental": True,
+            "authority": "non_authoritative_research_infrastructure",
+            "authoritative_command": "run-direct-historical-replay",
             "package_id": config["package_id"],
             "candidate_manifest_sha256": candidate_manifest[
                 "candidate_manifest_sha256"
@@ -1175,7 +1191,7 @@ def _qualification_python_source(
         "    else:\n"
         "        raise RuntimeError('dependency mount is writable')\n"
         "    assert not host_sentinel.exists()\n"
-        "    assert not Path('/home/inaeyk/.ssh').exists()\n"
+        "    assert not Path('/root/.ssh').exists()\n"
         "    assert not Path('/root').exists()\n"
         "    assert not Path('/usr/bin/node').exists()\n"
         "    assert not Path('/usr/local/bin/codex').exists()\n"
@@ -2824,7 +2840,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Standalone command entry point; intentionally has no campaign argument."""
     parser = argparse.ArgumentParser(
         prog="evaluate-historical-replay",
-        description="Deterministically evaluate an exported candidate.",
+        description=(
+            "EXPERIMENTAL: evaluate through a packaged Bubblewrap runtime. "
+            "Use run-direct-historical-replay for authoritative campaign evaluation."
+        ),
     )
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--evaluation-package", required=True, type=Path)

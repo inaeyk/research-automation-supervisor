@@ -1,204 +1,93 @@
-# Visible campaigns and offline historical evaluation
+# Visible campaign and evaluation split
 
-Campaign execution and historical evaluation are separate products with a
-one-way file boundary.
+This document records the security and product decision that visible campaign
+execution and protected historical evaluation are separate processes with a one-way
+candidate boundary.
 
-## Visible campaign executor
+## Supported architecture
 
-`research-supervisor run-visible-campaign CAMPAIGN.yaml` runs the ordered
-visible workflow:
+`research-supervisor run-visible-campaign` receives visible project context, contracts,
+prompts, path authority, fixed visible acceptance tests, source provenance, model
+settings, and production-profile metadata. Gold-bearing or offline-evaluator fields
+are rejected before model launch. After every task is terminal, it publishes a sealed
+`final-candidate/`.
 
-1. supervisor prompt;
-2. worker action;
-3. deterministic scope checks and visible acceptance tests;
-4. fresh auditor action;
-5. at most the configured bounded repair;
-6. terminal visible task record.
+The candidate export is the only campaign output needed by evaluation. It contains
+manifest-pinned per-task changed-file overlays and safe visible evidence. Candidate
+finalization is the campaign completion transition; evaluation cannot change, resume,
+or reinterpret campaign state.
 
-After every configured task is terminal, the executor writes
-`final-candidate/`. Candidate finalization is the campaign completion
-transition. The executor has no evaluation-package input and performs no
-historical comparison.
+After all Supervisor, Worker, Auditor, Codex, and other model processes stop, the
+supported evaluation command is:
 
-A visible campaign specification contains only task contracts, project
-context, path authority, visible acceptance commands, source provenance, model
-settings, and production-profile metadata. Legacy evaluation fields are
-accepted only when empty. A gold-bearing legacy manifest is rejected before a
-model launch.
-
-Visible campaign acceptance commands use the registered
-`/usr/bin/python3 <visible-script>` runner. The script and its working directory
-must be inside the visible package; shell, `-c`, `-m`, absolute, parent-traversal,
-and external-authority arguments are rejected at campaign load. Supervisor
-instructions containing absolute, parent-traversal, or offline-evaluation
-locators are rejected before they reach a Worker or Auditor.
-
-The candidate contains a canonical manifest, deterministic changed-file
-overlays and evidence, baseline commit/tree identities, visible test results,
-scope evidence, and terminal worker/auditor summaries. It excludes Codex
-session caches, credentials, and campaign control state. Each task's changed
-bytes are durably sealed before its terminal campaign transition; final
-publication and crash recovery consume those immutable inputs rather than a
-live workspace.
-
-Source provenance and execution identity are deliberately separate. A task
-records the original source commit/tree/archive digest and the fresh
-one-commit execution repository's baseline commit/tree. Their commit IDs may
-differ after archive reconstruction; their tree IDs must match. The offline
-package repeats the original source commit/tree and independently archives the
-qualified one-commit tree. Those archive bytes are package-manifest pinned,
-and the evaluator independently derives the extracted archive's Git tree
-before any test runs.
-
-## Offline evaluator
-
-Historical authority is first materialized by a separate host-side command
-after campaign completion:
-
-```text
-prepare-historical-replay-evaluation-package \
-  --source-prepared-campaign /preserved/pre-split-campaign \
-  --output /private/gl-five-historical-replay-v2
+```bash
+run-direct-historical-replay --candidate "private/final-candidate" --prepared-campaign "private/prepared-campaign" --output "private/direct-replay-report"
 ```
 
-The preparer imports no campaign engine or model adapter. It recognizes the
-legacy five-task manifest structurally, requires clean one-commit task
-workspaces, archives committed Git trees, copies functional fixtures and the
-historical evaluator with independent inodes, constructs deterministic exact
-reference archives, snapshots pinned dependency commits, and records source
-provenance and production-profile authority. The revision-2 production package
-also snapshots the qualified ignored Chombo installation inputs that are not
-present in its Git tree: `Make.defs.local`, the 2-D gfortran-15 configuration
-check, and the prebuilt BoxTools and BaseTools archives. Their independent file
-identities, modes, bytes, digests, and deterministic runtime mtimes are pinned
-separately from the committed Chombo tree. Source identity and content are
-fingerprinted before and after preparation. Publication is atomic and fails if
-source authority changes, contains unsupported objects or links, has ambiguous
-task mappings, or is incomplete.
+For each declared task, the command:
 
-Every package contains `evaluation-package-manifest.json`. Its canonical,
-versioned payload records ordered paths, file roles, object types, modes, byte
-lengths, and SHA-256 values. Prepared payload files are mode `0400`,
-directories are mode `0500`, and the evaluator verifies the complete manifest
-before extracting an archive or running a functional test. Preparation output
-contains only the package path and manifest digest, never protected content.
+1. verifies the candidate manifest and prepared task mapping;
+2. exports the prepared one-commit baseline into a disposable workspace;
+3. creates private, filter-independent ephemeral Git metadata;
+4. applies only the immutable candidate `changes.json` overlay;
+5. adds owner-write permission only inside the disposable tree;
+6. invokes the original declared `functional` evaluator on the qualified host;
+7. parses its bounded schema-version-1 final JSON contract;
+8. records pass, functional failure, evaluator infrastructure failure, or no
+   structured result;
+9. verifies candidate and prepared authority fingerprints after replay; and
+10. removes workspaces by default.
 
-`evaluate-historical-replay` is a separate console program:
+Raw stdout/stderr are private per-task artifacts because evaluator output is untrusted.
+The JSON and Markdown summaries contain only result booleans, exit/timeout state,
+bounded reason codes, hashes, byte counts, provenance, and relative artifact names.
 
-```text
-evaluate-historical-replay \
-  --candidate /path/to/final-candidate \
-  --evaluation-package /private/gl-five-historical-replay-v2 \
-  --output /path/to/new-report-directory
-```
+## Authoritative five-task result
 
-The command accepts no campaign run or session argument. It imports no campaign
-engine, Supervisor, Worker, Auditor, or model adapter. It verifies the immutable
-candidate, reconstructs evaluation workspaces from digest-pinned baseline
-archives, applies the candidate changed-file overlays, runs the package's
-deterministic tests, optionally compares an exact reference archive, and emits
-one standalone report. Its output must be disjoint from both inputs.
+The original historical evaluator was run directly after all model processes stopped,
+using disposable reconstructed workspaces and the qualified host GRChombo/Chombo
+environment. All five tasks passed hidden acceptance, visible acceptance, and
+changed-path scope. Exact historical identity was false for all five tasks.
 
-The package configuration is
-`evaluation-config/offline-evaluation.json`. It has schema version 1, a package
-ID, and ordered task records. Each task pins a baseline archive by SHA-256 and
-declares tests through the audited `python_script_v1` runner. Package files are
-non-executable except for executable-mode files copied from pinned dependency
-commits. Each script is digest-pinned and runs inside a fresh Bubblewrap
-namespace containing only the reconstructed workspace, the read-only evaluation
-package, system Python/toolchain files, private temporary storage, private proc,
-and no network. Arbitrary package-defined host commands are not supported.
-Optional exact-reference archives and expected changed paths are also digest-
-or value-pinned.
+The first direct `hidden-cleanup` attempt was unevaluated because candidate files in
+the disposable tree retained mode `0400`, preventing hidden overlay. Adding owner
+write permission only to the disposable workspace allowed the unchanged candidate to
+pass. This was evaluator-workspace infrastructure, not a candidate defect. The direct
+command includes a synthetic regression for this case.
 
-The offline runner mounts an audited Python, Git, C++, Fortran, assembler,
-linker, and `make` runtime profile rather than the host `/usr` tree. Revision 2
-additionally exposes only the Chombo make tools used by the visible
-cell-storage fixture: `csh`, `awk`, `sed`, `tr`, `uname`, `mkdir`, `touch`, and
-Perl. Package-contained GRChombo and Chombo trees are mounted read-only at the
-acceptance-pinned absolute paths under
-`/home/inaeyk/researchrepo/GL-with-AI/external`, reproducing both the original
-names and adjacency independently of the builder host's snapshot locations and
-without exposing the host checkout there.
-Git is a single qualified executable operating only on an action-owned
-ephemeral repository; user/system configuration, credentials, host
-repositories, and Git helper directories are absent. Python starts isolated
-without site packages. A single read-only `/bin/sh` is present for declared
-test-tool compatibility, while package-selected host commands, Node, campaign
-packages, model adapters, user installation roots, and host campaign state are
-absent. The C++ and Fortran drivers receive an explicit set of GCC internal
-compiler components; unrelated GCC helpers and executable-bearing library
-subtrees are masked. Evaluation output must be a new child of an existing
-exact, non-symlink parent disjoint from both inputs.
+See [the safe validation record](validation/five_task_historical_replay.md).
 
-Before any task workspace or candidate overlay is built and before any
-functional result is interpreted, the production evaluator runs a synthetic
-cell-storage-shaped qualification fixture through the same Bubblewrap command.
-It verifies exact dependency adjacency and package provenance, read-only
-mounts, required headers, makefiles, prebuilt libraries and tools, unrelated
-host-file inaccessibility, and a real `FArrayBox`/`Cell` load-store compile and
-execution. If this gate fails, the standalone report uses
-`evaluation_status: evaluator_infrastructure_failure`; per-task
-`functional_passed` remains null and functional evaluators are not launched.
-Functional failure is reportable only after the gate passes.
+## Functional correctness versus exact identity
 
-Standalone report schema version 5 separates environment qualification,
-functional quality, and historical identity. `passed` remains a compatibility
-boolean and is false for an infrastructure failure;
-`strict_combined_passed` retains the former functional-plus-exact interpretation.
-Changed-path evidence is validated as duplicate-free canonical relative POSIX
-paths, compared without ordering significance, and reported in sorted order.
-Per-task stdout and stderr are drained without unbounded memory capture.
-Content is treated as untrusted because a test can print protected workspace
-bytes: the private report's deterministic `artifacts/` records contain stream
-lengths, hashes, truncation state, and strictly parsed safe exception fields,
-but never raw process output. Their paths and hashes are recorded in the report.
-The evaluator process parses only the generic historical functional evaluator's
-declared schema-version-1 final JSON object. Its versioned diagnostic envelope
-copies only the declared functional phase, fixed check identifier, three result
-booleans, fixed failure category, exit/timeout state, and observed stream lengths
-and hashes. Nested runner prose, expected/actual paths, comparison values, and
-other arbitrary fields are ignored. Unstructured compiler, linker, or test prose
-is never keyword-classified; when the contract cannot distinguish those causes,
-the bounded category is `functional_check_failure` or conservatively unknown.
+Functional replay asks whether hidden acceptance, visible acceptance, and changed-path
+scope pass in the historical environment. Exact identity asks whether the candidate is
+byte-for-byte identical to the historical reference. A valid alternative
+implementation can be functionally correct without being an exact reproduction.
 
-Evaluation results never create campaign transitions, resume a campaign, or
-feed a model. The evaluator is intended to be invoked only after all campaign
-model processes have terminated.
+For the completed campaign, functional replay is 5/5 and exact identity is 0/5. The
+exact score does not reduce the functional score and should not be presented as a
+candidate failure.
 
-`report-historical-replay-evaluation-commands` reports next steps from
-explicit host paths. When the package is missing it emits both the exact
-preparation command and the subsequent evaluation command. It reports direct
-evaluation readiness only after an existing package manifest validates.
-Visible campaign reports record offline evaluation as `not_performed` and do
-not invent an evaluation-package path.
+## Experimental packaged evaluator
 
-## Physical layout
+`prepare-historical-replay-evaluation-package`, `evaluate-historical-replay`, and
+`report-historical-replay-evaluation-commands` are retained as experimental research
+infrastructure. They explore sealed archives, manifest-pinned dependency snapshots,
+Bubblewrap namespaces, a qualified compiler/runtime profile, safe diagnostic
+envelopes, and exact-reference comparison.
 
-Visible execution authority and offline evaluation authority use disjoint
-roots:
+That work revealed useful portability and toolchain-closure constraints, especially
+around the historical cell-storage environment. It is not on the supported path and
+will not be namespace- or compiler-closure-hardened during release closure. Packaged
+results of 0/5 and 4/5 are superseded by the direct replay. When packaged environment
+qualification fails, its report uses `evaluator_infrastructure_failure` and null
+per-task functional results; skipped evaluation must never be described as candidate
+failure.
 
-```text
-runs/prepared-campaigns/gl-five-visible-campaign-v1/
-  visible/
-  control/
-  launch/
-  runtime/
-  final-candidate/
+## Protected data rule
 
-offline-evaluation/gl-five-historical-replay-v2/
-  evaluation-package-manifest.json
-  baseline-archives/
-  dependencies/
-  evaluation-config/
-  protected-fixtures/
-  exact-reference/
-  evaluators/
-  provenance/
-```
-
-An offline-evaluation root is never passed to the visible campaign loader or a
-model process. Campaign execution is prepared and completed before a private
-offline package is made available to the separate evaluator invocation; the
-visible executor deliberately retains the normal Worker/Auditor sandbox policy
-instead of the retired gold-bearing hostile-runtime design.
+Prepared campaigns, gold, hidden tests, protected fixtures, exact references, and raw
+private evaluator output remain outside the wheel, source distribution, public docs,
+model prompts, and model-accessible workspaces. Preserve historical logs as evidence,
+but label intermediate diagnoses and experimental scores as superseded rather than
+rewriting them.

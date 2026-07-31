@@ -12,6 +12,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from research_automation_supervisor import __version__
 from research_automation_supervisor.cli import _format_codex_result, app
 from research_automation_supervisor.codex_adapter import (
     DEFAULT_LIMITS,
@@ -466,7 +467,7 @@ def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path
     assert (directory / "final-message.md").read_text() == "Final response.\n"
     assert (directory / "prompt.sha256").read_text().strip() == prepared.prompt_sha256
     assert json.loads((directory / "result.json").read_text()) == result.to_dict()
-    assert metadata["package_version"] == "0.1.0"
+    assert metadata["package_version"] == __version__
     assert metadata["codex_version"] == "0.200.0"
     assert metadata["thread_id"] == "thread-123"
     assert metadata["artifact_directory"] == result.artifact_directory
