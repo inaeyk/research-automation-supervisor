@@ -117,14 +117,19 @@ model adapters, user installation roots, and host campaign state are absent.
 Evaluation output must be a new child of an existing exact, non-symlink parent
 disjoint from both inputs.
 
-Standalone report schema version 2 separates functional quality from historical
+Standalone report schema version 3 separates functional quality from historical
 identity. `passed` remains as a compatibility alias for `all_functional_passed`;
 `strict_combined_passed` retains the former functional-plus-exact interpretation.
+Changed-path evidence is validated as duplicate-free canonical relative POSIX
+paths, compared without ordering significance, and reported in sorted order.
 Per-task stdout and stderr are drained without unbounded memory capture.
 Content is treated as untrusted because a test can print protected workspace
 bytes: the private report's deterministic `artifacts/` records contain stream
 lengths, hashes, truncation state, and strictly parsed safe exception fields,
 but never raw process output. Their paths and hashes are recorded in the report.
+The evaluator process also assigns each child test a fixed allowlisted diagnostic
+category from bounded output signatures; the report includes only that category,
+fixed signals, exit/timeout state, and observed stream lengths and hashes.
 
 Evaluation results never create campaign transitions, resume a campaign, or
 feed a model. The evaluator is intended to be invoked only after all campaign

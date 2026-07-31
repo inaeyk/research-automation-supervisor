@@ -433,7 +433,10 @@ def _validate_production_package(
                 f"{task_id} expected changed paths are incomplete"
             )
         for relative in changed_paths:
-            _relative_path(relative, f"{task_id} changed path")
+            relative = _relative_path(
+                relative,
+                f"{task_id} changed path",
+            )
             fixture = _source_path(
                 root,
                 f"protected-fixtures/{task_id}/{relative}",
@@ -2417,13 +2420,7 @@ def _path_identity_at(descriptor: int, name: str) -> tuple[int, int, int]:
 
 
 def _source_path(root: Path, relative: str, label: str) -> Path:
-    value = PurePosixPath(relative)
-    if (
-        value.is_absolute()
-        or not value.parts
-        or any(part in {"", ".", ".."} for part in value.parts)
-    ):
-        raise EvaluationPackageError(f"{label} path is invalid")
+    value = PurePosixPath(_relative_path(relative, f"{label} path"))
     try:
         candidate = root.joinpath(*value.parts)
         resolved = candidate.resolve(strict=True)
@@ -2458,9 +2455,13 @@ def _relative_path(value: object, label: str) -> str:
         raise EvaluationPackageError(f"{label} is invalid")
     path = PurePosixPath(value)
     if (
-        path.is_absolute()
+        not value
+        or "\x00" in value
+        or "\\" in value
+        or path.is_absolute()
         or not path.parts
         or any(part in {"", ".", ".."} for part in path.parts)
+        or path.as_posix() != value
     ):
         raise EvaluationPackageError(f"{label} is invalid")
     return path.as_posix()

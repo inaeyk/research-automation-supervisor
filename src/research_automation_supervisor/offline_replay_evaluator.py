@@ -30,7 +30,7 @@ from research_automation_supervisor.offline_evaluation_package import (
 CONFIG_RELATIVE_PATH = Path("evaluation-config/offline-evaluation.json")
 REPORT_NAME = "historical-replay-report.json"
 SCHEMA_VERSION = 1
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 MAX_CAPTURE_BYTES = 1_048_576
 _BUBBLEWRAP = Path("/usr/bin/bwrap")
 _GIT = Path("/usr/bin/git")
@@ -88,6 +88,49 @@ _SAFE_DIAGNOSTIC_ERRNOS = {
         errno.ENOEXEC,
         errno.EPERM,
     )
+}
+_DIAGNOSTIC_SIGNATURES = {
+    "changed_path_failure": (
+        b"changed path mismatch",
+        b"changed paths differ",
+        b"unexpected changed path",
+    ),
+    "compile_failure": (
+        b"cc1plus:",
+        b"compilation failed",
+        b"compilation terminated",
+        b"compile failed",
+        b"g++: error:",
+    ),
+    "evaluator_runtime_failure": (
+        b"runtimeerror",
+        b"traceback (most recent call last)",
+    ),
+    "functional_assertion_or_mismatch": (
+        b"assertion failed",
+        b"assertionerror",
+        b"functional mismatch",
+        b"mismatch detected",
+        b"tests failed",
+        b"the following tests failed",
+    ),
+    "link_failure": (
+        b"collect2: error:",
+        b"ld returned",
+        b"link failed",
+        b"linker command failed",
+        b"undefined reference",
+    ),
+    "missing_runtime_dependency": (
+        b"command not found",
+        b"filenotfounderror",
+        b"no such file or directory",
+    ),
+    "sandbox_or_permission_failure": (
+        b"operation not permitted",
+        b"permission denied",
+        b"permissionerror",
+    ),
 }
 
 
@@ -390,7 +433,10 @@ def _evaluate_task(
     changed_paths_passed = (
         True
         if expected_changed is None
-        else _string_list(expected_changed, "expected changed paths")
+        else _canonical_changed_paths(
+            _string_list(expected_changed, "expected changed paths"),
+            "expected changed paths",
+        )
         == changed_paths
     )
     production_profile = _production_profile_analysis(
@@ -449,7 +495,7 @@ def _evaluate_task(
     return {
         "task_id": task_id,
         "passed": functional_passed,
-        "changed_paths": changed_paths,
+        "changed_paths": list(changed_paths),
         "changed_paths_passed": changed_paths_passed,
         "functional_tests_passed": functional_tests_passed,
         "production_profile": production_profile,
@@ -686,6 +732,12 @@ def _run_test(
     stderr_artifact_bytes = _diagnostic_artifact_bytes("stderr", stderr)
     artifacts[stdout_artifact] = stdout_artifact_bytes
     artifacts[stderr_artifact] = stderr_artifact_bytes
+    diagnostic = _classify_test_diagnostic(
+        return_code=return_code,
+        timed_out=timed_out,
+        stdout=stdout,
+        stderr=stderr,
+    )
     return {
         "id": test_id,
         "runner": "python_script_v1",
@@ -713,6 +765,7 @@ def _run_test(
         "stderr_observed_byte_length": stderr["observed_byte_length"],
         "stdout_truncated": stdout["truncated"],
         "stderr_truncated": stderr["truncated"],
+        "diagnostic": diagnostic,
     }
 
 
@@ -803,6 +856,101 @@ def _diagnostic_artifact_bytes(
         ),
     }
     return _json_bytes(artifact)
+
+
+def _classify_test_diagnostic(
+    *,
+    return_code: int | None,
+    timed_out: bool,
+    stdout: Mapping[str, object],
+    stderr: Mapping[str, object],
+) -> dict[str, object]:
+    stdout_bytes = stdout["captured_prefix"]
+    stderr_bytes = stderr["captured_prefix"]
+    assert isinstance(stdout_bytes, bytes)
+    assert isinstance(stderr_bytes, bytes)
+    stdout_length = stdout["observed_byte_length"]
+    stderr_length = stderr["observed_byte_length"]
+    assert isinstance(stdout_length, int)
+    assert isinstance(stderr_length, int)
+    signals = {
+        "stdout_empty" if stdout_length == 0 else "stdout_nonempty",
+        "stderr_empty" if stderr_length == 0 else "stderr_nonempty",
+    }
+    if stdout["truncated"] is True:
+        signals.add("stdout_truncated")
+    if stderr["truncated"] is True:
+        signals.add("stderr_truncated")
+    if timed_out:
+        category = "evaluator_runtime_failure"
+        signals.update({"exit_unavailable", "timeout"})
+    elif return_code == 0:
+        category = "passed"
+        signals.add("exit_zero")
+    else:
+        signals.add("exit_nonzero")
+        malformed = b"\x00" in stdout_bytes or b"\x00" in stderr_bytes
+        truncated_decode_failure = False
+        decoded_streams: list[str] = []
+        for raw_bytes, record in (
+            (stdout_bytes, stdout),
+            (stderr_bytes, stderr),
+        ):
+            try:
+                decoded_streams.append(
+                    raw_bytes.decode("utf-8", errors="strict")
+                )
+            except UnicodeDecodeError:
+                decoded_streams.append("")
+                if record["truncated"] is True:
+                    truncated_decode_failure = True
+                else:
+                    malformed = True
+        if malformed:
+            category = "malformed_evaluator_output"
+            signals.add("malformed_or_binary_output")
+        elif truncated_decode_failure:
+            category = "unknown_nonzero_exit"
+            signals.add("truncated_unclassifiable_output")
+        else:
+            normalized = "\n".join(decoded_streams).casefold().encode(
+                "utf-8"
+            )
+            matches = {
+                candidate
+                for candidate, signatures in _DIAGNOSTIC_SIGNATURES.items()
+                if any(signature in normalized for signature in signatures)
+            }
+            if (
+                "evaluator_runtime_failure" in matches
+                and len(matches) > 1
+            ):
+                matches.remove("evaluator_runtime_failure")
+            signals.update(f"{match}_signature" for match in matches)
+            if (
+                stdout["truncated"] is True
+                or stderr["truncated"] is True
+            ):
+                category = "unknown_nonzero_exit"
+                signals.add("truncated_unclassifiable_output")
+            elif len(matches) == 1:
+                category = next(iter(matches))
+            elif len(matches) > 1:
+                category = "unknown_nonzero_exit"
+                signals.add("ambiguous_failure_signatures")
+            else:
+                category = "unknown_nonzero_exit"
+                signals.add("no_allowlisted_failure_signature")
+    return {
+        "diagnostic_category": category,
+        "diagnostic_signals": sorted(signals),
+        "stdout_observed_byte_length": stdout["observed_byte_length"],
+        "stderr_observed_byte_length": stderr["observed_byte_length"],
+        "stdout_observed_sha256": stdout["observed_sha256"],
+        "stderr_observed_sha256": stderr["observed_sha256"],
+        "process_exit_code": return_code,
+        "timed_out": timed_out,
+    }
 
 
 def _validate_test_definition(
@@ -1096,7 +1244,7 @@ def _candidate_tasks(record: Mapping[str, object]) -> dict[str, object]:
     return result
 
 
-def _candidate_changed_paths(path: Path) -> list[str]:
+def _candidate_changed_paths(path: Path) -> tuple[str, ...]:
     evidence = _read_object(path)
     raw = evidence.get("changed_paths")
     if not isinstance(raw, list):
@@ -1106,7 +1254,35 @@ def _candidate_changed_paths(path: Path) -> list[str]:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise OfflineEvaluationError("candidate changed path is invalid")
         paths.append(item["path"])
-    return paths
+    return _canonical_changed_paths(
+        paths,
+        "candidate changed paths",
+    )
+
+
+def _canonical_changed_paths(
+    paths: Sequence[str],
+    label: str,
+) -> tuple[str, ...]:
+    canonical: list[str] = []
+    for raw in paths:
+        path = PurePosixPath(raw)
+        if (
+            not raw
+            or "\x00" in raw
+            or "\\" in raw
+            or path.is_absolute()
+            or not path.parts
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or path.as_posix() != raw
+        ):
+            raise OfflineEvaluationError(
+                f"{label} contains a non-canonical path"
+            )
+        canonical.append(raw)
+    if len(set(canonical)) != len(canonical):
+        raise OfflineEvaluationError(f"{label} contains duplicate paths")
+    return tuple(sorted(canonical))
 
 
 def _apply_candidate_changes(workspace: Path, task_candidate: Path) -> None:
@@ -1880,7 +2056,7 @@ def _runtime_dependency_mounts(
 
 def _production_profile_analysis(
     value: object,
-    changed_paths: list[str],
+    changed_paths: Sequence[str],
 ) -> dict[str, object]:
     if value is None:
         return {
