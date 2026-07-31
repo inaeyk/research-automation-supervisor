@@ -148,6 +148,7 @@ def _synthetic_source(tmp_path: Path) -> Path:
     evaluator = root / "engine-only/evaluators/evaluate.py"
     evaluator.parent.mkdir(parents=True)
     evaluator.write_text(
+        "import json\n"
         "from pathlib import Path\n"
         "import subprocess\n"
         "import sys\n"
@@ -158,10 +159,13 @@ def _synthetic_source(tmp_path: Path) -> Path:
         "     '--porcelain=v1', '-z', '--untracked-files=all'],\n"
         "    stdin=subprocess.DEVNULL, capture_output=True, check=False,\n"
         ")\n"
+        "path_match = (\n"
+        "    status.returncode == 0\n"
+        "    and str(relative).encode() in status.stdout\n"
+        ")\n"
         "passed = (\n"
         "    mode == 'functional'\n"
-        "    and status.returncode == 0\n"
-        "    and str(relative).encode() in status.stdout\n"
+        "    and path_match\n"
         "    and (\n"
         "    Path(workspace, relative).read_bytes()\n"
         "    == Path(fixture, relative).read_bytes()\n"
@@ -169,6 +173,17 @@ def _synthetic_source(tmp_path: Path) -> Path:
         ")\n"
         "print(f'synthetic functional stdout: {task}')\n"
         "print(f'synthetic functional stderr: {task}', file=sys.stderr)\n"
+        "print(json.dumps({\n"
+        "    'schema_version': 1,\n"
+        "    'evaluation': 'functional',\n"
+        "    'task_id': task,\n"
+        "    'passed': passed,\n"
+        "    'hidden_tests_passed': passed,\n"
+        "    'visible_tests_passed': passed,\n"
+        "    'changed_path_match': path_match,\n"
+        "    'hidden_runner': {'passed': passed},\n"
+        "    'visible_runner': {'passed': passed},\n"
+        "}, sort_keys=True))\n"
         "raise SystemExit(not passed)\n",
         encoding="utf-8",
     )
@@ -1666,7 +1681,7 @@ def test_evaluator_accepts_valid_synthetic_five_task_package(
         "strict_combined_passed_tasks": 5,
         "total_tasks": 5,
     }
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["all_functional_passed"] is True
     assert report["all_exact_matched"] is True
     assert all(task["changed_paths_passed"] for task in report["tasks"])
@@ -1929,10 +1944,77 @@ def test_python_exception_diagnostic_retains_safe_git_failure_fields() -> None:
     }
 
 
+def _functional_contract_stdout(
+    *,
+    hidden_passed: bool,
+    visible_passed: bool,
+    changed_path_match: bool,
+    protected_runner_output: str = "",
+) -> bytes:
+    passed = hidden_passed and visible_passed and changed_path_match
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "evaluation": "functional",
+                "task_id": "synthetic-task",
+                "passed": passed,
+                "hidden_tests_passed": hidden_passed,
+                "visible_tests_passed": visible_passed,
+                "changed_path_match": changed_path_match,
+                "hidden_runner": {
+                    "passed": hidden_passed,
+                    "stdout_tail": protected_runner_output,
+                },
+                "visible_runner": {
+                    "passed": visible_passed,
+                    "stderr_tail": protected_runner_output,
+                },
+                "expected_changed_paths": ["PROTECTED-PATH"],
+                "actual_changed_paths": ["PROTECTED-ACTUAL-PATH"],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+
+
 @pytest.mark.parametrize(
     ("category", "stdout", "stderr", "return_code", "timed_out"),
     (
-        ("passed", b"ok\n", b"", 0, False),
+        (
+            "passed",
+            _functional_contract_stdout(
+                hidden_passed=True,
+                visible_passed=True,
+                changed_path_match=True,
+            ),
+            b"",
+            0,
+            False,
+        ),
+        (
+            "functional_check_failure",
+            _functional_contract_stdout(
+                hidden_passed=False,
+                visible_passed=True,
+                changed_path_match=True,
+            ),
+            b"",
+            1,
+            False,
+        ),
+        (
+            "changed_path_failure",
+            _functional_contract_stdout(
+                hidden_passed=True,
+                visible_passed=True,
+                changed_path_match=False,
+            ),
+            b"",
+            1,
+            False,
+        ),
         (
             "evaluator_runtime_failure",
             b"",
@@ -1948,24 +2030,8 @@ def test_python_exception_diagnostic_retains_safe_git_failure_fields() -> None:
             False,
         ),
         (
-            "sandbox_or_permission_failure",
-            b"",
-            b"Permission denied\n",
-            1,
-            False,
-        ),
-        ("compile_failure", b"compilation terminated\n", b"", 1, False),
-        ("link_failure", b"undefined reference\n", b"", 1, False),
-        (
-            "functional_assertion_or_mismatch",
-            b"functional mismatch\n",
-            b"",
-            1,
-            False,
-        ),
-        (
-            "changed_path_failure",
-            b"changed paths differ\n",
+            "malformed_evaluator_output",
+            b'{"schema_version": 1, "evaluation": ',
             b"",
             1,
             False,
@@ -2017,22 +2083,36 @@ def test_functional_diagnostic_categories_are_deterministic(
     assert first["stdout_observed_byte_length"] == len(stdout)
     assert first["stderr_observed_byte_length"] == len(stderr)
     serialized = json.dumps(first, sort_keys=True)
-    for raw in (stdout, stderr):
-        protected = raw.decode("utf-8", errors="ignore").strip()
-        if protected:
-            assert protected not in serialized
+    for protected in (
+        "PROTECTED-PATH",
+        "PROTECTED-ACTUAL-PATH",
+        "opaque failure",
+    ):
+        assert protected not in serialized
 
 
-def test_ambiguous_functional_diagnostic_is_unknown() -> None:
-    stdout = b"compilation terminated\nundefined reference\n"
+@pytest.mark.parametrize(
+    "protected_output",
+    (
+        "PROTECTED compile failure: compiler source excerpt",
+        "PROTECTED link failure: hidden symbol and filename",
+        "PROTECTED functional mismatch: expected=secret actual=secret",
+    ),
+)
+def test_runner_failure_prose_is_never_parsed_or_disclosed(
+    protected_output: str,
+) -> None:
+    stdout = _functional_contract_stdout(
+        hidden_passed=False,
+        visible_passed=True,
+        changed_path_match=True,
+        protected_runner_output=protected_output,
+    )
     stdout_record = offline_evaluator._bounded_stream_record(
         io.BytesIO(stdout),
         len(stdout),
     )
-    stderr_record = offline_evaluator._bounded_stream_record(
-        io.BytesIO(),
-        0,
-    )
+    stderr_record = offline_evaluator._bounded_stream_record(io.BytesIO(), 0)
 
     result = offline_evaluator._classify_test_diagnostic(
         return_code=1,
@@ -2041,12 +2121,17 @@ def test_ambiguous_functional_diagnostic_is_unknown() -> None:
         stderr=stderr_record,
     )
 
-    assert result["diagnostic_category"] == "unknown_nonzero_exit"
-    assert "ambiguous_failure_signatures" in result["diagnostic_signals"]
+    assert result["diagnostic_category"] == "functional_check_failure"
+    assert result["check_identifier"] == "hidden_acceptance"
+    assert protected_output not in json.dumps(result, sort_keys=True)
 
 
 def test_nonempty_zero_capture_uses_observed_stream_shape() -> None:
-    stdout = b"functional mismatch"
+    stdout = _functional_contract_stdout(
+        hidden_passed=False,
+        visible_passed=True,
+        changed_path_match=True,
+    )
     stdout_record = offline_evaluator._bounded_stream_record(
         io.BytesIO(stdout),
         0,
@@ -2063,11 +2148,11 @@ def test_nonempty_zero_capture_uses_observed_stream_shape() -> None:
         stderr=stderr_record,
     )
 
-    assert result["diagnostic_category"] == "unknown_nonzero_exit"
+    assert result["diagnostic_category"] == "functional_check_failure"
     assert "stdout_nonempty" in result["diagnostic_signals"]
     assert "stdout_empty" not in result["diagnostic_signals"]
     assert "stdout_truncated" in result["diagnostic_signals"]
-    assert "truncated_unclassifiable_output" in result["diagnostic_signals"]
+    assert "historical_functional_contract_v1" in result["diagnostic_signals"]
     assert result["stdout_observed_byte_length"] == len(stdout)
 
 
@@ -2090,8 +2175,10 @@ def test_truncated_multibyte_text_is_conservatively_unclassifiable() -> None:
     )
 
     assert result["diagnostic_category"] == "unknown_nonzero_exit"
-    assert "truncated_unclassifiable_output" in result["diagnostic_signals"]
-    assert "malformed_or_binary_output" not in result["diagnostic_signals"]
+    assert "historical_functional_contract_absent" in (
+        result["diagnostic_signals"]
+    )
+    assert result["contract_status"] == "absent"
 
 
 def test_child_runner_classifies_empty_stderr_nonempty_stdout(
@@ -2101,7 +2188,28 @@ def test_child_runner_classifies_empty_stderr_nonempty_stdout(
     evaluator = source / "engine-only/evaluators/evaluate.py"
     evaluator.chmod(0o755)
     evaluator.write_text(
-        "print('functional mismatch')\nraise SystemExit(1)\n",
+        "import json\n"
+        "result = {\n"
+        "  'schema_version': 1,\n"
+        "  'evaluation': 'functional',\n"
+        "  'task_id': 'cell-storage',\n"
+        "  'passed': False,\n"
+        "  'hidden_tests_passed': False,\n"
+        "  'visible_tests_passed': True,\n"
+        "  'changed_path_match': True,\n"
+        "  'hidden_runner': {\n"
+        "    'passed': False,\n"
+        "    'stdout_tail': 'PROTECTED-CELL-STORAGE-VALUE',\n"
+        "  },\n"
+        "  'visible_runner': {'passed': True},\n"
+        "  'expected_changed_paths': ['PROTECTED-PATH'],\n"
+        "  'actual_changed_paths': ['PROTECTED-ACTUAL-PATH'],\n"
+        "}\n"
+        "encoded = json.dumps(result, sort_keys=True)\n"
+        "padding = 'X' * (2701 - len(encoded))\n"
+        "print(padding)\n"
+        "print(encoded)\n"
+        "raise SystemExit(1)\n",
         encoding="utf-8",
     )
     evaluator.chmod(0o555)
@@ -2125,14 +2233,101 @@ def test_child_runner_classifies_empty_stderr_nonempty_stdout(
         test = task["tests"][0]
         diagnostic = test["diagnostic"]
         assert test["passed"] is False
-        assert diagnostic["diagnostic_category"] == (
-            "functional_assertion_or_mismatch"
-        )
-        assert diagnostic["stdout_observed_byte_length"] > 0
+        assert diagnostic["diagnostic_category"] == "functional_check_failure"
+        assert diagnostic["failure_category"] == "functional_check_failure"
+        assert diagnostic["contract_status"] == "parsed"
+        assert diagnostic["check_identifier"] == "hidden_acceptance"
+        assert diagnostic["hidden_tests_passed"] is False
+        assert diagnostic["visible_tests_passed"] is True
+        assert diagnostic["changed_path_match"] is True
+        assert diagnostic["stdout_observed_byte_length"] == 2703
         assert diagnostic["stderr_observed_byte_length"] == 0
         assert diagnostic["process_exit_code"] == 1
         assert diagnostic["timed_out"] is False
-    assert b"functional mismatch" not in report_path.read_bytes()
+    report_bytes = report_path.read_bytes()
+    assert b"PROTECTED-CELL-STORAGE-VALUE" not in report_bytes
+    assert b"PROTECTED-PATH" not in report_bytes
+    assert b"PROTECTED-ACTUAL-PATH" not in report_bytes
+
+
+@pytest.mark.parametrize(
+    ("payload", "contract_status"),
+    (
+        (
+            {
+                "schema_version": 1,
+                "evaluation": "functional",
+                "task_id": "synthetic-task",
+                "passed": False,
+                "hidden_tests_passed": False,
+                "visible_tests_passed": True,
+                "changed_path_match": True,
+                "hidden_runner": {"passed": False},
+                "visible_runner": {"passed": True},
+            },
+            "parsed",
+        ),
+        (None, "absent"),
+        (
+            {
+                "schema_version": 1,
+                "evaluation": "functional",
+                "task_id": "synthetic-task",
+                "passed": True,
+                "hidden_tests_passed": True,
+                "visible_tests_passed": True,
+                "changed_path_match": True,
+                "hidden_runner": {"passed": False},
+                "visible_runner": {"passed": True},
+            },
+            "malformed",
+        ),
+    ),
+)
+def test_zero_exit_requires_a_coherent_passing_contract(
+    tmp_path: Path,
+    payload: dict[str, object] | None,
+    contract_status: str,
+) -> None:
+    source = _synthetic_source(tmp_path)
+    evaluator = source / "engine-only/evaluators/evaluate.py"
+    evaluator.chmod(0o755)
+    output = (
+        "opaque output without contract"
+        if payload is None
+        else json.dumps(payload, sort_keys=True)
+    )
+    evaluator.write_text(
+        f"print({output!r})\nraise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    evaluator.chmod(0o555)
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "private-offline-package",
+    )
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+
+    report_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report",
+    )
+    report = json.loads(report_path.read_text(encoding="ascii"))
+
+    assert report["all_functional_passed"] is False
+    for task in report["tasks"]:
+        test = task["tests"][0]
+        assert test["exit_code"] == 0
+        assert test["passed"] is False
+        assert test["diagnostic"]["passed"] is False
+        assert test["diagnostic"]["diagnostic_category"] == (
+            "malformed_evaluator_output"
+        )
+        assert test["diagnostic"]["contract_status"] == contract_status
 
 
 def test_sealed_git_runtime_hides_host_repositories_and_configuration(
@@ -2544,6 +2739,7 @@ def test_functionally_passing_non_exact_candidate_scores_separately(
     evaluator.parent.chmod(0o700)
     evaluator.chmod(0o600)
     evaluator.write_text(
+        "import json\n"
         "from pathlib import Path\n"
         "import subprocess\n"
         "import sys\n"
@@ -2561,6 +2757,17 @@ def test_functionally_passing_non_exact_candidate_scores_separately(
         "  and str(relative).encode() in status.stdout\n"
         "  and (content == reference or content.startswith(b'alternative '))\n"
         ")\n"
+        "print(json.dumps({\n"
+        "  'schema_version': 1,\n"
+        "  'evaluation': 'functional',\n"
+        "  'task_id': task,\n"
+        "  'passed': passed,\n"
+        "  'hidden_tests_passed': passed,\n"
+        "  'visible_tests_passed': passed,\n"
+        "  'changed_path_match': status.returncode == 0,\n"
+        "  'hidden_runner': {'passed': passed},\n"
+        "  'visible_runner': {'passed': passed},\n"
+        "}, sort_keys=True))\n"
         "raise SystemExit(not passed)\n",
         encoding="utf-8",
     )

@@ -127,13 +127,37 @@ def _evaluation_package(
     copied = archives / "task-1.tar"
     shutil.copyfile(baseline_archive, copied)
     script = evaluators / "functional.py"
+    selected_script = script_content or (
+        "from pathlib import Path\n"
+        "raise SystemExit("
+        "Path('src/ready.txt').read_text() != 'ready\\n')\n"
+    )
+    if not selected_script.endswith("\n"):
+        selected_script += "\n"
+    indented_script = "".join(
+        f"    {line}" for line in selected_script.splitlines(keepends=True)
+    )
     script.write_text(
-        script_content
-        or (
-            "from pathlib import Path\n"
-            "raise SystemExit("
-            "Path('src/ready.txt').read_text() != 'ready\\n')\n"
-        ),
+        "import json\n"
+        "try:\n"
+        f"{indented_script}"
+        "except SystemExit as error:\n"
+        "    code = error.code if isinstance(error.code, int) else 1\n"
+        "else:\n"
+        "    code = 0\n"
+        "passed = code == 0\n"
+        "print(json.dumps({\n"
+        "    'schema_version': 1,\n"
+        "    'evaluation': 'functional',\n"
+        "    'task_id': 'replay-task-1',\n"
+        "    'passed': passed,\n"
+        "    'hidden_tests_passed': passed,\n"
+        "    'visible_tests_passed': passed,\n"
+        "    'changed_path_match': True,\n"
+        "    'hidden_runner': {'passed': passed},\n"
+        "    'visible_runner': {'passed': passed},\n"
+        "}, sort_keys=True))\n"
+        "raise SystemExit(code)\n",
         encoding="utf-8",
     )
     candidate_record = json.loads(

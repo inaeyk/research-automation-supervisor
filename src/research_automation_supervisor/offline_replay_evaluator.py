@@ -30,8 +30,9 @@ from research_automation_supervisor.offline_evaluation_package import (
 CONFIG_RELATIVE_PATH = Path("evaluation-config/offline-evaluation.json")
 REPORT_NAME = "historical-replay-report.json"
 SCHEMA_VERSION = 1
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
 MAX_CAPTURE_BYTES = 1_048_576
+MAX_CONTRACT_TAIL_BYTES = 131_072
 _BUBBLEWRAP = Path("/usr/bin/bwrap")
 _GIT = Path("/usr/bin/git")
 _PYTHON = Path("/usr/bin/python3").resolve(strict=True)
@@ -88,49 +89,6 @@ _SAFE_DIAGNOSTIC_ERRNOS = {
         errno.ENOEXEC,
         errno.EPERM,
     )
-}
-_DIAGNOSTIC_SIGNATURES = {
-    "changed_path_failure": (
-        b"changed path mismatch",
-        b"changed paths differ",
-        b"unexpected changed path",
-    ),
-    "compile_failure": (
-        b"cc1plus:",
-        b"compilation failed",
-        b"compilation terminated",
-        b"compile failed",
-        b"g++: error:",
-    ),
-    "evaluator_runtime_failure": (
-        b"runtimeerror",
-        b"traceback (most recent call last)",
-    ),
-    "functional_assertion_or_mismatch": (
-        b"assertion failed",
-        b"assertionerror",
-        b"functional mismatch",
-        b"mismatch detected",
-        b"tests failed",
-        b"the following tests failed",
-    ),
-    "link_failure": (
-        b"collect2: error:",
-        b"ld returned",
-        b"link failed",
-        b"linker command failed",
-        b"undefined reference",
-    ),
-    "missing_runtime_dependency": (
-        b"command not found",
-        b"filenotfounderror",
-        b"no such file or directory",
-    ),
-    "sandbox_or_permission_failure": (
-        b"operation not permitted",
-        b"permission denied",
-        b"permissionerror",
-    ),
 }
 
 
@@ -744,7 +702,7 @@ def _run_test(
         "script": script_relative,
         "script_sha256": raw["script_sha256"],
         "arguments": list(canonical_arguments),
-        "passed": not timed_out and return_code == 0,
+        "passed": diagnostic["passed"] is True,
         "exit_code": return_code,
         "timed_out": timed_out,
         "stdout_sha256": stdout["captured_prefix_sha256"],
@@ -777,6 +735,7 @@ def _bounded_stream_record(
     stream.seek(0)
     digest = hashlib.sha256()
     prefix = bytearray()
+    contract_tail = bytearray()
     observed_length = 0
     while True:
         chunk = stream.read(65_536)
@@ -786,6 +745,9 @@ def _bounded_stream_record(
         observed_length += len(chunk)
         if len(prefix) < limit:
             prefix.extend(chunk[: limit - len(prefix)])
+        contract_tail.extend(chunk)
+        if len(contract_tail) > MAX_CONTRACT_TAIL_BYTES:
+            del contract_tail[:-MAX_CONTRACT_TAIL_BYTES]
     captured = bytes(prefix)
     return {
         "captured_prefix": captured,
@@ -794,6 +756,10 @@ def _bounded_stream_record(
         "observed_sha256": digest.hexdigest(),
         "observed_byte_length": observed_length,
         "truncated": observed_length > len(captured),
+        "contract_tail": bytes(contract_tail),
+        "contract_tail_truncated": (
+            observed_length > len(contract_tail)
+        ),
     }
 
 
@@ -865,10 +831,6 @@ def _classify_test_diagnostic(
     stdout: Mapping[str, object],
     stderr: Mapping[str, object],
 ) -> dict[str, object]:
-    stdout_bytes = stdout["captured_prefix"]
-    stderr_bytes = stderr["captured_prefix"]
-    assert isinstance(stdout_bytes, bytes)
-    assert isinstance(stderr_bytes, bytes)
     stdout_length = stdout["observed_byte_length"]
     stderr_length = stderr["observed_byte_length"]
     assert isinstance(stdout_length, int)
@@ -881,67 +843,110 @@ def _classify_test_diagnostic(
         signals.add("stdout_truncated")
     if stderr["truncated"] is True:
         signals.add("stderr_truncated")
+    contract_status, contract = _historical_functional_contract(stdout)
+    hidden_passed: bool | None = None
+    visible_passed: bool | None = None
+    changed_path_match: bool | None = None
+    check_identifier = "evaluator_process"
     if timed_out:
         category = "evaluator_runtime_failure"
         signals.update({"exit_unavailable", "timeout"})
-    elif return_code == 0:
-        category = "passed"
-        signals.add("exit_zero")
-    else:
-        signals.add("exit_nonzero")
-        malformed = b"\x00" in stdout_bytes or b"\x00" in stderr_bytes
-        truncated_decode_failure = False
-        decoded_streams: list[str] = []
-        for raw_bytes, record in (
-            (stdout_bytes, stdout),
-            (stderr_bytes, stderr),
-        ):
-            try:
-                decoded_streams.append(
-                    raw_bytes.decode("utf-8", errors="strict")
-                )
-            except UnicodeDecodeError:
-                decoded_streams.append("")
-                if record["truncated"] is True:
-                    truncated_decode_failure = True
-                else:
-                    malformed = True
-        if malformed:
-            category = "malformed_evaluator_output"
-            signals.add("malformed_or_binary_output")
-        elif truncated_decode_failure:
-            category = "unknown_nonzero_exit"
-            signals.add("truncated_unclassifiable_output")
+    elif contract_status == "parsed":
+        assert contract is not None
+        hidden_passed = contract["hidden_tests_passed"]
+        visible_passed = contract["visible_tests_passed"]
+        changed_path_match = contract["changed_path_match"]
+        assert isinstance(hidden_passed, bool)
+        assert isinstance(visible_passed, bool)
+        assert isinstance(changed_path_match, bool)
+        contract_passed = contract["passed"]
+        assert isinstance(contract_passed, bool)
+        signals.add("historical_functional_contract_v1")
+        if return_code == 0:
+            signals.add("exit_zero")
         else:
-            normalized = "\n".join(decoded_streams).casefold().encode(
-                "utf-8"
-            )
-            matches = {
-                candidate
-                for candidate, signatures in _DIAGNOSTIC_SIGNATURES.items()
-                if any(signature in normalized for signature in signatures)
+            signals.add("exit_nonzero")
+        if contract_passed != (return_code == 0):
+            category = "malformed_evaluator_output"
+            signals.add("contract_exit_inconsistent")
+        elif contract_passed:
+            category = "passed"
+            check_identifier = "all_checks"
+            signals.add("contract_passed")
+        else:
+            failed_checks = {
+                name
+                for name, passed in (
+                    ("hidden_acceptance", hidden_passed),
+                    ("visible_acceptance", visible_passed),
+                    ("changed_paths", changed_path_match),
+                )
+                if not passed
             }
-            if (
-                "evaluator_runtime_failure" in matches
-                and len(matches) > 1
+            signals.update(f"{name}_failed" for name in failed_checks)
+            if failed_checks == {"changed_paths"}:
+                category = "changed_path_failure"
+                check_identifier = "changed_paths"
+            elif (
+                "changed_paths" not in failed_checks
+                and failed_checks
+                <= {"hidden_acceptance", "visible_acceptance"}
             ):
-                matches.remove("evaluator_runtime_failure")
-            signals.update(f"{match}_signature" for match in matches)
-            if (
-                stdout["truncated"] is True
-                or stderr["truncated"] is True
-            ):
-                category = "unknown_nonzero_exit"
-                signals.add("truncated_unclassifiable_output")
-            elif len(matches) == 1:
-                category = next(iter(matches))
-            elif len(matches) > 1:
-                category = "unknown_nonzero_exit"
-                signals.add("ambiguous_failure_signatures")
+                category = "functional_check_failure"
+                check_identifier = (
+                    next(iter(failed_checks))
+                    if len(failed_checks) == 1
+                    else "hidden_and_visible_acceptance"
+                )
             else:
                 category = "unknown_nonzero_exit"
-                signals.add("no_allowlisted_failure_signature")
+                check_identifier = "multiple_checks"
+                signals.add("multiple_contract_failures")
+    elif contract_status == "malformed":
+        category = "malformed_evaluator_output"
+        signals.add("malformed_historical_functional_contract")
+        signals.add("exit_zero" if return_code == 0 else "exit_nonzero")
+    else:
+        signals.add("historical_functional_contract_absent")
+        signals.add("exit_zero" if return_code == 0 else "exit_nonzero")
+        safe_stderr = json.loads(
+            _diagnostic_artifact_bytes("stderr", stderr)
+        )["python_exception"]
+        if return_code == 0:
+            category = "malformed_evaluator_output"
+            signals.add("missing_required_contract")
+        elif isinstance(safe_stderr, dict):
+            exception_type = safe_stderr.get("type")
+            error_number = safe_stderr.get("errno")
+            if (
+                exception_type == "FileNotFoundError"
+                or error_number in {errno.ENOENT, errno.ENOEXEC}
+            ):
+                category = "missing_runtime_dependency"
+                signals.add("allowlisted_missing_dependency_exception")
+            elif (
+                exception_type == "PermissionError"
+                or error_number in {errno.EACCES, errno.EPERM}
+            ):
+                category = "sandbox_or_permission_failure"
+                signals.add("allowlisted_permission_exception")
+            else:
+                category = "evaluator_runtime_failure"
+                signals.add("allowlisted_runtime_exception")
+        else:
+            category = "unknown_nonzero_exit"
+            signals.add("no_allowlisted_failure_contract")
     return {
+        "schema_version": 1,
+        "output_contract": "historical-functional-json-v1",
+        "contract_status": contract_status,
+        "evaluation_phase": "functional",
+        "check_identifier": check_identifier,
+        "failure_category": category,
+        "passed": category == "passed",
+        "hidden_tests_passed": hidden_passed,
+        "visible_tests_passed": visible_passed,
+        "changed_path_match": changed_path_match,
         "diagnostic_category": category,
         "diagnostic_signals": sorted(signals),
         "stdout_observed_byte_length": stdout["observed_byte_length"],
@@ -950,6 +955,84 @@ def _classify_test_diagnostic(
         "stderr_observed_sha256": stderr["observed_sha256"],
         "process_exit_code": return_code,
         "timed_out": timed_out,
+    }
+
+
+def _historical_functional_contract(
+    stdout: Mapping[str, object],
+) -> tuple[str, dict[str, bool] | None]:
+    tail = stdout["contract_tail"]
+    assert isinstance(tail, bytes)
+    if b"\x00" in tail:
+        return "malformed", None
+    try:
+        text = tail.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return "malformed", None
+    lines = text.splitlines()
+    if not lines:
+        return "absent", None
+    final_line = lines[-1]
+    try:
+        value = json.loads(final_line)
+    except json.JSONDecodeError:
+        return (
+            ("malformed", None)
+            if final_line.lstrip().startswith(("{", "["))
+            else ("absent", None)
+        )
+    if not isinstance(value, dict):
+        return "malformed", None
+    required = {
+        "schema_version",
+        "evaluation",
+        "task_id",
+        "passed",
+        "hidden_tests_passed",
+        "visible_tests_passed",
+        "changed_path_match",
+        "hidden_runner",
+        "visible_runner",
+    }
+    if (
+        not required <= set(value)
+        or value.get("schema_version") != 1
+        or value.get("evaluation") != "functional"
+        or not isinstance(value.get("task_id"), str)
+        or not value["task_id"]
+        or not all(
+            isinstance(value.get(field), bool)
+            for field in (
+                "passed",
+                "hidden_tests_passed",
+                "visible_tests_passed",
+                "changed_path_match",
+            )
+        )
+    ):
+        return "malformed", None
+    hidden_runner = value["hidden_runner"]
+    visible_runner = value["visible_runner"]
+    if (
+        not isinstance(hidden_runner, dict)
+        or not isinstance(visible_runner, dict)
+        or not isinstance(hidden_runner.get("passed"), bool)
+        or not isinstance(visible_runner.get("passed"), bool)
+        or hidden_runner["passed"] != value["hidden_tests_passed"]
+        or visible_runner["passed"] != value["visible_tests_passed"]
+        or value["passed"]
+        != (
+            value["hidden_tests_passed"]
+            and value["visible_tests_passed"]
+            and value["changed_path_match"]
+        )
+    ):
+        return "malformed", None
+    return "parsed", {
+        "passed": value["passed"],
+        "hidden_tests_passed": value["hidden_tests_passed"],
+        "visible_tests_passed": value["visible_tests_passed"],
+        "changed_path_match": value["changed_path_match"],
     }
 
 
