@@ -30,9 +30,10 @@ from research_automation_supervisor.offline_evaluation_package import (
 CONFIG_RELATIVE_PATH = Path("evaluation-config/offline-evaluation.json")
 REPORT_NAME = "historical-replay-report.json"
 SCHEMA_VERSION = 1
-REPORT_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 5
 MAX_CAPTURE_BYTES = 1_048_576
 MAX_CONTRACT_TAIL_BYTES = 131_072
+ENVIRONMENT_QUALIFICATION_TIMEOUT_SECONDS = 300
 _BUBBLEWRAP = Path("/usr/bin/bwrap")
 _GIT = Path("/usr/bin/git")
 _PYTHON = Path("/usr/bin/python3").resolve(strict=True)
@@ -42,13 +43,40 @@ _MAKE = Path("/usr/bin/make").resolve(strict=True)
 _ASSEMBLER = Path("/usr/bin/as").resolve(strict=True)
 _LINKER = Path("/usr/bin/ld").resolve(strict=True)
 _SHELL = Path("/bin/sh").resolve(strict=True)
+_CSH = Path("/bin/csh").resolve(strict=True)
+_AWK = Path("/usr/bin/awk").resolve(strict=True)
+_SED = Path("/usr/bin/sed").resolve(strict=True)
+_TR = Path("/usr/bin/tr").resolve(strict=True)
+_UNAME = Path("/usr/bin/uname").resolve(strict=True)
+_MKDIR = Path("/usr/bin/mkdir").resolve(strict=True)
+_TOUCH = Path("/usr/bin/touch").resolve(strict=True)
+_PERL = Path("/usr/bin/perl").resolve(strict=True)
 _DYNAMIC_LOADER = Path("/lib64/ld-linux-x86-64.so.2").resolve(strict=True)
 _SYSTEM_RUNTIME_DIRECTORIES = (
     Path("/usr/include"),
     Path("/usr/lib/python3.14"),
     Path("/usr/lib/x86_64-linux-gnu"),
     Path("/usr/lib/gcc"),
-    Path("/usr/libexec/gcc"),
+)
+_COMPILER_RUNTIME_FILES = tuple(
+    Path("/usr/libexec/gcc/x86_64-linux-gnu/15", name).resolve(strict=True)
+    for name in (
+        "cc1plus",
+        "collect2",
+        "f951",
+        "liblto_plugin.so",
+        "lto-wrapper",
+        "lto1",
+    )
+)
+_MASKED_RUNTIME_DIRECTORIES = (
+    Path("/usr/lib/python3.14/config-3.14-x86_64-linux-gnu"),
+    Path("/usr/lib/python3.14/test"),
+    Path("/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0"),
+    Path("/usr/lib/x86_64-linux-gnu/glib-2.0"),
+    Path("/usr/lib/x86_64-linux-gnu/gstreamer1.0"),
+    Path("/usr/lib/x86_64-linux-gnu/libgtk-3-0t64"),
+    Path("/usr/lib/x86_64-linux-gnu/nodejs"),
 )
 _GIT_ENVIRONMENT = {
     "GIT_ASKPASS": "/nonexistent",
@@ -64,6 +92,14 @@ _GIT_ENVIRONMENT = {
     "SSH_ASKPASS": "/nonexistent",
     "XDG_CONFIG_HOME": "/tmp/home/.config",
 }
+_QUALIFIED_DEPENDENCY_NAMESPACES = {
+    "chombo-dependency": Path(
+        "/home/inaeyk/researchrepo/GL-with-AI/external/Chombo"
+    ),
+    "grchombo-dependency": Path(
+        "/home/inaeyk/researchrepo/GL-with-AI/external/GRChombo"
+    ),
+}
 _SAFE_DIAGNOSTIC_EXCEPTION_TYPES = {
     "CalledProcessError",
     "FileNotFoundError",
@@ -74,11 +110,19 @@ _SAFE_DIAGNOSTIC_EXCEPTION_TYPES = {
 }
 _SAFE_DIAGNOSTIC_EXECUTABLES = {
     "/usr/bin/as",
+    "/usr/bin/awk",
+    "/usr/bin/csh",
     "/usr/bin/g++",
     "/usr/bin/git",
     "/usr/bin/ld",
     "/usr/bin/make",
+    "/usr/bin/mkdir",
+    "/usr/bin/perl",
     "/usr/bin/python3",
+    "/usr/bin/sed",
+    "/usr/bin/touch",
+    "/usr/bin/tr",
+    "/usr/bin/uname",
     "/usr/bin/x86_64-linux-gnu-gfortran-15",
 }
 _SAFE_DIAGNOSTIC_ERRNOS = {
@@ -213,26 +257,49 @@ def _evaluate_pinned_authority(
             raise OfflineEvaluationError(
                 "evaluation task order does not match the candidate"
             )
-        runtime_mounts = _runtime_dependency_mounts(
-            config.get("runtime"),
-            package_root,
-        )
         results: list[dict[str, object]] = []
         artifacts: dict[str, bytes] = {}
         scratch = temporary_root / "scratch"
         scratch.mkdir()
-        for raw_task in raw_tasks:
-            assert isinstance(raw_task, dict)
-            results.append(
-                _evaluate_task(
-                    raw_task,
-                    candidate_tasks[_task_id(raw_task)],
-                    candidate_root,
-                    package_root,
-                    scratch,
-                    runtime_mounts,
-                    artifacts,
+        try:
+            runtime_mounts = _runtime_dependency_mounts(
+                config.get("runtime"),
+                package_root,
+            )
+        except OfflineEvaluationError:
+            runtime_mounts = ()
+            environment_qualification = _environment_qualification_failure(
+                "runtime_topology_invalid",
+            )
+        else:
+            environment_qualification = _qualify_environment(
+                config.get("runtime"),
+                package_root,
+                scratch,
+                runtime_mounts,
+                artifacts,
+            )
+        environment_qualified = (
+            environment_qualification["passed"] is True
+        )
+        if environment_qualified:
+            for raw_task in raw_tasks:
+                assert isinstance(raw_task, dict)
+                results.append(
+                    _evaluate_task(
+                        raw_task,
+                        candidate_tasks[_task_id(raw_task)],
+                        candidate_root,
+                        package_root,
+                        scratch,
+                        runtime_mounts,
+                        artifacts,
+                    )
                 )
+        else:
+            results.extend(
+                _infrastructure_failure_task(raw_task)
+                for raw_task in raw_tasks
             )
         functional_passed_tasks = sum(
             result["functional_passed"] is True for result in results
@@ -245,8 +312,16 @@ def _evaluate_pinned_authority(
             for result in results
         )
         total_tasks = len(results)
-        all_functional_passed = functional_passed_tasks == total_tasks
-        all_exact_matched = exact_match_tasks == total_tasks
+        all_functional_passed: bool | None = (
+            functional_passed_tasks == total_tasks
+            if environment_qualified
+            else None
+        )
+        all_exact_matched: bool | None = (
+            exact_match_tasks == total_tasks
+            if environment_qualified
+            else None
+        )
         report: dict[str, object] = {
             "schema_version": REPORT_SCHEMA_VERSION,
             "package_id": config["package_id"],
@@ -257,14 +332,21 @@ def _evaluate_pinned_authority(
             "evaluation_package_manifest_sha256": package_manifest[
                 "package_manifest_sha256"
             ],
-            "passed": all_functional_passed,
+            "evaluation_status": (
+                "completed"
+                if environment_qualified
+                else "evaluator_infrastructure_failure"
+            ),
+            "environment_qualification": environment_qualification,
+            "passed": all_functional_passed is True,
             "functional_passed_tasks": functional_passed_tasks,
             "exact_match_tasks": exact_match_tasks,
             "total_tasks": total_tasks,
             "all_functional_passed": all_functional_passed,
             "all_exact_matched": all_exact_matched,
             "strict_combined_passed": (
-                all_functional_passed and all_exact_matched
+                all_functional_passed is True
+                and all_exact_matched is True
             ),
             "tasks": results,
             "score": {
@@ -452,6 +534,8 @@ def _evaluate_task(
     strict_combined_passed = functional_passed and exact_match is not False
     return {
         "task_id": task_id,
+        "evaluation_status": "completed",
+        "infrastructure_failure": False,
         "passed": functional_passed,
         "changed_paths": list(changed_paths),
         "changed_paths_passed": changed_paths_passed,
@@ -463,6 +547,27 @@ def _evaluate_task(
         "strict_combined_passed": strict_combined_passed,
         "tests": tests,
         "exact_comparison": exact_result,
+    }
+
+
+def _infrastructure_failure_task(raw: object) -> dict[str, object]:
+    task_id = _task_id(raw)
+    return {
+        "task_id": task_id,
+        "evaluation_status": "evaluator_infrastructure_failure",
+        "infrastructure_failure": True,
+        "failure_category": "evaluator_infrastructure_failure",
+        "passed": False,
+        "changed_paths": [],
+        "changed_paths_passed": None,
+        "functional_tests_passed": None,
+        "production_profile": None,
+        "production_profile_passed": None,
+        "functional_passed": None,
+        "exact_match": None,
+        "strict_combined_passed": False,
+        "tests": [],
+        "exact_comparison": None,
     }
 
 
@@ -725,6 +830,390 @@ def _run_test(
         "stderr_truncated": stderr["truncated"],
         "diagnostic": diagnostic,
     }
+
+
+def _qualify_environment(
+    runtime: object,
+    package_root: Path,
+    scratch: Path,
+    runtime_mounts: tuple[tuple[Path, Path], ...],
+    artifacts: dict[str, bytes],
+) -> dict[str, object]:
+    if (
+        runtime is None
+        or not isinstance(runtime, dict)
+        or runtime.get("profile") != "gl_historical_replay_v2"
+    ):
+        return {
+            "schema_version": 1,
+            "profile": "not_required_for_nonproduction_package",
+            "status": "not_required",
+            "passed": True,
+            "failure_category": None,
+            "failure_reason": None,
+            "process_exit_code": None,
+            "timed_out": False,
+            "stdout_observed_sha256": hashlib.sha256(b"").hexdigest(),
+            "stderr_observed_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_observed_byte_length": 0,
+            "stderr_observed_byte_length": 0,
+            "stdout_artifact": None,
+            "stderr_artifact": None,
+            "stdout_artifact_sha256": None,
+            "stderr_artifact_sha256": None,
+        }
+    if runtime.get("qualification") != {
+        "profile": "cell_storage_visible_v1"
+    }:
+        return _environment_qualification_failure(
+            "qualification_profile_invalid",
+        )
+    try:
+        return _execute_environment_qualification(
+            package_root,
+            scratch,
+            runtime_mounts,
+            artifacts,
+        )
+    except (OSError, OfflineEvaluationError, subprocess.SubprocessError):
+        return _environment_qualification_failure(
+            "qualification_setup_failed",
+        )
+
+
+def _execute_environment_qualification(
+    package_root: Path,
+    scratch: Path,
+    runtime_mounts: tuple[tuple[Path, Path], ...],
+    artifacts: dict[str, bytes],
+) -> dict[str, object]:
+    by_name = {
+        destination.name: (source, destination)
+        for source, destination in runtime_mounts
+    }
+    if set(by_name) != {"Chombo", "GRChombo"}:
+        return _environment_qualification_failure(
+            "runtime_topology_invalid",
+        )
+    chombo_source, chombo = by_name["Chombo"]
+    grchombo_source, grchombo = by_name["GRChombo"]
+    if (
+        chombo.parent != grchombo.parent
+        or chombo.name != "Chombo"
+        or grchombo.name != "GRChombo"
+        or chombo
+        != _QUALIFIED_DEPENDENCY_NAMESPACES["chombo-dependency"]
+        or grchombo
+        != _QUALIFIED_DEPENDENCY_NAMESPACES["grchombo-dependency"]
+    ):
+        return _environment_qualification_failure(
+            "runtime_topology_invalid",
+        )
+    qualification_workspace = scratch / "environment-qualification"
+    qualification_workspace.mkdir()
+    host_sentinel = scratch / "qualification-host-only"
+    host_sentinel.write_bytes(b"must not enter the namespace\n")
+    (qualification_workspace / "UserVariables.hpp").write_text(
+        "#ifndef OFFLINE_QUALIFICATION_USER_VARIABLES_HPP\n"
+        "#define OFFLINE_QUALIFICATION_USER_VARIABLES_HPP\n"
+        "inline constexpr int NUM_VARS = 1;\n"
+        "#endif\n",
+        encoding="ascii",
+    )
+    (qualification_workspace / "CellStorageEnvironmentQualification.cpp").write_text(
+        _qualification_cpp_source(),
+        encoding="ascii",
+    )
+    (qualification_workspace / "GNUmakefile").write_text(
+        "CHOMBO_HOME ?= "
+        f"{chombo.as_posix()}/lib\n"
+        "GRCHOMBO_SOURCE ?= "
+        f"{grchombo.as_posix()}/Source\n"
+        "ebase := CellStorageEnvironmentQualification\n"
+        "LibNames := BoxTools\n"
+        "src_dirs :=\n"
+        "include $(CHOMBO_HOME)/mk/Make.test\n",
+        encoding="ascii",
+    )
+    source_pairs = (
+        (
+            (
+                Path("/evaluation")
+                / chombo_source.relative_to(package_root)
+                / "lib/mk/Make.test"
+            ).as_posix(),
+            (chombo / "lib/mk/Make.test").as_posix(),
+        ),
+        (
+            (
+                Path("/evaluation")
+                / chombo_source.relative_to(package_root)
+                / "lib/libboxtools"
+                "2d_ch.Linux.64.g++.x86_64-linux-gnu-gfortran-15"
+                ".OPT.OPENMPCC.a"
+            ).as_posix(),
+            (
+                chombo
+                / "lib/libboxtools"
+                "2d_ch.Linux.64.g++.x86_64-linux-gnu-gfortran-15"
+                ".OPT.OPENMPCC.a"
+            ).as_posix(),
+        ),
+        (
+            (
+                Path("/evaluation")
+                / grchombo_source.relative_to(package_root)
+                / "Source/BoxUtils/Cell.hpp"
+            ).as_posix(),
+            (grchombo / "Source/BoxUtils/Cell.hpp").as_posix(),
+        ),
+    )
+    (qualification_workspace / "qualify.py").write_text(
+        _qualification_python_source(
+            chombo,
+            grchombo,
+            host_sentinel,
+            source_pairs,
+        ),
+        encoding="ascii",
+    )
+    git_scratch = scratch / "environment-qualification-git"
+    git_scratch.mkdir()
+    _initialize_ephemeral_git_baseline(
+        qualification_workspace,
+        git_scratch,
+        _git_tree_oid(qualification_workspace),
+    )
+    command = _offline_bubblewrap_command(
+        qualification_workspace,
+        package_root,
+        (
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-B",
+            "/workspace/qualify.py",
+        ),
+        runtime_mounts,
+    )
+    timed_out = False
+    with (
+        tempfile.TemporaryFile(dir=scratch) as stdout_file,
+        tempfile.TemporaryFile(dir=scratch) as stderr_file,
+    ):
+        process = subprocess.Popen(
+            command,
+            cwd=None,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            close_fds=True,
+            start_new_session=True,
+        )
+        try:
+            return_code: int | None = process.wait(
+                timeout=ENVIRONMENT_QUALIFICATION_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            return_code = None
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        stdout = _bounded_stream_record(stdout_file, 65_536)
+        stderr = _bounded_stream_record(stderr_file, 65_536)
+    stdout_artifact = "artifacts/environment-qualification.stdout"
+    stderr_artifact = "artifacts/environment-qualification.stderr"
+    stdout_artifact_bytes = _diagnostic_artifact_bytes("stdout", stdout)
+    stderr_artifact_bytes = _diagnostic_artifact_bytes("stderr", stderr)
+    artifacts[stdout_artifact] = stdout_artifact_bytes
+    artifacts[stderr_artifact] = stderr_artifact_bytes
+    passed = not timed_out and return_code == 0
+    return {
+        "schema_version": 1,
+        "profile": "cell_storage_visible_v1",
+        "status": "passed" if passed else "infrastructure_failure",
+        "passed": passed,
+        "failure_category": (
+            None if passed else "evaluator_infrastructure_failure"
+        ),
+        "failure_reason": (
+            None
+            if passed
+            else (
+                "qualification_timed_out"
+                if timed_out
+                else "qualification_process_failed"
+            )
+        ),
+        "process_exit_code": return_code,
+        "timed_out": timed_out,
+        "stdout_observed_sha256": stdout["observed_sha256"],
+        "stderr_observed_sha256": stderr["observed_sha256"],
+        "stdout_observed_byte_length": stdout["observed_byte_length"],
+        "stderr_observed_byte_length": stderr["observed_byte_length"],
+        "stdout_artifact": stdout_artifact,
+        "stderr_artifact": stderr_artifact,
+        "stdout_artifact_sha256": hashlib.sha256(
+            stdout_artifact_bytes
+        ).hexdigest(),
+        "stderr_artifact_sha256": hashlib.sha256(
+            stderr_artifact_bytes
+        ).hexdigest(),
+    }
+
+
+def _environment_qualification_failure(reason: str) -> dict[str, object]:
+    allowed_reasons = {
+        "qualification_process_failed",
+        "qualification_profile_invalid",
+        "qualification_setup_failed",
+        "qualification_timed_out",
+        "runtime_topology_invalid",
+    }
+    if reason not in allowed_reasons:
+        raise OfflineEvaluationError(
+            "environment qualification failure category is invalid"
+        )
+    return {
+        "schema_version": 1,
+        "profile": "cell_storage_visible_v1",
+        "status": "infrastructure_failure",
+        "passed": False,
+        "failure_category": "evaluator_infrastructure_failure",
+        "failure_reason": reason,
+        "process_exit_code": None,
+        "timed_out": reason == "qualification_timed_out",
+        "stdout_observed_sha256": hashlib.sha256(b"").hexdigest(),
+        "stderr_observed_sha256": hashlib.sha256(b"").hexdigest(),
+        "stdout_observed_byte_length": 0,
+        "stderr_observed_byte_length": 0,
+        "stdout_artifact": None,
+        "stderr_artifact": None,
+        "stdout_artifact_sha256": None,
+        "stderr_artifact_sha256": None,
+    }
+
+
+def _qualification_cpp_source() -> str:
+    return (
+        '#include "FArrayBox.H"\n'
+        '#include "BoxPointers.hpp"\n'
+        '#include "Cell.hpp"\n'
+        "\n"
+        "int main()\n"
+        "{\n"
+        "    const IntVect point(D_DECL(2, 3, 0));\n"
+        "    const Box box(point, point);\n"
+        "    FArrayBox input(box, 1);\n"
+        "    FArrayBox output(box, 1);\n"
+        "    input.setVal(4.25);\n"
+        "    output.setVal(-1.0);\n"
+        "    BoxPointers pointers(input, output);\n"
+        "    Cell<double> cell(point, pointers);\n"
+        "    if (cell.load_vars(0) != 4.25)\n"
+        "        return 2;\n"
+        "    cell.store_vars(7.5, 0);\n"
+        "    return output(point, 0) == 7.5 ? 0 : 3;\n"
+        "}\n"
+    )
+
+
+def _qualification_python_source(
+    chombo: Path,
+    grchombo: Path,
+    host_sentinel: Path,
+    source_pairs: Sequence[tuple[str, str]],
+) -> str:
+    chombo_text = chombo.as_posix()
+    grchombo_text = grchombo.as_posix()
+    return (
+        "from pathlib import Path\n"
+        "import hashlib\n"
+        "import json\n"
+        "import os\n"
+        "import subprocess\n"
+        "\n"
+        f"chombo = Path({chombo_text!r})\n"
+        f"grchombo = Path({grchombo_text!r})\n"
+        f"host_sentinel = Path({host_sentinel.as_posix()!r})\n"
+        f"source_pairs = {tuple(source_pairs)!r}\n"
+        "tools = (\n"
+        "    '/bin/csh', '/bin/sh', '/usr/bin/awk', '/usr/bin/g++',\n"
+        "    '/usr/bin/make', '/usr/bin/mkdir', '/usr/bin/perl',\n"
+        "    '/usr/bin/sed', '/usr/bin/touch', '/usr/bin/tr',\n"
+        "    '/usr/bin/uname',\n"
+        "    '/usr/bin/x86_64-linux-gnu-gfortran-15',\n"
+        ")\n"
+        "libraries = (\n"
+        "    chombo / ('lib/libboxtools2d_ch.Linux.64.g++.'\n"
+        "              'x86_64-linux-gnu-gfortran-15.OPT.OPENMPCC.a'),\n"
+        "    chombo / ('lib/libbasetools2d_ch.Linux.64.g++.'\n"
+        "              'x86_64-linux-gnu-gfortran-15.OPT.OPENMPCC.a'),\n"
+        ")\n"
+        "try:\n"
+        "    assert grchombo.parent == chombo.parent\n"
+        "    assert grchombo.name == 'GRChombo' and chombo.name == 'Chombo'\n"
+        "    assert all(Path(tool).is_file() and os.access(tool, os.X_OK)\n"
+        "               for tool in tools)\n"
+        "    assert (grchombo / 'Source/BoxUtils/Cell.hpp').is_file()\n"
+        "    assert (chombo / 'lib/src/BoxTools/FArrayBox.H').is_file()\n"
+        "    assert (chombo / 'lib/mk/Make.test').is_file()\n"
+        "    assert (chombo / 'lib/mk/Make.defs.local').is_file()\n"
+        "    assert all(path.read_bytes()[:8] == b'!<arch>\\n'\n"
+        "               for path in libraries)\n"
+        "    for packaged, mounted in source_pairs:\n"
+        "        assert hashlib.sha256(Path(packaged).read_bytes()).digest() == (\n"
+        "            hashlib.sha256(Path(mounted).read_bytes()).digest()\n"
+        "        )\n"
+        "    try:\n"
+        "        with (chombo / 'lib/mk/Make.defs').open('ab') as stream:\n"
+        "            stream.write(b'forbidden')\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise RuntimeError('dependency mount is writable')\n"
+        "    assert not host_sentinel.exists()\n"
+        "    assert not Path('/home/inaeyk/.ssh').exists()\n"
+        "    assert not Path('/root').exists()\n"
+        "    assert not Path('/usr/bin/node').exists()\n"
+        "    assert not Path('/usr/local/bin/codex').exists()\n"
+        "    assert not Path('/usr/libexec/gcc/x86_64-linux-gnu/15/cc1').exists()\n"
+        "    assert not Path('/usr/libexec/gcc/x86_64-linux-gnu/15/'\n"
+        "                    'g++-mapper-server').exists()\n"
+        "    assert not Path('/usr/lib/x86_64-linux-gnu/gstreamer1.0/'\n"
+        "                    'gstreamer-1.0/gst-ptp-helper').exists()\n"
+        "    source = grchombo / 'Source'\n"
+        "    cppflags = ' '.join((\n"
+        "        f'-I{source / \"BoxUtils\"}',\n"
+        "        f'-I{source / \"utils\"}',\n"
+        "        f'-I{source / \"simd\"}',\n"
+        "        '-DGR_SPACEDIM=4', '-DDEFAULT_TENSOR_DIM=4',\n"
+        "    ))\n"
+        "    make = subprocess.run((\n"
+        "        '/usr/bin/make', '-s', '-j1', '-f', 'GNUmakefile', 'all',\n"
+        "        'DIM=2', 'DEBUG=FALSE',\n"
+        "        'FC=x86_64-linux-gnu-gfortran-15',\n"
+        "        f'CHOMBO_HOME={chombo / \"lib\"}',\n"
+        "        f'GRCHOMBO_SOURCE={source}',\n"
+        "        'XTRACXXFLAGS=-std=c++17 -O2 -Wall -Wextra -pedantic',\n"
+        "        f'XTRACPPFLAGS={cppflags}',\n"
+        "    ), cwd='/workspace', stdin=subprocess.DEVNULL,\n"
+        "       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)\n"
+        "    assert make.returncode == 0\n"
+        "    binaries = tuple(Path('/workspace').glob(\n"
+        "        'CellStorageEnvironmentQualification*.ex'))\n"
+        "    assert len(binaries) == 1\n"
+        "    executed = subprocess.run((str(binaries[0]),),\n"
+        "        cwd='/workspace', stdin=subprocess.DEVNULL,\n"
+        "        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)\n"
+        "    assert executed.returncode == 0\n"
+        "except Exception:\n"
+        "    raise SystemExit(1)\n"
+        "print(json.dumps({'profile': 'cell_storage_visible_v1',\n"
+        "                  'qualified': True}, sort_keys=True))\n"
+    )
 
 
 def _bounded_stream_record(
@@ -1101,6 +1590,14 @@ def _offline_bubblewrap_command(
         (_ASSEMBLER, "assembler"),
         (_LINKER, "linker"),
         (_SHELL, "POSIX shell"),
+        (_CSH, "C shell"),
+        (_AWK, "awk"),
+        (_SED, "sed"),
+        (_TR, "tr"),
+        (_UNAME, "uname"),
+        (_MKDIR, "mkdir"),
+        (_TOUCH, "touch"),
+        (_PERL, "Perl"),
         (_DYNAMIC_LOADER, "dynamic loader"),
     ):
         if (
@@ -1115,6 +1612,20 @@ def _offline_bubblewrap_command(
         if not directory.is_dir() or directory.is_symlink():
             raise OfflineEvaluationError(
                 "audited offline runtime directory is unavailable"
+            )
+    for component in _COMPILER_RUNTIME_FILES:
+        if (
+            not component.is_file()
+            or component.is_symlink()
+            or not os.access(component, os.X_OK)
+        ):
+            raise OfflineEvaluationError(
+                "audited compiler runtime component is unavailable"
+            )
+    for directory in _MASKED_RUNTIME_DIRECTORIES:
+        if not directory.is_dir() or directory.is_symlink():
+            raise OfflineEvaluationError(
+                "audited unrelated runtime directory is unavailable"
             )
     if not git_metadata.is_dir() or git_metadata.is_symlink():
         raise OfflineEvaluationError(
@@ -1153,6 +1664,12 @@ def _offline_bubblewrap_command(
         "--dir",
         "/usr/libexec",
         "--dir",
+        "/usr/libexec/gcc",
+        "--dir",
+        "/usr/libexec/gcc/x86_64-linux-gnu",
+        "--dir",
+        "/usr/libexec/gcc/x86_64-linux-gnu/15",
+        "--dir",
         "/usr/include",
         "--dir",
         "/usr/lib64",
@@ -1170,11 +1687,23 @@ def _offline_bubblewrap_command(
         (_ASSEMBLER, Path("/usr/bin/as")),
         (_LINKER, Path("/usr/bin/ld")),
         (_SHELL, Path("/bin/sh")),
+        (_CSH, Path("/bin/csh")),
+        (_AWK, Path("/usr/bin/awk")),
+        (_SED, Path("/usr/bin/sed")),
+        (_TR, Path("/usr/bin/tr")),
+        (_UNAME, Path("/usr/bin/uname")),
+        (_MKDIR, Path("/usr/bin/mkdir")),
+        (_TOUCH, Path("/usr/bin/touch")),
+        (_PERL, Path("/usr/bin/perl")),
         (_DYNAMIC_LOADER, Path("/lib64/ld-linux-x86-64.so.2")),
     ):
         command.extend(("--ro-bind", str(source), str(destination)))
     for directory in _SYSTEM_RUNTIME_DIRECTORIES:
         command.extend(("--ro-bind", str(directory), str(directory)))
+    for component in _COMPILER_RUNTIME_FILES:
+        command.extend(("--ro-bind", str(component), str(component)))
+    for directory in _MASKED_RUNTIME_DIRECTORIES:
+        command.extend(("--tmpfs", str(directory)))
     command.extend(
         (
             "--dev",
@@ -2057,22 +2586,32 @@ def _runtime_dependency_mounts(
 ) -> tuple[tuple[Path, Path], ...]:
     if value is None:
         return ()
-    if not isinstance(value, dict) or set(value) != {
-        "profile",
-        "dependency_roots",
-    }:
+    if not isinstance(value, dict):
         raise OfflineEvaluationError("offline runtime profile is invalid")
-    if value["profile"] != "gl_historical_replay_v1":
+    profile = value.get("profile")
+    if profile == "gl_historical_replay_v1":
+        expected_keys = {"profile", "dependency_roots"}
+    elif profile == "gl_historical_replay_v2":
+        expected_keys = {
+            "profile",
+            "dependency_roots",
+            "qualification",
+        }
+        if value.get("qualification") != {
+            "profile": "cell_storage_visible_v1"
+        }:
+            raise OfflineEvaluationError(
+                "offline runtime qualification is invalid"
+            )
+    else:
         raise OfflineEvaluationError("offline runtime profile is not registered")
+    if set(value) != expected_keys:
+        raise OfflineEvaluationError("offline runtime profile is invalid")
     raw_dependencies = value["dependency_roots"]
     if not isinstance(raw_dependencies, list):
         raise OfflineEvaluationError("offline dependency roots are invalid")
-    expected = {
-        "chombo-dependency": "Chombo",
-        "grchombo-dependency": "GRChombo",
-    }
+    expected = _QUALIFIED_DEPENDENCY_NAMESPACES
     mounts: dict[str, tuple[Path, Path]] = {}
-    common_external_parent: Path | None = None
     for raw in raw_dependencies:
         if not isinstance(raw, dict) or set(raw) != {
             "role",
@@ -2107,8 +2646,7 @@ def _runtime_dependency_mounts(
         if (
             not destination.is_absolute()
             or ".." in destination.parts
-            or destination.name != expected[role]
-            or destination.parent.name != "external"
+            or destination != expected[role]
             or any(
                 destination == reserved
                 or destination.is_relative_to(reserved)
@@ -2124,12 +2662,6 @@ def _runtime_dependency_mounts(
         ):
             raise OfflineEvaluationError(
                 "offline dependency namespace path is invalid"
-            )
-        if common_external_parent is None:
-            common_external_parent = destination.parent
-        elif destination.parent != common_external_parent:
-            raise OfflineEvaluationError(
-                "offline dependency namespace paths are inconsistent"
             )
         mounts[role] = (source, destination)
     if set(mounts) != set(expected):

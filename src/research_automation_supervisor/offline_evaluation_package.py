@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -33,6 +33,7 @@ import yaml  # type: ignore[import-untyped]
 PACKAGE_MANIFEST_NAME = "evaluation-package-manifest.json"
 PACKAGE_CONFIG_PATH = Path("evaluation-config/offline-evaluation.json")
 PACKAGE_SCHEMA_VERSION = 1
+PRODUCTION_PACKAGE_REVISION = 2
 TASK_IDS = (
     "reduced-vars-gp",
     "hidden-cleanup",
@@ -41,6 +42,33 @@ TASK_IDS = (
     "stage4ao-b",
 )
 _DEPENDENCY_NAMES = ("chombo-dependency", "grchombo-dependency")
+_QUALIFIED_DEPENDENCY_NAMESPACES = {
+    "chombo-dependency": (
+        "/home/inaeyk/researchrepo/GL-with-AI/external/Chombo"
+    ),
+    "grchombo-dependency": (
+        "/home/inaeyk/researchrepo/GL-with-AI/external/GRChombo"
+    ),
+}
+_CHOMBO_INSTALLATION_PATHS = (
+    "lib/mk/Make.defs.local",
+    (
+        "lib/mk/.check."
+        "2d_ch.Linux.64.g++.x86_64-linux-gnu-gfortran-15.OPT.OPENMPCC"
+    ),
+    (
+        "lib/libboxtools"
+        "2d_ch.Linux.64.g++.x86_64-linux-gnu-gfortran-15.OPT.OPENMPCC.a"
+    ),
+    (
+        "lib/libbasetools"
+        "2d_ch.Linux.64.g++.x86_64-linux-gnu-gfortran-15.OPT.OPENMPCC.a"
+    ),
+)
+_CHOMBO_CHECK_PATH = _CHOMBO_INSTALLATION_PATHS[1]
+_CHOMBO_ARCHIVE_PATHS = frozenset(_CHOMBO_INSTALLATION_PATHS[2:])
+_INSTALLATION_BASE_MTIME_NS = 1_000_000_000
+_INSTALLATION_CHECK_MTIME_NS = 2_000_000_000
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _MAX_GIT_SYMLINK_DEPTH = 40
 _GIT_ENV = {
@@ -77,6 +105,16 @@ class _DependencySource:
     commit: str
     tree: str
     namespace_path: str
+    installation_files: tuple[_DependencyInstallationFile, ...] = ()
+
+
+@dataclass(frozen=True)
+class _DependencyInstallationFile:
+    relative_path: str
+    source: Path
+    source_mode: int
+    source_sha256: str
+    runtime_mtime_ns: int
 
 
 @dataclass(frozen=True)
@@ -171,7 +209,10 @@ def _prepare_loaded_source(
         _write_json(provenance_path, provenance)
         config = {
             "schema_version": PACKAGE_SCHEMA_VERSION,
-            "package_id": f"{source.campaign_id}-offline-v1",
+            "package_id": (
+                f"{source.campaign_id}-offline-v"
+                f"{PRODUCTION_PACKAGE_REVISION}"
+            ),
             "runtime": runtime,
             "tasks": config_tasks,
         }
@@ -182,7 +223,10 @@ def _prepare_loaded_source(
         staging.chmod(0o700)
         manifest_payload = {
             "schema_version": PACKAGE_SCHEMA_VERSION,
-            "snapshot_id": f"{source.campaign_id}:offline-evaluation-v1",
+            "snapshot_id": (
+                f"{source.campaign_id}:offline-evaluation-v"
+                f"{PRODUCTION_PACKAGE_REVISION}"
+            ),
             "package_id": config["package_id"],
             "entries": _package_entries(staging),
         }
@@ -360,9 +404,13 @@ def _validate_production_package(
         or provenance.get("schema_version") != PACKAGE_SCHEMA_VERSION
         or not isinstance(campaign_id, str)
         or not campaign_id
-        or config.get("package_id") != f"{campaign_id}-offline-v1"
+        or config.get("package_id")
+        != f"{campaign_id}-offline-v{PRODUCTION_PACKAGE_REVISION}"
         or manifest.get("snapshot_id")
-        != f"{campaign_id}:offline-evaluation-v1"
+        != (
+            f"{campaign_id}:offline-evaluation-v"
+            f"{PRODUCTION_PACKAGE_REVISION}"
+        )
         or not all(
             _is_sha256(provenance.get(key))
             for key in (
@@ -499,6 +547,7 @@ def _validate_production_package(
     if not isinstance(runtime, dict) or set(runtime) != {
         "profile",
         "dependency_roots",
+        "qualification",
     }:
         raise EvaluationPackageError(
             "prepared historical dependency runtime is incomplete"
@@ -511,8 +560,10 @@ def _validate_production_package(
         provenance.get("dependencies"),
         "provenance dependencies",
     )
+    qualification = runtime.get("qualification")
     if (
-        runtime.get("profile") != "gl_historical_replay_v1"
+        runtime.get("profile") != "gl_historical_replay_v2"
+        or qualification != {"profile": "cell_storage_visible_v1"}
         or tuple(record.get("role") for record in dependency_records)
         != _DEPENDENCY_NAMES
         or tuple(record.get("name") for record in provenance_dependencies)
@@ -544,6 +595,7 @@ def _validate_production_package(
                 "source_commit_object_base64",
                 "materialized_tree",
                 "canonicalized_symlinks",
+                "installation_files",
             }
             or name != source_record.get("name")
             or dependency.get("source_commit")
@@ -566,8 +618,16 @@ def _validate_production_package(
             str(dependency["path"]),
             "dependency snapshot",
         )
+        installation_files = _validate_dependency_installation(
+            dependency_root,
+            source_record.get("installation_files"),
+            required=name == "chombo-dependency",
+        )
         if (
-            _git_tree_oid(dependency_root)
+            _git_tree_oid(
+                dependency_root,
+                excluded_paths=installation_files,
+            )
             != source_record["materialized_tree"]
         ):
             raise EvaluationPackageError(
@@ -598,6 +658,7 @@ def _validate_production_package(
             _git_tree_oid(
                 dependency_root,
                 original_symlinks=original_symlinks,
+                excluded_paths=installation_files,
             )
             != source_record["source_tree"]
         ):
@@ -1069,16 +1130,70 @@ def _load_dependencies(source_state: Mapping[str, object]) -> tuple[_DependencyS
         if _git(repository, "status", "--porcelain=v1", "--untracked-files=all"):
             raise EvaluationPackageError(f"{name} repository is contaminated")
         tree = _git(repository, "rev-parse", f"{commit}^{{tree}}")
+        installation_files = (
+            _load_chombo_installation_files(repository)
+            if name == "chombo-dependency"
+            else ()
+        )
         selected[name] = _DependencySource(
             name=name,
             repository=repository,
             commit=commit,
             tree=tree,
-            namespace_path=str(repository),
+            namespace_path=_QUALIFIED_DEPENDENCY_NAMESPACES[name],
+            installation_files=installation_files,
         )
     if tuple(sorted(selected)) != _DEPENDENCY_NAMES:
         raise EvaluationPackageError("historical dependency authority is incomplete")
     return tuple(selected[name] for name in _DEPENDENCY_NAMES)
+
+
+def _load_chombo_installation_files(
+    repository: Path,
+) -> tuple[_DependencyInstallationFile, ...]:
+    records: list[_DependencyInstallationFile] = []
+    for relative in _CHOMBO_INSTALLATION_PATHS:
+        source = _source_path(
+            repository,
+            relative,
+            "qualified Chombo installation file",
+        )
+        status = source.lstat()
+        if (
+            stat.S_ISLNK(status.st_mode)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+        ):
+            raise EvaluationPackageError(
+                "qualified Chombo installation file is unsafe"
+            )
+        content_sha256 = _sha256_file(source)
+        if relative in _CHOMBO_ARCHIVE_PATHS:
+            try:
+                with source.open("rb") as stream:
+                    archive_prefix = stream.read(8)
+            except OSError as exc:
+                raise EvaluationPackageError(
+                    "qualified Chombo prebuilt library is unavailable"
+                ) from exc
+            if archive_prefix != b"!<arch>\n":
+                raise EvaluationPackageError(
+                    "qualified Chombo prebuilt library is invalid"
+                )
+        records.append(
+            _DependencyInstallationFile(
+                relative_path=relative,
+                source=source,
+                source_mode=stat.S_IMODE(status.st_mode),
+                source_sha256=content_sha256,
+                runtime_mtime_ns=(
+                    _INSTALLATION_CHECK_MTIME_NS
+                    if relative == _CHOMBO_CHECK_PATH
+                    else _INSTALLATION_BASE_MTIME_NS
+                ),
+            )
+        )
+    return tuple(records)
 
 
 def _materialize_task(
@@ -1204,9 +1319,14 @@ def _materialize_dependencies(
         finally:
             os.close(repository_fd)
         materialized_tree = _git_tree_oid(destination)
+        installation_files = _materialize_dependency_installation(
+            dependency,
+            destination,
+        )
         materialization[dependency.name] = {
             "materialized_tree": materialized_tree,
             "canonicalized_symlinks": canonicalized_symlinks,
+            "installation_files": installation_files,
             "source_commit_object_base64": base64.b64encode(
                 commit_object
             ).decode("ascii"),
@@ -1222,11 +1342,56 @@ def _materialize_dependencies(
         )
     return (
         {
-            "profile": "gl_historical_replay_v1",
+            "profile": "gl_historical_replay_v2",
             "dependency_roots": records,
+            "qualification": {
+                "profile": "cell_storage_visible_v1",
+            },
         },
         materialization,
     )
+
+
+def _materialize_dependency_installation(
+    dependency: _DependencySource,
+    destination: Path,
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for installation_file in dependency.installation_files:
+        target = destination.joinpath(
+            *PurePosixPath(installation_file.relative_path).parts
+        )
+        if target.exists() or target.is_symlink():
+            raise EvaluationPackageError(
+                "qualified dependency installation overlaps its committed tree"
+            )
+        _copy_regular_file(installation_file.source, target)
+        if _sha256_file(target) != installation_file.source_sha256:
+            raise EvaluationPackageError(
+                "qualified dependency installation changed during packaging"
+            )
+        os.utime(
+            target,
+            ns=(
+                installation_file.runtime_mtime_ns,
+                installation_file.runtime_mtime_ns,
+            ),
+            follow_symlinks=False,
+        )
+        package_mode = (
+            0o500 if installation_file.source_mode & 0o111 else 0o400
+        )
+        records.append(
+            {
+                "path": installation_file.relative_path,
+                "source_mode": installation_file.source_mode,
+                "package_mode": package_mode,
+                "byte_length": target.stat().st_size,
+                "content_sha256": installation_file.source_sha256,
+                "runtime_mtime_ns": installation_file.runtime_mtime_ns,
+            }
+        )
+    return records
 
 
 def _provenance_record(
@@ -1267,6 +1432,9 @@ def _provenance_record(
                 "canonicalized_symlinks": dependency_materialization[
                     dependency.name
                 ]["canonicalized_symlinks"],
+                "installation_files": dependency_materialization[
+                    dependency.name
+                ]["installation_files"],
             }
             for dependency in source.dependencies
         ],
@@ -1373,6 +1541,14 @@ def _source_fingerprint(source: _SourceAuthority) -> str:
                 role=f"{dependency.name}_git",
             )
         )
+        for installation_file in dependency.installation_files:
+            records.append(
+                _source_file_record(
+                    dependency.repository,
+                    installation_file.source,
+                    expected_sha256=installation_file.source_sha256,
+                )
+            )
     return _sha256_json(records)
 
 
@@ -2163,11 +2339,21 @@ def _validate_package_configuration(
             )
     runtime = config.get("runtime")
     if runtime is not None:
-        if not isinstance(runtime, dict) or set(runtime) != {
-            "profile",
-            "dependency_roots",
-        }:
+        if (
+            not isinstance(runtime, dict)
+            or set(runtime)
+            not in (
+                {"profile", "dependency_roots"},
+                {"profile", "dependency_roots", "qualification"},
+            )
+        ):
             raise EvaluationPackageError("evaluation runtime is invalid")
+        if "qualification" in runtime and runtime["qualification"] != {
+            "profile": "cell_storage_visible_v1"
+        }:
+            raise EvaluationPackageError(
+                "evaluation runtime qualification is invalid"
+            )
         dependencies = _required_object_list(
             runtime.get("dependency_roots"),
             "dependency roots",
@@ -2179,6 +2365,92 @@ def _validate_package_configuration(
             path = _source_path(root, relative, "dependency root")
             if not path.is_dir() or path.is_symlink():
                 raise EvaluationPackageError("dependency root is not a directory")
+
+
+def _validate_dependency_installation(
+    dependency_root: Path,
+    value: object,
+    *,
+    required: bool,
+) -> frozenset[str]:
+    records = _required_object_list(
+        value,
+        "dependency installation files",
+    )
+    expected_keys = {
+        "path",
+        "source_mode",
+        "package_mode",
+        "byte_length",
+        "content_sha256",
+        "runtime_mtime_ns",
+    }
+    expected_paths = (
+        frozenset(_CHOMBO_INSTALLATION_PATHS) if required else frozenset()
+    )
+    seen: set[str] = set()
+    for record in records:
+        relative = record.get("path")
+        source_mode = record.get("source_mode")
+        package_mode = record.get("package_mode")
+        byte_length = record.get("byte_length")
+        content_sha256 = record.get("content_sha256")
+        runtime_mtime_ns = record.get("runtime_mtime_ns")
+        if (
+            set(record) != expected_keys
+            or not isinstance(relative, str)
+            or relative in seen
+            or not isinstance(source_mode, int)
+            or isinstance(source_mode, bool)
+            or source_mode < 0
+            or source_mode > 0o777
+            or package_mode
+            != (0o500 if source_mode & 0o111 else 0o400)
+            or not isinstance(byte_length, int)
+            or isinstance(byte_length, bool)
+            or byte_length < 0
+            or not _is_sha256(content_sha256)
+            or runtime_mtime_ns
+            != (
+                _INSTALLATION_CHECK_MTIME_NS
+                if relative == _CHOMBO_CHECK_PATH
+                else _INSTALLATION_BASE_MTIME_NS
+            )
+        ):
+            raise EvaluationPackageError(
+                "dependency installation provenance is invalid"
+            )
+        _relative_path(relative, "dependency installation file")
+        path = _source_path(
+            dependency_root,
+            relative,
+            "dependency installation file",
+        )
+        status = path.lstat()
+        if (
+            stat.S_ISLNK(status.st_mode)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+            or stat.S_IMODE(status.st_mode) != package_mode
+            or status.st_size != byte_length
+            or status.st_mtime_ns != runtime_mtime_ns
+            or _sha256_file(path) != content_sha256
+        ):
+            raise EvaluationPackageError(
+                "dependency installation file contradicts its provenance"
+            )
+        if relative in _CHOMBO_ARCHIVE_PATHS:
+            with path.open("rb") as stream:
+                if stream.read(8) != b"!<arch>\n":
+                    raise EvaluationPackageError(
+                        "dependency prebuilt library is invalid"
+                    )
+        seen.add(relative)
+    if seen != expected_paths:
+        raise EvaluationPackageError(
+            "qualified dependency installation is incomplete"
+        )
+    return frozenset(seen)
 
 
 def _validate_canonicalized_symlink_provenance(
@@ -2704,11 +2976,14 @@ def _git_tree_oid(
     root: Path,
     *,
     original_symlinks: Mapping[str, str] | None = None,
+    excluded_paths: Collection[str] = (),
 ) -> str:
     """Derive a Git tree identity from regular files without Git metadata."""
 
     replacements = dict(original_symlinks or {})
     seen_replacements: set[str] = set()
+    exclusions = set(excluded_paths)
+    seen_exclusions: set[str] = set()
 
     def object_oid(kind: bytes, content: bytes) -> bytes:
         header = kind + b" " + str(len(content)).encode("ascii") + b"\0"
@@ -2733,6 +3008,13 @@ def _git_tree_oid(
                     "packaged source tree contains an invalid name"
                 )
             status = child.lstat()
+            if relative in exclusions:
+                if not stat.S_ISREG(status.st_mode):
+                    raise EvaluationPackageError(
+                        "excluded packaged source path is not a regular file"
+                    )
+                seen_exclusions.add(relative)
+                continue
             if stat.S_ISDIR(status.st_mode):
                 if relative in replacements:
                     raise EvaluationPackageError(
@@ -2781,6 +3063,10 @@ def _git_tree_oid(
     if seen_replacements != set(replacements):
         raise EvaluationPackageError(
             "original symlink provenance contains an unknown path"
+        )
+    if seen_exclusions != exclusions:
+        raise EvaluationPackageError(
+            "excluded packaged source path is unknown"
         )
     return oid.hex()
 

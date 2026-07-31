@@ -292,25 +292,7 @@ def _synthetic_source(tmp_path: Path) -> Path:
         + "\n",
         encoding="utf-8",
     )
-    dependency_records: list[dict[str, object]] = []
-    for name, directory in (
-        ("chombo-dependency", "Chombo"),
-        ("grchombo-dependency", "GRChombo"),
-    ):
-        repository = root / "external" / directory
-        commit, _tree = _repository(
-            repository,
-            {f"include/{directory}.hpp": f"// synthetic {directory}\n"},
-        )
-        dependency_records.append(
-            {
-                "name": name,
-                "path": str(repository),
-                "head": commit,
-                "match_policy": "exact_snapshot",
-                "status": [],
-            }
-        )
+    dependency_records = _synthetic_dependencies(root)
     source_state = root / "engine-only/historical-audits/source-state.json"
     source_state.parent.mkdir(parents=True)
     source_state.write_text(
@@ -329,6 +311,165 @@ def _synthetic_source(tmp_path: Path) -> Path:
     runtime_state.parent.mkdir(parents=True)
     runtime_state.write_text('{"status":"preserved"}\n', encoding="utf-8")
     return root
+
+
+def _synthetic_dependencies(root: Path) -> list[dict[str, object]]:
+    chombo = root / "external/Chombo"
+    ignored = "\n".join(
+        f"/{relative}"
+        for relative in package_builder._CHOMBO_INSTALLATION_PATHS
+    )
+    chombo_commit, _tree = _repository(
+        chombo,
+        {
+            ".gitignore": ignored + "\n",
+            "lib/mk/Make.defs": "# synthetic committed definitions\n",
+            "lib/mk/Make.test": _synthetic_make_test(),
+            "lib/src/BoxTools/FArrayBox.H": _synthetic_farraybox_header(),
+            "lib/src/BaseTools/IntVect.H": (
+                '#include "../BoxTools/FArrayBox.H"\n'
+            ),
+        },
+    )
+    for relative in package_builder._CHOMBO_INSTALLATION_PATHS:
+        target = chombo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if relative in package_builder._CHOMBO_ARCHIVE_PATHS:
+            target.write_bytes(b"!<arch>\n")
+        elif relative == "lib/mk/Make.defs.local":
+            target.write_text(
+                "CXX = g++\n"
+                "FC = x86_64-linux-gnu-gfortran-15\n",
+                encoding="ascii",
+            )
+        else:
+            target.write_text("qualified\n", encoding="ascii")
+        target.chmod(0o644)
+    grchombo = root / "external/GRChombo"
+    grchombo_commit, _tree = _repository(
+        grchombo,
+        {
+            "Source/BoxUtils/BoxPointers.hpp": (
+                "#pragma once\n"
+                '#include "FArrayBox.H"\n'
+                '#include "UserVariables.hpp"\n'
+                "class BoxPointers {\n"
+                "  public:\n"
+                "    BoxPointers(const FArrayBox &input, FArrayBox &output)\n"
+                "      : in(input), out(output) {}\n"
+                "    const FArrayBox &in;\n"
+                "    FArrayBox &out;\n"
+                "};\n"
+            ),
+            "Source/BoxUtils/Cell.hpp": (
+                "#pragma once\n"
+                '#include "BoxPointers.hpp"\n'
+                "template <class data_t> class Cell {\n"
+                "  public:\n"
+                "    Cell(const IntVect point, const BoxPointers &pointers)\n"
+                "      : point_(point), pointers_(pointers) {}\n"
+                "    data_t load_vars(int component) const {\n"
+                "      return pointers_.in(point_, component);\n"
+                "    }\n"
+                "    void store_vars(const data_t &value, int component) const {\n"
+                "      pointers_.out(point_, component) = value;\n"
+                "    }\n"
+                "  private:\n"
+                "    IntVect point_;\n"
+                "    const BoxPointers &pointers_;\n"
+                "};\n"
+            ),
+            "Source/utils/synthetic.hpp": "// synthetic utils\n",
+            "Source/simd/synthetic.hpp": "// synthetic simd\n",
+        },
+    )
+    return [
+        {
+            "name": "chombo-dependency",
+            "path": str(chombo),
+            "head": chombo_commit,
+            "match_policy": "exact_snapshot",
+            "status": [],
+        },
+        {
+            "name": "grchombo-dependency",
+            "path": str(grchombo),
+            "head": grchombo_commit,
+            "match_policy": "exact_snapshot",
+            "status": [],
+        },
+    ]
+
+
+def _synthetic_make_test() -> str:
+    config = (
+        "2d_ch.Linux.64.g++.x86_64-linux-gnu-gfortran-15"
+        ".OPT.OPENMPCC"
+    )
+    return (
+        "include $(CHOMBO_HOME)/mk/Make.defs.local\n"
+        f"config := {config}\n"
+        "target := $(ebase)$(config).ex\n"
+        ".PHONY: all\n"
+        "all:\n"
+        "\t@/bin/csh -f -c 'exit 0'\n"
+        "\t@echo qualified | /usr/bin/awk 'NF { exit 0 }'\n"
+        "\t@echo qualified | /usr/bin/sed 's/qualified/qualified/' >/dev/null\n"
+        "\t@echo QUALIFIED | /usr/bin/tr A-Z a-z >/dev/null\n"
+        "\t@/usr/bin/uname -m >/dev/null\n"
+        "\t@/usr/bin/perl -e 'exit 0'\n"
+        "\t@$(FC) --version >/dev/null\n"
+        "\t@/usr/bin/mkdir -p o/$(config)\n"
+        "\t@/usr/bin/touch o/$(config)/.qualified\n"
+        "\t@$(CXX) $(XTRACXXFLAGS) -DCH_SPACEDIM=$(DIM) "
+        "$(XTRACPPFLAGS) -I. -I$(CHOMBO_HOME)/src/BoxTools "
+        "CellStorageEnvironmentQualification.cpp "
+        "$(CHOMBO_HOME)/libboxtools$(config).a "
+        "$(CHOMBO_HOME)/libbasetools$(config).a -o $(target)\n"
+    )
+
+
+def _synthetic_farraybox_header() -> str:
+    return (
+        "#ifndef SYNTHETIC_FARRAYBOX_H\n"
+        "#define SYNTHETIC_FARRAYBOX_H\n"
+        "#include <algorithm>\n"
+        "#include <vector>\n"
+        "#define D_DECL(a, b, c) a, b\n"
+        "class IntVect {\n"
+        "  public:\n"
+        "    IntVect(int x, int y) : values_{x, y} {}\n"
+        "    int operator[](int index) const { return values_[index]; }\n"
+        "  private:\n"
+        "    int values_[2];\n"
+        "};\n"
+        "class Box {\n"
+        "  public:\n"
+        "    Box(IntVect low, IntVect high) : low_(low), high_(high) {}\n"
+        "    const IntVect &low() const { return low_; }\n"
+        "  private:\n"
+        "    IntVect low_;\n"
+        "    IntVect high_;\n"
+        "};\n"
+        "class FArrayBox {\n"
+        "  public:\n"
+        "    FArrayBox(Box box, int components)\n"
+        "      : box_(box), values_(static_cast<unsigned>(components)) {}\n"
+        "    void setVal(double value) {\n"
+        "      std::fill(values_.begin(), values_.end(), value);\n"
+        "    }\n"
+        "    double operator()(const IntVect &, int component) const {\n"
+        "      return values_[static_cast<unsigned>(component)];\n"
+        "    }\n"
+        "    double &operator()(const IntVect &, int component) {\n"
+        "      return values_[static_cast<unsigned>(component)];\n"
+        "    }\n"
+        "  private:\n"
+        "    Box box_;\n"
+        "    std::vector<double> values_;\n"
+        "};\n"
+        "#endif\n"
+    )
 
 
 def _build_package(tmp_path: Path) -> tuple[Path, Path]:
@@ -1681,7 +1822,9 @@ def test_evaluator_accepts_valid_synthetic_five_task_package(
         "strict_combined_passed_tasks": 5,
         "total_tasks": 5,
     }
-    assert report["schema_version"] == 4
+    assert report["schema_version"] == 5
+    assert report["evaluation_status"] == "completed"
+    assert report["environment_qualification"]["passed"] is True
     assert report["all_functional_passed"] is True
     assert report["all_exact_matched"] is True
     assert all(task["changed_paths_passed"] for task in report["tasks"])
@@ -1747,6 +1890,197 @@ def test_evaluator_accepts_valid_synthetic_five_task_package(
     assert (package / package_builder.PACKAGE_MANIFEST_NAME).read_bytes() == (
         package_manifest
     )
+
+
+def test_cell_storage_environment_qualification_uses_exact_production_namespace(
+    tmp_path: Path,
+) -> None:
+    source, package = _build_package(tmp_path)
+    config = json.loads(
+        (package / package_builder.PACKAGE_CONFIG_PATH).read_text(
+            encoding="ascii"
+        )
+    )
+    mounts = offline_evaluator._runtime_dependency_mounts(
+        config["runtime"],
+        package,
+    )
+    by_name = {
+        destination.name: (mounted_source, destination)
+        for mounted_source, destination in mounts
+    }
+
+    assert set(by_name) == {"Chombo", "GRChombo"}
+    assert by_name["Chombo"][1] == Path(
+        "/home/inaeyk/researchrepo/GL-with-AI/external/Chombo"
+    )
+    assert by_name["GRChombo"][1] == Path(
+        "/home/inaeyk/researchrepo/GL-with-AI/external/GRChombo"
+    )
+    assert by_name["Chombo"][1].parent == by_name["GRChombo"][1].parent
+    assert by_name["Chombo"][0] == (
+        package / "dependencies/chombo-dependency"
+    )
+    assert by_name["GRChombo"][0] == (
+        package / "dependencies/grchombo-dependency"
+    )
+    assert by_name["Chombo"][0] != source / "external/Chombo"
+    assert by_name["GRChombo"][0] != source / "external/GRChombo"
+    for relative in package_builder._CHOMBO_INSTALLATION_PATHS:
+        selected = by_name["Chombo"][0] / relative
+        assert selected.is_file()
+        assert stat.S_IMODE(selected.stat().st_mode) in {0o400, 0o500}
+
+    scratch = tmp_path / "qualification-scratch"
+    scratch.mkdir()
+    artifacts: dict[str, bytes] = {}
+    qualification = offline_evaluator._qualify_environment(
+        config["runtime"],
+        package,
+        scratch,
+        mounts,
+        artifacts,
+    )
+
+    assert qualification["status"] == "passed"
+    assert qualification["passed"] is True
+    assert qualification["process_exit_code"] == 0
+    assert set(artifacts) == {
+        "artifacts/environment-qualification.stderr",
+        "artifacts/environment-qualification.stdout",
+    }
+    assert all(
+        b"qualification-host-only" not in artifact
+        and str(source).encode() not in artifact
+        for artifact in artifacts.values()
+    )
+
+
+def test_broken_dependency_is_infrastructure_failure_before_task_acceptance(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path)
+    chombo = source / "external/Chombo"
+    make_test = chombo / "lib/mk/Make.test"
+    make_test.write_text(
+        ".PHONY: all\nall:\n\t@exit 1\n",
+        encoding="ascii",
+    )
+    _git(chombo, "add", "lib/mk/Make.test")
+    _git(chombo, "commit", "-q", "-m", "break synthetic toolchain")
+    source_state_path = (
+        source / "engine-only/historical-audits/source-state.json"
+    )
+    source_state = json.loads(source_state_path.read_text(encoding="utf-8"))
+    for record in source_state["repositories"]:
+        if record["name"] == "chombo-dependency":
+            record["head"] = _git(chombo, "rev-parse", "HEAD")
+    source_state_path.write_text(
+        json.dumps(source_state, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "package",
+    )
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+
+    report_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report",
+    )
+    report = json.loads(report_path.read_text(encoding="ascii"))
+
+    assert report["evaluation_status"] == "evaluator_infrastructure_failure"
+    assert report["environment_qualification"]["failure_reason"] == (
+        "qualification_process_failed"
+    )
+    assert report["all_functional_passed"] is None
+    assert all(task["functional_passed"] is None for task in report["tasks"])
+    assert all(task["tests"] == [] for task in report["tasks"])
+
+
+def test_broken_topology_is_deterministic_infrastructure_failure(
+    tmp_path: Path,
+) -> None:
+    _source, package = _build_package(tmp_path)
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+    package.chmod(0o700)
+    config_path = package / package_builder.PACKAGE_CONFIG_PATH
+    config_path.parent.chmod(0o700)
+    config_path.chmod(0o600)
+    config = json.loads(config_path.read_text(encoding="ascii"))
+    chombo = next(
+        dependency
+        for dependency in config["runtime"]["dependency_roots"]
+        if dependency["role"] == "chombo-dependency"
+    )
+    grchombo = next(
+        dependency
+        for dependency in config["runtime"]["dependency_roots"]
+        if dependency["role"] == "grchombo-dependency"
+    )
+    chombo["namespace_path"] = (
+        "/sealed-topology-mismatch/external/Chombo"
+    )
+    grchombo["namespace_path"] = (
+        "/sealed-topology-mismatch/external/GRChombo"
+    )
+    config_path.write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_package(package)
+
+    first_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report-one",
+    )
+    second_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report-two",
+    )
+    first = json.loads(first_path.read_text(encoding="ascii"))
+
+    assert first_path.read_bytes() == second_path.read_bytes()
+    assert first["evaluation_status"] == "evaluator_infrastructure_failure"
+    assert first["environment_qualification"]["failure_reason"] == (
+        "runtime_topology_invalid"
+    )
+    assert first["all_functional_passed"] is None
+    assert first["functional_passed_tasks"] == 0
+    assert all(task["functional_passed"] is None for task in first["tasks"])
+    assert all(task["tests"] == [] for task in first["tasks"])
+
+
+def test_missing_qualified_chombo_installation_requires_package_rebuild(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path)
+    missing = (
+        source
+        / "external/Chombo"
+        / package_builder._CHOMBO_INSTALLATION_PATHS[-1]
+    )
+    missing.unlink()
+
+    with pytest.raises(
+        EvaluationPackageError,
+        match="Chombo installation|escapes source authority",
+    ):
+        prepare_historical_replay_evaluation_package(
+            source,
+            tmp_path / "package",
+        )
 
 
 def test_functional_test_side_effects_do_not_change_exact_identity(
@@ -2229,6 +2563,8 @@ def test_child_runner_classifies_empty_stderr_nonempty_stdout(
     )
     report = json.loads(report_path.read_text(encoding="ascii"))
 
+    assert report["evaluation_status"] == "completed"
+    assert report["environment_qualification"]["passed"] is True
     for task in report["tasks"]:
         test = task["tests"][0]
         diagnostic = test["diagnostic"]

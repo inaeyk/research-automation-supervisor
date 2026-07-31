@@ -58,7 +58,7 @@ after campaign completion:
 ```text
 prepare-historical-replay-evaluation-package \
   --source-prepared-campaign /preserved/pre-split-campaign \
-  --output /private/gl-five-historical-replay-v1
+  --output /private/gl-five-historical-replay-v2
 ```
 
 The preparer imports no campaign engine or model adapter. It recognizes the
@@ -66,10 +66,15 @@ legacy five-task manifest structurally, requires clean one-commit task
 workspaces, archives committed Git trees, copies functional fixtures and the
 historical evaluator with independent inodes, constructs deterministic exact
 reference archives, snapshots pinned dependency commits, and records source
-provenance and production-profile authority. Source identity and content are
-fingerprinted before and after preparation. Publication is atomic and fails
-if source authority changes, contains unsupported objects or links, has
-ambiguous task mappings, or is incomplete.
+provenance and production-profile authority. The revision-2 production package
+also snapshots the qualified ignored Chombo installation inputs that are not
+present in its Git tree: `Make.defs.local`, the 2-D gfortran-15 configuration
+check, and the prebuilt BoxTools and BaseTools archives. Their independent file
+identities, modes, bytes, digests, and deterministic runtime mtimes are pinned
+separately from the committed Chombo tree. Source identity and content are
+fingerprinted before and after preparation. Publication is atomic and fails if
+source authority changes, contains unsupported objects or links, has ambiguous
+task mappings, or is incomplete.
 
 Every package contains `evaluation-package-manifest.json`. Its canonical,
 versioned payload records ordered paths, file roles, object types, modes, byte
@@ -83,7 +88,7 @@ contains only the package path and manifest digest, never protected content.
 ```text
 evaluate-historical-replay \
   --candidate /path/to/final-candidate \
-  --evaluation-package /private/gl-five-historical-replay-v1 \
+  --evaluation-package /private/gl-five-historical-replay-v2 \
   --output /path/to/new-report-directory
 ```
 
@@ -107,18 +112,39 @@ Optional exact-reference archives and expected changed paths are also digest-
 or value-pinned.
 
 The offline runner mounts an audited Python, Git, C++, Fortran, assembler,
-linker, and `make` runtime profile rather than the host `/usr` tree. Git is a
-single qualified executable operating only on an action-owned ephemeral
-repository; user/system configuration, credentials, host repositories, and
-Git helper directories are absent. Python starts isolated without site
-packages. A single read-only `/bin/sh` is present for declared test-tool
-compatibility, while package-selected host commands, Node, campaign packages,
-model adapters, user installation roots, and host campaign state are absent.
-Evaluation output must be a new child of an existing exact, non-symlink parent
-disjoint from both inputs.
+linker, and `make` runtime profile rather than the host `/usr` tree. Revision 2
+additionally exposes only the Chombo make tools used by the visible
+cell-storage fixture: `csh`, `awk`, `sed`, `tr`, `uname`, `mkdir`, `touch`, and
+Perl. Package-contained GRChombo and Chombo trees are mounted read-only at the
+acceptance-pinned absolute paths under
+`/home/inaeyk/researchrepo/GL-with-AI/external`, reproducing both the original
+names and adjacency independently of the builder host's snapshot locations and
+without exposing the host checkout there.
+Git is a single qualified executable operating only on an action-owned
+ephemeral repository; user/system configuration, credentials, host
+repositories, and Git helper directories are absent. Python starts isolated
+without site packages. A single read-only `/bin/sh` is present for declared
+test-tool compatibility, while package-selected host commands, Node, campaign
+packages, model adapters, user installation roots, and host campaign state are
+absent. The C++ and Fortran drivers receive an explicit set of GCC internal
+compiler components; unrelated GCC helpers and executable-bearing library
+subtrees are masked. Evaluation output must be a new child of an existing
+exact, non-symlink parent disjoint from both inputs.
 
-Standalone report schema version 4 separates functional quality from historical
-identity. `passed` remains as a compatibility alias for `all_functional_passed`;
+Before any task workspace or candidate overlay is built and before any
+functional result is interpreted, the production evaluator runs a synthetic
+cell-storage-shaped qualification fixture through the same Bubblewrap command.
+It verifies exact dependency adjacency and package provenance, read-only
+mounts, required headers, makefiles, prebuilt libraries and tools, unrelated
+host-file inaccessibility, and a real `FArrayBox`/`Cell` load-store compile and
+execution. If this gate fails, the standalone report uses
+`evaluation_status: evaluator_infrastructure_failure`; per-task
+`functional_passed` remains null and functional evaluators are not launched.
+Functional failure is reportable only after the gate passes.
+
+Standalone report schema version 5 separates environment qualification,
+functional quality, and historical identity. `passed` remains a compatibility
+boolean and is false for an infrastructure failure;
 `strict_combined_passed` retains the former functional-plus-exact interpretation.
 Changed-path evidence is validated as duplicate-free canonical relative POSIX
 paths, compared without ordering significance, and reported in sorted order.
@@ -160,7 +186,7 @@ runs/prepared-campaigns/gl-five-visible-campaign-v1/
   runtime/
   final-candidate/
 
-offline-evaluation/gl-five-historical-replay-v1/
+offline-evaluation/gl-five-historical-replay-v2/
   evaluation-package-manifest.json
   baseline-archives/
   dependencies/
