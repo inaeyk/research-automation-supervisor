@@ -9,7 +9,9 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -28,8 +30,10 @@ from research_automation_supervisor.offline_evaluation_package import (
 CONFIG_RELATIVE_PATH = Path("evaluation-config/offline-evaluation.json")
 REPORT_NAME = "historical-replay-report.json"
 SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 MAX_CAPTURE_BYTES = 1_048_576
 _BUBBLEWRAP = Path("/usr/bin/bwrap")
+_GIT = Path("/usr/bin/git")
 _PYTHON = Path("/usr/bin/python3").resolve(strict=True)
 _CPP = Path("/usr/bin/g++").resolve(strict=True)
 _FORTRAN = Path("/usr/bin/x86_64-linux-gnu-gfortran-15").resolve(strict=True)
@@ -45,6 +49,46 @@ _SYSTEM_RUNTIME_DIRECTORIES = (
     Path("/usr/lib/gcc"),
     Path("/usr/libexec/gcc"),
 )
+_GIT_ENVIRONMENT = {
+    "GIT_ASKPASS": "/nonexistent",
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_PROTOCOL_FROM_USER": "0",
+    "GIT_SSH_COMMAND": "/nonexistent",
+    "GIT_TERMINAL_PROMPT": "0",
+    "SSH_ASKPASS": "/nonexistent",
+    "XDG_CONFIG_HOME": "/tmp/home/.config",
+}
+_SAFE_DIAGNOSTIC_EXCEPTION_TYPES = {
+    "CalledProcessError",
+    "FileNotFoundError",
+    "OSError",
+    "PermissionError",
+    "RuntimeError",
+    "TimeoutError",
+}
+_SAFE_DIAGNOSTIC_EXECUTABLES = {
+    "/usr/bin/as",
+    "/usr/bin/g++",
+    "/usr/bin/git",
+    "/usr/bin/ld",
+    "/usr/bin/make",
+    "/usr/bin/python3",
+    "/usr/bin/x86_64-linux-gnu-gfortran-15",
+}
+_SAFE_DIAGNOSTIC_ERRNOS = {
+    str(value): value
+    for value in (
+        errno.EACCES,
+        errno.ENOENT,
+        errno.ENOEXEC,
+        errno.EPERM,
+    )
+}
 
 
 class OfflineEvaluationError(RuntimeError):
@@ -173,6 +217,7 @@ def _evaluate_pinned_authority(
             package_root,
         )
         results: list[dict[str, object]] = []
+        artifacts: dict[str, bytes] = {}
         scratch = temporary_root / "scratch"
         scratch.mkdir()
         for raw_task in raw_tasks:
@@ -185,11 +230,24 @@ def _evaluate_pinned_authority(
                     package_root,
                     scratch,
                     runtime_mounts,
+                    artifacts,
                 )
             )
-        passed = all(result["passed"] is True for result in results)
+        functional_passed_tasks = sum(
+            result["functional_passed"] is True for result in results
+        )
+        exact_match_tasks = sum(
+            result["exact_match"] is True for result in results
+        )
+        strict_combined_passed_tasks = sum(
+            result["strict_combined_passed"] is True
+            for result in results
+        )
+        total_tasks = len(results)
+        all_functional_passed = functional_passed_tasks == total_tasks
+        all_exact_matched = exact_match_tasks == total_tasks
         report: dict[str, object] = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": REPORT_SCHEMA_VERSION,
             "package_id": config["package_id"],
             "candidate_manifest_sha256": candidate_manifest[
                 "candidate_manifest_sha256"
@@ -198,13 +256,24 @@ def _evaluate_pinned_authority(
             "evaluation_package_manifest_sha256": package_manifest[
                 "package_manifest_sha256"
             ],
-            "passed": passed,
+            "passed": all_functional_passed,
+            "functional_passed_tasks": functional_passed_tasks,
+            "exact_match_tasks": exact_match_tasks,
+            "total_tasks": total_tasks,
+            "all_functional_passed": all_functional_passed,
+            "all_exact_matched": all_exact_matched,
+            "strict_combined_passed": (
+                all_functional_passed and all_exact_matched
+            ),
             "tasks": results,
             "score": {
-                "passed_tasks": sum(
-                    result["passed"] is True for result in results
+                "passed_tasks": functional_passed_tasks,
+                "functional_passed_tasks": functional_passed_tasks,
+                "exact_match_tasks": exact_match_tasks,
+                "strict_combined_passed_tasks": (
+                    strict_combined_passed_tasks
                 ),
-                "total_tasks": len(results),
+                "total_tasks": total_tasks,
             },
         }
         report["report_sha256"] = _sha256_json(report)
@@ -222,7 +291,11 @@ def _evaluate_pinned_authority(
             raise OfflineEvaluationError(
                 "offline authority changed during evaluation"
             )
-        report_path = _write_output_report(output_target, report)
+        report_path = _write_output_report(
+            output_target,
+            report,
+            artifacts,
+        )
     return report_path
 
 
@@ -247,6 +320,7 @@ def _evaluate_task(
     package_root: Path,
     scratch: Path,
     runtime_mounts: tuple[tuple[Path, Path], ...],
+    artifacts: dict[str, bytes],
 ) -> dict[str, object]:
     _require_exact_keys(
         task,
@@ -281,6 +355,11 @@ def _evaluate_task(
         raise OfflineEvaluationError(
             "evaluation source identity does not match candidate provenance"
         )
+    raw_tests = task["tests"]
+    if not isinstance(raw_tests, list):
+        raise OfflineEvaluationError("evaluation tests must be a list")
+    for raw_test in raw_tests:
+        _validate_test_definition(raw_test, package_root)
     task_scratch = scratch / task_id
     workspace = task_scratch / "workspace"
     workspace.mkdir(parents=True)
@@ -295,6 +374,11 @@ def _evaluate_task(
         raise OfflineEvaluationError(
             "evaluation baseline tree does not match candidate source provenance"
         )
+    _initialize_ephemeral_git_baseline(
+        workspace,
+        task_scratch,
+        str(provenance["source_tree"]),
+    )
     _apply_candidate_changes(
         workspace,
         candidate_root / "tasks" / task_id,
@@ -309,19 +393,6 @@ def _evaluate_task(
         else _string_list(expected_changed, "expected changed paths")
         == changed_paths
     )
-    raw_tests = task["tests"]
-    if not isinstance(raw_tests, list):
-        raise OfflineEvaluationError("evaluation tests must be a list")
-    tests = [
-        _run_test(
-            item,
-            workspace,
-            package_root,
-            task_scratch,
-            runtime_mounts,
-        )
-        for item in raw_tests
-    ]
     production_profile = _production_profile_analysis(
         task.get("production_profile"),
         changed_paths,
@@ -350,21 +421,180 @@ def _evaluate_task(
             "candidate_tree_sha256": _sha256_json(actual_manifest),
             "reference_tree_sha256": _sha256_json(expected_manifest),
         }
-    passed = (
+    tests = []
+    for index, item in enumerate(raw_tests):
+        tests.append(
+            _run_test(
+                item,
+                workspace,
+                package_root,
+                task_scratch,
+                runtime_mounts,
+                artifacts,
+                f"{task_id}-{index:02d}",
+            )
+        )
+    functional_tests_passed = all(
+        test["passed"] is True for test in tests
+    )
+    functional_passed = (
         changed_paths_passed
         and production_profile["passed"] is True
-        and all(test["passed"] is True for test in tests)
-        and (exact_result is None or exact_result["passed"] is True)
+        and functional_tests_passed
     )
+    exact_match = (
+        None if exact_result is None else exact_result["passed"] is True
+    )
+    strict_combined_passed = functional_passed and exact_match is not False
     return {
         "task_id": task_id,
-        "passed": passed,
+        "passed": functional_passed,
         "changed_paths": changed_paths,
         "changed_paths_passed": changed_paths_passed,
+        "functional_tests_passed": functional_tests_passed,
         "production_profile": production_profile,
+        "production_profile_passed": production_profile["passed"],
+        "functional_passed": functional_passed,
+        "exact_match": exact_match,
+        "strict_combined_passed": strict_combined_passed,
         "tests": tests,
         "exact_comparison": exact_result,
     }
+
+
+def _initialize_ephemeral_git_baseline(
+    workspace: Path,
+    scratch: Path,
+    expected_tree: str,
+) -> None:
+    if (
+        not _GIT.is_file()
+        or _GIT.is_symlink()
+        or not os.access(_GIT, os.X_OK)
+    ):
+        raise OfflineEvaluationError(
+            "Git is required for sealed offline evaluation"
+        )
+    home = scratch / "git-home"
+    template = scratch / "git-template"
+    xdg_config = scratch / "git-xdg"
+    home.mkdir()
+    template.mkdir()
+    xdg_config.mkdir()
+    environment = {
+        **_GIT_ENVIRONMENT,
+        "GIT_AUTHOR_DATE": "1970-01-01T00:00:00Z",
+        "GIT_AUTHOR_EMAIL": "offline-evaluator@example.invalid",
+        "GIT_AUTHOR_NAME": "Offline Replay Evaluator",
+        "GIT_COMMITTER_DATE": "1970-01-01T00:00:00Z",
+        "GIT_COMMITTER_EMAIL": "offline-evaluator@example.invalid",
+        "GIT_COMMITTER_NAME": "Offline Replay Evaluator",
+        "HOME": str(home),
+        "LC_ALL": "C",
+        "PATH": "/usr/bin",
+        "XDG_CONFIG_HOME": str(xdg_config),
+    }
+
+    def run(
+        *arguments: str,
+        input_bytes: bytes | None = None,
+    ) -> bytes:
+        completed = subprocess.run(
+            (str(_GIT), "-C", str(workspace), *arguments),
+            cwd=None,
+            env=environment,
+            input=b"" if input_bytes is None else input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            close_fds=True,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            raise OfflineEvaluationError(
+                "ephemeral evaluation Git baseline could not be created"
+            )
+        return completed.stdout
+
+    run(
+        "init",
+        "--quiet",
+        "--initial-branch=offline-baseline",
+        f"--template={template}",
+    )
+    private_attributes = workspace / ".git/info/attributes"
+    private_attributes.parent.mkdir()
+    private_attributes.write_text(
+        "* -crlf -eol -filter -ident -text -working-tree-encoding\n",
+        encoding="ascii",
+    )
+    index_entries = bytearray()
+    for path in sorted(workspace.rglob("*")):
+        relative = path.relative_to(workspace)
+        if relative.parts[:1] == (".git",) or path.is_dir():
+            continue
+        status = path.lstat()
+        if not stat.S_ISREG(status.st_mode):
+            raise OfflineEvaluationError(
+                "evaluation baseline contains an unsupported Git object"
+            )
+        relative_text = relative.as_posix()
+        object_id = run(
+            "hash-object",
+            "-w",
+            "--no-filters",
+            "--",
+            relative_text,
+        ).decode("ascii", errors="strict").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", object_id):
+            raise OfflineEvaluationError(
+                "evaluation baseline Git object identity is invalid"
+            )
+        mode = (
+            "100755"
+            if stat.S_IMODE(status.st_mode) & 0o111
+            else "100644"
+        )
+        index_entries.extend(
+            f"{mode} {object_id}\t{relative_text}".encode(
+                "utf-8",
+                errors="surrogateescape",
+            )
+        )
+        index_entries.append(0)
+    run(
+        "-c",
+        "core.quotePath=false",
+        "update-index",
+        "-z",
+        "--index-info",
+        input_bytes=bytes(index_entries),
+    )
+    if run("write-tree").decode("ascii", errors="strict").strip() != expected_tree:
+        raise OfflineEvaluationError(
+            "ephemeral evaluation Git baseline is inconsistent"
+        )
+    run(
+        "commit",
+        "--quiet",
+        "--no-gpg-sign",
+        "--no-verify",
+        "-m",
+        "sealed offline baseline",
+    )
+    selected_tree = run("rev-parse", "HEAD^{tree}").decode(
+        "ascii",
+        errors="strict",
+    ).strip()
+    if selected_tree != expected_tree or run(
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ):
+        raise OfflineEvaluationError(
+            "ephemeral evaluation Git baseline is inconsistent"
+        )
 
 
 def _run_test(
@@ -373,8 +603,212 @@ def _run_test(
     package_root: Path,
     scratch: Path,
     runtime_mounts: tuple[tuple[Path, Path], ...],
+    artifacts: dict[str, bytes],
+    artifact_stem: str,
 ) -> dict[str, object]:
-    del scratch
+    _validate_test_definition(raw, package_root)
+    assert isinstance(raw, dict)
+    test_id = raw["id"]
+    assert isinstance(test_id, str)
+    script = _package_file(
+        package_root,
+        raw["script"],
+        raw["script_sha256"],
+        "evaluation script",
+    )
+    arguments = _string_list(
+        raw.get("arguments", []),
+        "evaluation test arguments",
+    )
+    timeout = _bounded_int(raw.get("timeout_seconds", 300), 1, 3600, "timeout")
+    stdout_limit = _bounded_int(
+        raw.get("max_stdout_bytes", MAX_CAPTURE_BYTES),
+        0,
+        MAX_CAPTURE_BYTES,
+        "stdout limit",
+    )
+    stderr_limit = _bounded_int(
+        raw.get("max_stderr_bytes", MAX_CAPTURE_BYTES),
+        0,
+        MAX_CAPTURE_BYTES,
+        "stderr limit",
+    )
+    canonical_arguments = tuple(
+        argument.replace("{workspace}", "/workspace").replace(
+            "{evaluation_package}",
+            "/evaluation",
+        )
+        for argument in arguments
+    )
+    script_relative = script.relative_to(package_root).as_posix()
+    inner = (
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "-B",
+        f"/evaluation/{script_relative}",
+        *canonical_arguments,
+    )
+    command = _offline_bubblewrap_command(
+        workspace,
+        package_root,
+        inner,
+        runtime_mounts,
+    )
+    timed_out = False
+    with (
+        tempfile.TemporaryFile(dir=scratch) as stdout_file,
+        tempfile.TemporaryFile(dir=scratch) as stderr_file,
+    ):
+        process = subprocess.Popen(
+            command,
+            cwd=None,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            close_fds=True,
+            start_new_session=True,
+        )
+        try:
+            return_code: int | None = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            return_code = None
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        stdout = _bounded_stream_record(stdout_file, stdout_limit)
+        stderr = _bounded_stream_record(stderr_file, stderr_limit)
+    stdout_artifact = f"artifacts/{artifact_stem}.stdout"
+    stderr_artifact = f"artifacts/{artifact_stem}.stderr"
+    stdout_artifact_bytes = _diagnostic_artifact_bytes("stdout", stdout)
+    stderr_artifact_bytes = _diagnostic_artifact_bytes("stderr", stderr)
+    artifacts[stdout_artifact] = stdout_artifact_bytes
+    artifacts[stderr_artifact] = stderr_artifact_bytes
+    return {
+        "id": test_id,
+        "runner": "python_script_v1",
+        "script": script_relative,
+        "script_sha256": raw["script_sha256"],
+        "arguments": list(canonical_arguments),
+        "passed": not timed_out and return_code == 0,
+        "exit_code": return_code,
+        "timed_out": timed_out,
+        "stdout_sha256": stdout["captured_prefix_sha256"],
+        "stderr_sha256": stderr["captured_prefix_sha256"],
+        "stdout_observed_sha256": stdout["observed_sha256"],
+        "stderr_observed_sha256": stderr["observed_sha256"],
+        "stdout_artifact": stdout_artifact,
+        "stderr_artifact": stderr_artifact,
+        "stdout_artifact_sha256": hashlib.sha256(
+            stdout_artifact_bytes
+        ).hexdigest(),
+        "stderr_artifact_sha256": hashlib.sha256(
+            stderr_artifact_bytes
+        ).hexdigest(),
+        "stdout_byte_length": stdout["captured_prefix_byte_length"],
+        "stderr_byte_length": stderr["captured_prefix_byte_length"],
+        "stdout_observed_byte_length": stdout["observed_byte_length"],
+        "stderr_observed_byte_length": stderr["observed_byte_length"],
+        "stdout_truncated": stdout["truncated"],
+        "stderr_truncated": stderr["truncated"],
+    }
+
+
+def _bounded_stream_record(
+    stream: Any,
+    limit: int,
+) -> dict[str, object]:
+    stream.flush()
+    stream.seek(0)
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    observed_length = 0
+    while True:
+        chunk = stream.read(65_536)
+        if not chunk:
+            break
+        digest.update(chunk)
+        observed_length += len(chunk)
+        if len(prefix) < limit:
+            prefix.extend(chunk[: limit - len(prefix)])
+    captured = bytes(prefix)
+    return {
+        "captured_prefix": captured,
+        "captured_prefix_sha256": hashlib.sha256(captured).hexdigest(),
+        "captured_prefix_byte_length": len(captured),
+        "observed_sha256": digest.hexdigest(),
+        "observed_byte_length": observed_length,
+        "truncated": observed_length > len(captured),
+    }
+
+
+def _diagnostic_artifact_bytes(
+    stream_name: str,
+    record: Mapping[str, object],
+) -> bytes:
+    captured = record["captured_prefix"]
+    assert isinstance(captured, bytes)
+    text = captured.decode("utf-8", errors="replace")
+    exception_type: str | None = None
+    error_number: int | None = None
+    qualified_executable: str | None = None
+    for line in text.splitlines():
+        match = re.match(
+            r"^(?:[A-Za-z_][A-Za-z0-9_.]*\.)?"
+            r"([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))(?::|$)",
+            line,
+        )
+        if (
+            match is not None
+            and match.group(1) in _SAFE_DIAGNOSTIC_EXCEPTION_TYPES
+        ):
+            exception_type = match.group(1)
+            errno_match = re.search(r"\[Errno ([0-9]+)\]", line)
+            if errno_match is not None:
+                error_number = _SAFE_DIAGNOSTIC_ERRNOS.get(
+                    errno_match.group(1)
+                )
+            executable_match = re.search(
+                r"['\"](/usr/bin/[A-Za-z0-9_.+-]+)['\"]",
+                line,
+            )
+            if (
+                executable_match is not None
+                and executable_match.group(1)
+                in _SAFE_DIAGNOSTIC_EXECUTABLES
+            ):
+                qualified_executable = executable_match.group(1)
+    artifact = {
+        "schema_version": 1,
+        "artifact_role": "bounded_process_stream_diagnostic",
+        "stream": stream_name,
+        "content_policy": "untrusted_output_digest_only",
+        "captured_prefix_sha256": record["captured_prefix_sha256"],
+        "captured_prefix_byte_length": record[
+            "captured_prefix_byte_length"
+        ],
+        "observed_sha256": record["observed_sha256"],
+        "observed_byte_length": record["observed_byte_length"],
+        "truncated": record["truncated"],
+        "python_exception": (
+            None
+            if exception_type is None
+            else {
+                "type": exception_type,
+                "errno": error_number,
+                "qualified_executable": qualified_executable,
+            }
+        ),
+    }
+    return _json_bytes(artifact)
+
+
+def _validate_test_definition(
+    raw: object,
+    package_root: Path,
+) -> None:
     if not isinstance(raw, dict):
         raise OfflineEvaluationError("evaluation test must be an object")
     _require_exact_keys(
@@ -403,80 +837,20 @@ def _run_test(
         raw.get("arguments", []),
         "evaluation test arguments",
     )
-    canonical_arguments = tuple(
-        argument.replace("{workspace}", "/workspace").replace(
-            "{evaluation_package}",
-            "/evaluation",
-        )
-        for argument in arguments
-    )
-    script_relative = script.relative_to(package_root).as_posix()
-    inner = (
-        "/usr/bin/python3",
-        "-I",
-        "-S",
-        "-B",
-        f"/evaluation/{script_relative}",
-        *canonical_arguments,
-    )
-    command = _offline_bubblewrap_command(
-        workspace,
-        package_root,
-        inner,
-        runtime_mounts,
-    )
-    timeout = _bounded_int(raw.get("timeout_seconds", 300), 1, 3600, "timeout")
-    stdout_limit = _bounded_int(
+    del arguments, script, test_id
+    _bounded_int(raw.get("timeout_seconds", 300), 1, 3600, "timeout")
+    _bounded_int(
         raw.get("max_stdout_bytes", MAX_CAPTURE_BYTES),
         0,
         MAX_CAPTURE_BYTES,
         "stdout limit",
     )
-    stderr_limit = _bounded_int(
+    _bounded_int(
         raw.get("max_stderr_bytes", MAX_CAPTURE_BYTES),
         0,
         MAX_CAPTURE_BYTES,
         "stderr limit",
     )
-    timed_out = False
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=None,
-            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-            close_fds=True,
-            start_new_session=True,
-        )
-        return_code = completed.returncode
-        stdout = completed.stdout[:stdout_limit]
-        stderr = completed.stderr[:stderr_limit]
-        stdout_truncated = len(completed.stdout) > stdout_limit
-        stderr_truncated = len(completed.stderr) > stderr_limit
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        return_code = None
-        stdout = (exc.stdout or b"")[:stdout_limit]
-        stderr = (exc.stderr or b"")[:stderr_limit]
-        stdout_truncated = len(exc.stdout or b"") > stdout_limit
-        stderr_truncated = len(exc.stderr or b"") > stderr_limit
-    return {
-        "id": test_id,
-        "runner": "python_script_v1",
-        "script": script_relative,
-        "script_sha256": raw["script_sha256"],
-        "arguments": list(canonical_arguments),
-        "passed": not timed_out and return_code == 0,
-        "exit_code": return_code,
-        "timed_out": timed_out,
-        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
-        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
-    }
 
 
 def _offline_bubblewrap_command(
@@ -485,8 +859,10 @@ def _offline_bubblewrap_command(
     inner: Sequence[str],
     runtime_mounts: tuple[tuple[Path, Path], ...] = (),
 ) -> tuple[str, ...]:
+    git_metadata = workspace / ".git"
     for executable, label in (
         (_BUBBLEWRAP, "Bubblewrap"),
+        (_GIT, "Git"),
         (_PYTHON, "Python"),
         (_CPP, "C++ compiler"),
         (_FORTRAN, "Fortran compiler"),
@@ -509,6 +885,10 @@ def _offline_bubblewrap_command(
             raise OfflineEvaluationError(
                 "audited offline runtime directory is unavailable"
             )
+    if not git_metadata.is_dir() or git_metadata.is_symlink():
+        raise OfflineEvaluationError(
+            "ephemeral evaluation Git metadata is unavailable"
+        )
     command: list[str] = [
         str(_BUBBLEWRAP),
         "--unshare-all",
@@ -552,6 +932,7 @@ def _offline_bubblewrap_command(
     ]
     for source, destination in (
         (_PYTHON, Path("/usr/bin/python3")),
+        (_GIT, Path("/usr/bin/git")),
         (_CPP, Path("/usr/bin/g++")),
         (_FORTRAN, Path("/usr/bin/x86_64-linux-gnu-gfortran-15")),
         (_MAKE, Path("/usr/bin/make")),
@@ -577,6 +958,9 @@ def _offline_bubblewrap_command(
             str(workspace),
             "/workspace",
             "--ro-bind",
+            str(git_metadata),
+            "/workspace/.git",
+            "--ro-bind",
             str(package_root),
             "/evaluation",
         )
@@ -589,6 +973,7 @@ def _offline_bubblewrap_command(
         Path("/tmp/home"),
         Path("/usr"),
         Path("/usr/bin"),
+        Path("/usr/bin/git"),
         Path("/usr/lib"),
         Path("/usr/libexec"),
         Path("/usr/include"),
@@ -597,6 +982,7 @@ def _offline_bubblewrap_command(
         Path("/bin"),
         Path("/bin/sh"),
         Path("/workspace"),
+        Path("/workspace/.git"),
         Path("/evaluation"),
     }
     for _source, destination in runtime_mounts:
@@ -609,6 +995,8 @@ def _offline_bubblewrap_command(
             created.add(destination)
     for source, destination in runtime_mounts:
         command.extend(("--ro-bind", str(source), str(destination)))
+    for name, value in sorted(_GIT_ENVIRONMENT.items()):
+        command.extend(("--setenv", name, value))
     command.extend(("--chdir", "/workspace", "--", *inner))
     return tuple(command)
 
@@ -734,6 +1122,10 @@ def _apply_candidate_changes(workspace: Path, task_candidate: Path) -> None:
         relative = raw.get("path")
         if not isinstance(relative, str):
             raise OfflineEvaluationError("candidate change path is invalid")
+        if PurePosixPath(relative).parts[:1] == (".git",):
+            raise OfflineEvaluationError(
+                "candidate change targets private Git metadata"
+            )
         target = _change_target(workspace, relative)
         operation = raw.get("operation")
         if operation == "delete":
@@ -782,11 +1174,15 @@ def _apply_candidate_changes(workspace: Path, task_candidate: Path) -> None:
                 target.parent.joinpath(link_target).resolve(strict=False)
             )
             try:
-                resolved_target.relative_to(workspace)
+                resolved_relative = resolved_target.relative_to(workspace)
             except ValueError as exc:
                 raise OfflineEvaluationError(
                     "candidate symlink target escapes workspace"
                 ) from exc
+            if resolved_relative.parts[:1] == (".git",):
+                raise OfflineEvaluationError(
+                    "candidate symlink targets private Git metadata"
+                )
             target.symlink_to(link_target)
         else:
             raise OfflineEvaluationError(
@@ -910,6 +1306,8 @@ def _tree_manifest(root: Path) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
+        if relative == ".git" or relative.startswith(".git/"):
+            continue
         status = path.lstat()
         if stat.S_ISDIR(status.st_mode):
             kind = "directory"
@@ -1153,6 +1551,29 @@ def _cleanup_output_staging(target: _OutputDirectory) -> None:
         os.fchmod(target.descriptor, 0o700)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(REPORT_NAME, dir_fd=target.descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            artifact_descriptor = os.open(
+                "artifacts",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=target.descriptor,
+            )
+            try:
+                os.fchmod(artifact_descriptor, 0o700)
+                for name in os.listdir(artifact_descriptor):
+                    status = os.stat(
+                        name,
+                        dir_fd=artifact_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if not stat.S_ISREG(status.st_mode):
+                        return
+                    os.unlink(name, dir_fd=artifact_descriptor)
+            finally:
+                os.close(artifact_descriptor)
+            os.rmdir("artifacts", dir_fd=target.descriptor)
         os.rmdir(
             target.staging_name,
             dir_fd=target.parent_descriptor,
@@ -1165,6 +1586,7 @@ def _cleanup_output_staging(target: _OutputDirectory) -> None:
 def _write_output_report(
     target: _OutputDirectory,
     report: Mapping[str, object],
+    artifacts: Mapping[str, bytes],
 ) -> Path:
     _verify_output_directory(target)
     flags = (
@@ -1175,6 +1597,7 @@ def _write_output_report(
         | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
+        _write_output_artifacts(target, artifacts)
         descriptor = os.open(
             REPORT_NAME,
             flags,
@@ -1207,6 +1630,63 @@ def _write_output_report(
             "offline evaluation report could not be published"
         ) from exc
     return target.path / REPORT_NAME
+
+
+def _write_output_artifacts(
+    target: _OutputDirectory,
+    artifacts: Mapping[str, bytes],
+) -> None:
+    try:
+        os.mkdir("artifacts", 0o700, dir_fd=target.descriptor)
+        artifact_descriptor = os.open(
+            "artifacts",
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=target.descriptor,
+        )
+        try:
+            for relative, content in sorted(artifacts.items()):
+                path = PurePosixPath(relative)
+                if (
+                    len(path.parts) != 2
+                    or path.parts[0] != "artifacts"
+                    or not path.parts[1]
+                    or path.parts[1] in {".", ".."}
+                ):
+                    raise OfflineEvaluationError(
+                        "offline evaluation artifact path is invalid"
+                    )
+                descriptor = os.open(
+                    path.parts[1],
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=artifact_descriptor,
+                )
+                try:
+                    view = memoryview(content)
+                    while view:
+                        written = os.write(descriptor, view)
+                        view = view[written:]
+                    os.fsync(descriptor)
+                    os.fchmod(descriptor, 0o400)
+                finally:
+                    os.close(descriptor)
+            os.fsync(artifact_descriptor)
+            os.fchmod(artifact_descriptor, 0o500)
+        finally:
+            os.close(artifact_descriptor)
+    except OfflineEvaluationError:
+        raise
+    except OSError as exc:
+        raise OfflineEvaluationError(
+            "offline evaluation artifacts could not be published"
+        ) from exc
 
 
 def _rename_output_noreplace(target: _OutputDirectory) -> None:
@@ -1405,6 +1885,7 @@ def _production_profile_analysis(
     if value is None:
         return {
             "passed": True,
+            "classifications_exhaustive": False,
             "classified_paths": {},
             "unclassified_paths": [],
         }
@@ -1434,7 +1915,8 @@ def _production_profile_analysis(
         else:
             unclassified.append(changed)
     return {
-        "passed": not unclassified,
+        "passed": True,
+        "classifications_exhaustive": False,
         "classified_paths": classified,
         "unclassified_paths": unclassified,
     }

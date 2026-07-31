@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -148,13 +149,26 @@ def _synthetic_source(tmp_path: Path) -> Path:
     evaluator.parent.mkdir(parents=True)
     evaluator.write_text(
         "from pathlib import Path\n"
+        "import subprocess\n"
         "import sys\n"
         "mode, task, workspace, fixture = sys.argv[1:]\n"
         "relative = Path('src') / f'{task}.txt'\n"
-        "passed = mode == 'functional' and (\n"
+        "status = subprocess.run(\n"
+        "    ['/usr/bin/git', '-C', workspace, 'status',\n"
+        "     '--porcelain=v1', '-z', '--untracked-files=all'],\n"
+        "    stdin=subprocess.DEVNULL, capture_output=True, check=False,\n"
+        ")\n"
+        "passed = (\n"
+        "    mode == 'functional'\n"
+        "    and status.returncode == 0\n"
+        "    and str(relative).encode() in status.stdout\n"
+        "    and (\n"
         "    Path(workspace, relative).read_bytes()\n"
         "    == Path(fixture, relative).read_bytes()\n"
+        "    )\n"
         ")\n"
+        "print(f'synthetic functional stdout: {task}')\n"
+        "print(f'synthetic functional stderr: {task}', file=sys.stderr)\n"
         "raise SystemExit(not passed)\n",
         encoding="utf-8",
     )
@@ -477,6 +491,36 @@ def _synthetic_candidate(package: Path, destination: Path) -> Path:
     (destination / "candidate-manifest.json").chmod(0o400)
     destination.chmod(0o500)
     return destination
+
+
+def _reseal_candidate(candidate: Path) -> None:
+    manifest_path = candidate / "candidate-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    candidate.chmod(0o700)
+    for path in candidate.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    manifest_path.unlink()
+    for path in sorted(candidate.rglob("*"), reverse=True):
+        path.chmod(0o500 if path.is_dir() else 0o400)
+    candidate.chmod(0o700)
+    payload = {
+        "schema_version": 1,
+        "snapshot_id": manifest["snapshot_id"],
+        "campaign_id": manifest["campaign_id"],
+        "entries": offline_evaluator._package_entries(candidate),
+    }
+    digest = offline_evaluator._sha256_json(payload)
+    manifest_path.write_text(
+        json.dumps(
+            {**payload, "candidate_manifest_sha256": digest},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    manifest_path.chmod(0o400)
+    candidate.chmod(0o500)
 
 
 def test_package_creation_is_deterministic_and_maps_all_five_tasks(
@@ -1602,6 +1646,10 @@ def test_evaluator_accepts_valid_synthetic_five_task_package(
         package,
         tmp_path / "campaign-run/final-candidate",
     )
+    candidate_manifest = (candidate / "candidate-manifest.json").read_bytes()
+    package_manifest = (
+        package / package_builder.PACKAGE_MANIFEST_NAME
+    ).read_bytes()
 
     report_path = evaluate_historical_replay(
         candidate,
@@ -1611,8 +1659,712 @@ def test_evaluator_accepts_valid_synthetic_five_task_package(
 
     report = json.loads(report_path.read_text(encoding="ascii"))
     assert report["passed"] is True
-    assert report["score"] == {"passed_tasks": 5, "total_tasks": 5}
+    assert report["score"] == {
+        "passed_tasks": 5,
+        "functional_passed_tasks": 5,
+        "exact_match_tasks": 5,
+        "strict_combined_passed_tasks": 5,
+        "total_tasks": 5,
+    }
+    assert report["schema_version"] == 2
+    assert report["all_functional_passed"] is True
+    assert report["all_exact_matched"] is True
+    assert all(task["changed_paths_passed"] for task in report["tasks"])
+    assert all(task["functional_tests_passed"] for task in report["tasks"])
     assert all(task["production_profile"]["passed"] for task in report["tasks"])
+    for task in report["tasks"]:
+        test = task["tests"][0]
+        stdout = report_path.parent / test["stdout_artifact"]
+        stderr = report_path.parent / test["stderr_artifact"]
+        stdout_record = json.loads(stdout.read_text(encoding="ascii"))
+        stderr_record = json.loads(stderr.read_text(encoding="ascii"))
+        assert stdout_record["content_policy"] == (
+            "untrusted_output_digest_only"
+        )
+        assert stderr_record["content_policy"] == (
+            "untrusted_output_digest_only"
+        )
+        assert stdout_record["stream"] == "stdout"
+        assert stderr_record["stream"] == "stderr"
+        assert stdout_record["python_exception"] is None
+        assert stderr_record["python_exception"] is None
+        assert hashlib.sha256(stdout.read_bytes()).hexdigest() == (
+            test["stdout_artifact_sha256"]
+        )
+        assert hashlib.sha256(stderr.read_bytes()).hexdigest() == (
+            test["stderr_artifact_sha256"]
+        )
+        assert stat.S_IMODE(stdout.stat().st_mode) == 0o400
+        assert stat.S_IMODE(stderr.stat().st_mode) == 0o400
+    second_report = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report-second",
+    )
+    first_artifacts = {
+        path.name: path.read_bytes()
+        for path in (report_path.parent / "artifacts").iterdir()
+    }
+    second_artifacts = {
+        path.name: path.read_bytes()
+        for path in (second_report.parent / "artifacts").iterdir()
+    }
+    assert first_artifacts == second_artifacts
+    assert (candidate / "candidate-manifest.json").read_bytes() == (
+        candidate_manifest
+    )
+    assert (package / package_builder.PACKAGE_MANIFEST_NAME).read_bytes() == (
+        package_manifest
+    )
+
+
+def test_functional_test_side_effects_do_not_change_exact_identity(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path)
+    evaluator = source / "engine-only/evaluators/evaluate.py"
+    content = evaluator.read_text(encoding="utf-8")
+    evaluator.chmod(0o755)
+    evaluator.write_text(
+        content.replace(
+            "raise SystemExit(not passed)\n",
+            "Path(workspace, 'functional-test-created.tmp').write_text("
+            "'test side effect')\n"
+            "raise SystemExit(not passed)\n",
+        ),
+        encoding="utf-8",
+    )
+    evaluator.chmod(0o555)
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "private-offline-package",
+    )
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+
+    report_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report",
+    )
+    report = json.loads(report_path.read_text(encoding="ascii"))
+
+    assert report["all_functional_passed"] is True
+    assert report["all_exact_matched"] is True
+    assert report["exact_match_tasks"] == 5
+
+
+def test_diagnostic_artifacts_do_not_store_protected_output(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path)
+    evaluator = source / "engine-only/evaluators/evaluate.py"
+    sentinel = "SYNTHETIC-PROTECTED-SOURCE-CONTENT"
+    content = evaluator.read_text(encoding="utf-8")
+    evaluator.chmod(0o755)
+    evaluator.write_text(
+        content.replace(
+            "raise SystemExit(not passed)\n",
+            f"print({sentinel!r})\nraise SystemExit(not passed)\n",
+        ),
+        encoding="utf-8",
+    )
+    evaluator.chmod(0o555)
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "private-offline-package",
+    )
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+
+    report_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report",
+    )
+
+    for artifact in (report_path.parent / "artifacts").iterdir():
+        assert sentinel.encode() not in artifact.read_bytes()
+    assert sentinel.encode() not in report_path.read_bytes()
+
+
+def test_output_capture_is_memory_bounded_and_artifact_is_diagnostic_only(
+    tmp_path: Path,
+) -> None:
+    source = _synthetic_source(tmp_path)
+    evaluator = source / "engine-only/evaluators/evaluate.py"
+    content = evaluator.read_text(encoding="utf-8")
+    evaluator.chmod(0o755)
+    evaluator.write_text(
+        content.replace(
+            "raise SystemExit(not passed)\n",
+            "sys.stdout.write('X' * 1048576)\n"
+            "raise SystemExit(not passed)\n",
+        ),
+        encoding="utf-8",
+    )
+    evaluator.chmod(0o555)
+    package, _digest = prepare_historical_replay_evaluation_package(
+        source,
+        tmp_path / "private-offline-package",
+    )
+    package.chmod(0o700)
+    config_path = package / package_builder.PACKAGE_CONFIG_PATH
+    config_path.parent.chmod(0o700)
+    config_path.chmod(0o600)
+    config = json.loads(config_path.read_text(encoding="ascii"))
+    for task in config["tasks"]:
+        task["tests"][0]["max_stdout_bytes"] = 64
+    config_path.write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_package(package)
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+
+    report_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report",
+    )
+    report = json.loads(report_path.read_text(encoding="ascii"))
+    first = report["tasks"][0]["tests"][0]
+    artifact = report_path.parent / first["stdout_artifact"]
+
+    assert first["stdout_byte_length"] == 64
+    assert first["stdout_observed_byte_length"] > 1_000_000
+    assert first["stdout_truncated"] is True
+    assert artifact.stat().st_size < 1_024
+    assert b"X" * 32 not in artifact.read_bytes()
+
+
+def test_python_exception_diagnostic_retains_safe_git_failure_fields() -> None:
+    raw = (
+        b"Traceback (most recent call last):\n"
+        b"FileNotFoundError: [Errno 2] No such file or directory: "
+        b"'/usr/bin/git'\n"
+        b"SyntheticProtectedError: '/usr/bin/protected-secret'\n"
+        b"SYNTHETIC-PROTECTED-SOURCE-CONTENT\n"
+    )
+    record = offline_evaluator._bounded_stream_record(
+        io.BytesIO(raw),
+        len(raw),
+    )
+    artifact = offline_evaluator._diagnostic_artifact_bytes(
+        "stderr",
+        record,
+    )
+    parsed = json.loads(artifact)
+
+    assert parsed["python_exception"] == {
+        "type": "FileNotFoundError",
+        "errno": 2,
+        "qualified_executable": "/usr/bin/git",
+    }
+    assert b"SyntheticProtectedError" not in artifact
+    assert b"/usr/bin/protected-secret" not in artifact
+    assert b"SYNTHETIC-PROTECTED-SOURCE-CONTENT" not in artifact
+
+    mixed_raw = (
+        b"FileNotFoundError:\n"
+        b"SYNTHETIC SECRET [Errno 8675309] '/usr/bin/git'\n"
+    )
+    mixed_record = offline_evaluator._bounded_stream_record(
+        io.BytesIO(mixed_raw),
+        len(mixed_raw),
+    )
+    mixed_artifact = json.loads(
+        offline_evaluator._diagnostic_artifact_bytes(
+            "stderr",
+            mixed_record,
+        )
+    )
+    assert mixed_artifact["python_exception"] == {
+        "type": "FileNotFoundError",
+        "errno": None,
+        "qualified_executable": None,
+    }
+    assert b"8675309" not in json.dumps(mixed_artifact).encode()
+
+    oversized_errno = (
+        b"FileNotFoundError: [Errno " + (b"9" * 5_000) + b"]\n"
+    )
+    oversized_record = offline_evaluator._bounded_stream_record(
+        io.BytesIO(oversized_errno),
+        len(oversized_errno),
+    )
+    oversized_artifact = json.loads(
+        offline_evaluator._diagnostic_artifact_bytes(
+            "stderr",
+            oversized_record,
+        )
+    )
+    assert oversized_artifact["python_exception"] == {
+        "type": "FileNotFoundError",
+        "errno": None,
+        "qualified_executable": None,
+    }
+
+
+def test_sealed_git_runtime_hides_host_repositories_and_configuration(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("baseline\n", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    offline_evaluator._initialize_ephemeral_git_baseline(
+        workspace,
+        scratch,
+        offline_evaluator._git_tree_oid(workspace),
+    )
+    private_git_config = workspace / ".git/config"
+    private_git_config_bytes = private_git_config.read_bytes()
+    tracked.write_text("changed\n", encoding="utf-8")
+
+    host_repository = tmp_path / "unrelated-host-repository"
+    _repository(host_repository, {"secret.txt": "host-only\n"})
+    host_config = tmp_path / "host.gitconfig"
+    host_config.write_text(
+        "[credential]\n\thelper = malicious-helper\n",
+        encoding="utf-8",
+    )
+    package = tmp_path / "probe-package"
+    package.mkdir()
+    probe = package / "probe.py"
+    probe.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "import subprocess\n"
+        "import sys\n"
+        f"host_repo = Path({str(host_repository)!r})\n"
+        f"host_config = Path({str(host_config)!r})\n"
+        "required = {\n"
+        "  'GIT_CONFIG_NOSYSTEM': '1',\n"
+        "  'GIT_CONFIG_GLOBAL': '/dev/null',\n"
+        "  'GIT_TERMINAL_PROMPT': '0',\n"
+        "  'GIT_ASKPASS': '/nonexistent',\n"
+        "}\n"
+        "status = subprocess.run(\n"
+        "  ['/usr/bin/git', 'status', '--porcelain=v1', '-z',\n"
+        "   '--untracked-files=all'], capture_output=True, check=False,\n"
+        ")\n"
+        "config = subprocess.run(\n"
+        "  ['/usr/bin/git', 'config', '--global', '--list'],\n"
+        "  capture_output=True, check=False,\n"
+        ")\n"
+        "try:\n"
+        "  Path('.git/config').write_text('[credential]\\nhelper=hostile\\n')\n"
+        "except OSError:\n"
+        "  git_metadata_read_only = True\n"
+        "else:\n"
+        "  git_metadata_read_only = False\n"
+        "passed = (\n"
+        "  all(os.environ.get(k) == v for k, v in required.items())\n"
+        "  and 'GIT_DIR' not in os.environ\n"
+        "  and 'GIT_WORK_TREE' not in os.environ\n"
+        "  and not host_repo.exists()\n"
+        "  and not host_config.exists()\n"
+        "  and status.returncode == 0\n"
+        "  and b'tracked.txt' in status.stdout\n"
+        "  and config.returncode == 0\n"
+        "  and config.stdout == b''\n"
+        "  and git_metadata_read_only\n"
+        ")\n"
+        "sys.exit(not passed)\n",
+        encoding="utf-8",
+    )
+    command = offline_evaluator._offline_bubblewrap_command(
+        workspace,
+        package,
+        (
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-B",
+            "/evaluation/probe.py",
+        ),
+    )
+    completed = subprocess.run(
+        command,
+        cwd=None,
+        env={
+            "GIT_CONFIG_GLOBAL": str(host_config),
+            "GIT_DIR": str(host_repository / ".git"),
+            "GIT_WORK_TREE": str(host_repository),
+            "HOME": str(tmp_path),
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode(
+        "utf-8",
+        errors="replace",
+    )
+    assert private_git_config.read_bytes() == private_git_config_bytes
+
+
+def test_ephemeral_git_baseline_uses_private_config_and_tracks_ignored_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".gitignore").write_text("tracked.ignored\n", encoding="utf-8")
+    (workspace / "tracked.ignored").write_text("committed\n", encoding="utf-8")
+    expected_tree = offline_evaluator._git_tree_oid(workspace)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    hostile_xdg = tmp_path / "host-xdg"
+    (hostile_xdg / "git").mkdir(parents=True)
+    (hostile_xdg / "git/ignore").write_text("*\n", encoding="utf-8")
+    monkeypatch.setattr(
+        offline_evaluator,
+        "_GIT_ENVIRONMENT",
+        {
+            **offline_evaluator._GIT_ENVIRONMENT,
+            "XDG_CONFIG_HOME": str(hostile_xdg),
+        },
+    )
+    original_run = offline_evaluator.subprocess.run
+    initializer_environments: list[dict[str, str]] = []
+
+    def record_run(
+        command: Sequence[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        environment = kwargs.get("env")
+        if (
+            command
+            and command[0] == str(offline_evaluator._GIT)
+            and isinstance(environment, dict)
+            and "GIT_AUTHOR_DATE" in environment
+        ):
+            initializer_environments.append(environment.copy())
+        return original_run(command, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(offline_evaluator.subprocess, "run", record_run)
+    offline_evaluator._initialize_ephemeral_git_baseline(
+        workspace,
+        scratch,
+        expected_tree,
+    )
+
+    assert initializer_environments
+    assert {
+        environment["XDG_CONFIG_HOME"]
+        for environment in initializer_environments
+    } == {str(scratch / "git-xdg")}
+    assert all(
+        environment["GIT_ATTR_NOSYSTEM"] == "1"
+        for environment in initializer_environments
+    )
+    assert _git(workspace, "ls-files").splitlines() == [
+        ".gitignore",
+        "tracked.ignored",
+    ]
+
+
+def test_ephemeral_git_baseline_bypasses_committed_attribute_filters(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tracked.txt").write_bytes(b"committed\r\nbytes\r\n")
+    (workspace / ".gitattributes").write_text(
+        "*.txt text eol=lf\n",
+        encoding="ascii",
+    )
+    (workspace / ".gitignore").write_text(
+        "tracked.txt\n",
+        encoding="ascii",
+    )
+    expected_tree = offline_evaluator._git_tree_oid(workspace)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    offline_evaluator._initialize_ephemeral_git_baseline(
+        workspace,
+        scratch,
+        expected_tree,
+    )
+
+    assert _git(workspace, "rev-parse", "HEAD^{tree}") == expected_tree
+    assert _git(
+        workspace,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ) == ""
+    assert (workspace / "tracked.txt").read_bytes() == (
+        b"committed\r\nbytes\r\n"
+    )
+
+
+@pytest.mark.parametrize("invalid_git", ("symlink", "non_executable"))
+def test_sealed_git_runtime_requires_qualified_regular_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_git: str,
+) -> None:
+    selected = tmp_path / "git"
+    if invalid_git == "symlink":
+        selected.symlink_to("/usr/bin/git")
+    else:
+        selected.write_bytes(Path("/usr/bin/git").read_bytes())
+        selected.chmod(0o600)
+    monkeypatch.setattr(offline_evaluator, "_GIT", selected)
+    workspace = tmp_path / "workspace"
+    package = tmp_path / "package"
+    workspace.mkdir()
+    package.mkdir()
+
+    with pytest.raises(
+        offline_evaluator.OfflineEvaluationError,
+        match="Git is required",
+    ):
+        offline_evaluator._offline_bubblewrap_command(
+            workspace,
+            package,
+            ("/usr/bin/python3", "-I", "-S", "-B", "-c", "pass"),
+        )
+
+
+def test_reduced_vars_profile_keeps_unclassified_expected_header_compatible() -> None:
+    result = offline_evaluator._production_profile_analysis(
+        {
+            "hot_path": ["BlackStringReducedVars.hpp"],
+            "post_update": [],
+            "validation_only": [
+                "BlackStringReducedVarsTest.cpp",
+                "BlackStringGPPointwiseInitialDataTest.cpp",
+            ],
+        },
+        [
+            "code/BlackStringToy/BlackStringReducedVars.hpp",
+            "code/BlackStringToy/BlackStringGPPointwiseInitialData.hpp",
+        ],
+    )
+
+    assert result == {
+        "passed": True,
+        "classifications_exhaustive": False,
+        "classified_paths": {
+            "code/BlackStringToy/BlackStringReducedVars.hpp": ["hot_path"],
+        },
+        "unclassified_paths": [
+            "code/BlackStringToy/BlackStringGPPointwiseInitialData.hpp"
+        ],
+    }
+
+
+def test_functionally_passing_non_exact_candidate_scores_separately(
+    tmp_path: Path,
+) -> None:
+    _source, package = _build_package(tmp_path)
+    package.chmod(0o700)
+    evaluator = package / "evaluators/historical-functional.py"
+    evaluator.parent.chmod(0o700)
+    evaluator.chmod(0o600)
+    evaluator.write_text(
+        "from pathlib import Path\n"
+        "import subprocess\n"
+        "import sys\n"
+        "mode, task, workspace, fixture = sys.argv[1:]\n"
+        "relative = Path('src') / f'{task}.txt'\n"
+        "status = subprocess.run(\n"
+        "  ['/usr/bin/git', '-C', workspace, 'status',\n"
+        "   '--porcelain=v1', '-z', '--untracked-files=all'],\n"
+        "  capture_output=True, check=False,\n"
+        ")\n"
+        "content = Path(workspace, relative).read_bytes()\n"
+        "reference = Path(fixture, relative).read_bytes()\n"
+        "passed = (\n"
+        "  mode == 'functional' and status.returncode == 0\n"
+        "  and str(relative).encode() in status.stdout\n"
+        "  and (content == reference or content.startswith(b'alternative '))\n"
+        ")\n"
+        "raise SystemExit(not passed)\n",
+        encoding="utf-8",
+    )
+    config_path = package / package_builder.PACKAGE_CONFIG_PATH
+    config_path.parent.chmod(0o700)
+    config_path.chmod(0o600)
+    config = json.loads(config_path.read_text(encoding="ascii"))
+    evaluator_sha256 = hashlib.sha256(evaluator.read_bytes()).hexdigest()
+    for task in config["tasks"]:
+        task["tests"][0]["script_sha256"] = evaluator_sha256
+    config_path.write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_package(package)
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+    task_id = package_builder.TASK_IDS[0]
+    changed = (
+        candidate
+        / f"tasks/{task_id}/changed-files/src/{task_id}.txt"
+    )
+    changes_path = candidate / f"tasks/{task_id}/changes.json"
+    candidate.chmod(0o700)
+    for selected in (changed.parent, changes_path.parent):
+        selected.chmod(0o700)
+    changed.chmod(0o600)
+    changes_path.chmod(0o600)
+    content = f"alternative {task_id}\n".encode()
+    changed.write_bytes(content)
+    changes = json.loads(changes_path.read_text(encoding="ascii"))
+    changes["entries"][0]["byte_length"] = len(content)
+    changes["entries"][0]["content_sha256"] = hashlib.sha256(content).hexdigest()
+    changes_path.write_text(
+        json.dumps(changes, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_candidate(candidate)
+
+    report_path = evaluate_historical_replay(
+        candidate,
+        package,
+        tmp_path / "report",
+    )
+    report = json.loads(report_path.read_text(encoding="ascii"))
+
+    assert report["passed"] is True
+    assert report["all_functional_passed"] is True
+    assert report["functional_passed_tasks"] == 5
+    assert report["all_exact_matched"] is False
+    assert report["exact_match_tasks"] == 4
+    assert report["strict_combined_passed"] is False
+    first = report["tasks"][0]
+    assert first["changed_paths_passed"] is True
+    assert first["functional_tests_passed"] is True
+    assert first["production_profile_passed"] is True
+    assert first["functional_passed"] is True
+    assert first["exact_match"] is False
+    assert first["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "private_path",
+    (".git/config", ".git/objects/info/alternates"),
+)
+def test_candidate_cannot_overlay_private_git_metadata(
+    tmp_path: Path,
+    private_path: str,
+) -> None:
+    _source, package = _build_package(tmp_path)
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+    task_id = package_builder.TASK_IDS[0]
+    task_root = candidate / "tasks" / task_id
+    changes_path = task_root / "changes.json"
+    injected = task_root / "changed-files" / private_path
+    candidate.chmod(0o700)
+    for parent in reversed(injected.parents):
+        if parent == candidate.parent:
+            continue
+        if (
+            (parent == candidate or candidate in parent.parents)
+            and parent.exists()
+        ):
+            parent.chmod(0o700)
+    injected.parent.mkdir(parents=True, exist_ok=True)
+    injected.write_text(
+        "[credential]\n\thelper = hostile\n",
+        encoding="utf-8",
+    )
+    changes_path.chmod(0o600)
+    changes = json.loads(changes_path.read_text(encoding="ascii"))
+    content = injected.read_bytes()
+    changes["entries"].append(
+        {
+            "path": private_path,
+            "operation": "upsert",
+            "object_type": "regular",
+            "mode": 0o644,
+            "byte_length": len(content),
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+        }
+    )
+    changes_path.write_text(
+        json.dumps(changes, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_candidate(candidate)
+
+    with pytest.raises(
+        offline_evaluator.OfflineEvaluationError,
+        match="private Git metadata",
+    ):
+        evaluate_historical_replay(
+            candidate,
+            package,
+            tmp_path / "report",
+        )
+    assert not (tmp_path / "report").exists()
+
+
+def test_candidate_symlink_cannot_target_private_git_metadata(
+    tmp_path: Path,
+) -> None:
+    _source, package = _build_package(tmp_path)
+    candidate = _synthetic_candidate(
+        package,
+        tmp_path / "campaign-run/final-candidate",
+    )
+    task_id = package_builder.TASK_IDS[0]
+    changes_path = candidate / f"tasks/{task_id}/changes.json"
+    candidate.chmod(0o700)
+    changes_path.parent.chmod(0o700)
+    changes_path.chmod(0o600)
+    changes = json.loads(changes_path.read_text(encoding="ascii"))
+    link_target = ".git/config"
+    encoded = os.fsencode(link_target)
+    changes["entries"].append(
+        {
+            "path": "git-config-link",
+            "operation": "upsert",
+            "object_type": "symlink",
+            "target": link_target,
+            "byte_length": len(encoded),
+            "content_sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+    )
+    changes_path.write_text(
+        json.dumps(changes, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    _reseal_candidate(candidate)
+
+    with pytest.raises(
+        offline_evaluator.OfflineEvaluationError,
+        match="symlink targets private Git metadata",
+    ):
+        evaluate_historical_replay(
+            candidate,
+            package,
+            tmp_path / "report",
+        )
 
 
 def test_evaluator_snapshots_candidate_before_using_changed_files(
@@ -1728,10 +2480,11 @@ def test_evaluator_output_substitution_cannot_modify_campaign(
     def substitute_then_write(
         target: offline_evaluator._OutputDirectory,
         report: dict[str, object],
+        artifacts: dict[str, bytes],
     ) -> Path:
         candidate.parent.chmod(0o700)
         target.staging_path.rename(candidate.parent / "injected-report")
-        return original(target, report)
+        return original(target, report, artifacts)
 
     monkeypatch.setattr(
         offline_evaluator,

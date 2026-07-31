@@ -98,20 +98,33 @@ The package configuration is
 `evaluation-config/offline-evaluation.json`. It has schema version 1, a package
 ID, and ordered task records. Each task pins a baseline archive by SHA-256 and
 declares tests through the audited `python_script_v1` runner. Package files are
-non-executable. Each script is digest-pinned and runs inside a fresh Bubblewrap
+non-executable except for executable-mode files copied from pinned dependency
+commits. Each script is digest-pinned and runs inside a fresh Bubblewrap
 namespace containing only the reconstructed workspace, the read-only evaluation
 package, system Python/toolchain files, private temporary storage, private proc,
 and no network. Arbitrary package-defined host commands are not supported.
 Optional exact-reference archives and expected changed paths are also digest-
 or value-pinned.
 
-The offline runner mounts an audited Python, C++, Fortran, assembler, linker,
-and `make` runtime profile rather than the host `/usr` tree. Python starts
-isolated without site packages. A single read-only `/bin/sh` is present for
-declared test-tool compatibility, while package-selected host commands, Node,
-campaign packages, model adapters, user installation roots, and host campaign
-state are absent. Evaluation output must be a new child of an existing exact,
-non-symlink parent disjoint from both inputs.
+The offline runner mounts an audited Python, Git, C++, Fortran, assembler,
+linker, and `make` runtime profile rather than the host `/usr` tree. Git is a
+single qualified executable operating only on an action-owned ephemeral
+repository; user/system configuration, credentials, host repositories, and
+Git helper directories are absent. Python starts isolated without site
+packages. A single read-only `/bin/sh` is present for declared test-tool
+compatibility, while package-selected host commands, Node, campaign packages,
+model adapters, user installation roots, and host campaign state are absent.
+Evaluation output must be a new child of an existing exact, non-symlink parent
+disjoint from both inputs.
+
+Standalone report schema version 2 separates functional quality from historical
+identity. `passed` remains as a compatibility alias for `all_functional_passed`;
+`strict_combined_passed` retains the former functional-plus-exact interpretation.
+Per-task stdout and stderr are drained without unbounded memory capture.
+Content is treated as untrusted because a test can print protected workspace
+bytes: the private report's deterministic `artifacts/` records contain stream
+lengths, hashes, truncation state, and strictly parsed safe exception fields,
+but never raw process output. Their paths and hashes are recorded in the report.
 
 Evaluation results never create campaign transitions, resume a campaign, or
 feed a model. The evaluator is intended to be invoked only after all campaign
