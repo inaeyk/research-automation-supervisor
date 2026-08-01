@@ -47,6 +47,11 @@ flowchart LR
 See [architecture](docs/architecture.md), [single-substage behavior](docs/workflow_engine.md),
 and [campaigns](docs/campaigns.md).
 
+Future work is documented separately in the [0.3–0.6 upgrade roadmap](docs/roadmap/README.md).
+It is planning only: Physics Auditor v1 is the first proposed milestone, followed by
+provider-neutral adapters, explicit parallel DAG campaigns, and later physics research
+profiles. Those features are not available in version 0.2.0.
+
 ## Current status
 
 Version `0.2.0` is the first package-ready release. The deterministic workflow and
