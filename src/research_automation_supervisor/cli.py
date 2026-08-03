@@ -34,6 +34,10 @@ from research_automation_supervisor.errors import (
     LiveShadowStateError,
     PhysicsAuditError,
     PhysicsContractError,
+    PhysicsOracleDependencyError,
+    PhysicsOracleInputError,
+    PhysicsOracleIntegrityError,
+    PhysicsOracleStateError,
     ReplayCampaignDependencyError,
     ReplayCampaignInputError,
     ReplayCampaignLockError,
@@ -70,6 +74,9 @@ from research_automation_supervisor.physics_models import (
     DEFAULT_PHYSICS_AUDIT_POLICY_V1,
     load_physics_audit_report,
     load_physics_task_contract,
+)
+from research_automation_supervisor.physics_oracle_execution import (
+    run_physics_oracle,
 )
 from research_automation_supervisor.physics_routing import (
     derive_physics_audit_decision,
@@ -294,6 +301,74 @@ def validate_physics_audit_command(
             f"Rules fired: {len(decision.rules)}\n"
             "Model execution: unavailable in PA-1"
         )
+
+
+@app.command("run-physics-oracle")
+def run_physics_oracle_command(
+    catalog_path: Annotated[
+        Path,
+        typer.Option("--catalog", help="Trusted operator-owned Physics Oracle catalog."),
+    ],
+    contract_path: Annotated[
+        Path,
+        typer.Option("--contract", help="Validated Physics Task Contract v1."),
+    ],
+    oracle_id: Annotated[
+        str,
+        typer.Option("--oracle-id", help="Declared oracle ID selected from the catalog."),
+    ],
+    task_id: Annotated[
+        str,
+        typer.Option("--task-id", help="Stable task identifier bound into the proof."),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Canonical Git worktree root mounted read-only."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="New explicit directory for the durable action."),
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit the bounded canonical result as JSON.")
+    ] = False,
+) -> None:
+    """Run one trusted fixed oracle without invoking Codex or another model."""
+    try:
+        result = run_physics_oracle(
+            catalog_path=catalog_path,
+            contract_path=contract_path,
+            oracle_id=oracle_id,
+            task_id=task_id,
+            workspace=workspace,
+            output_directory=output,
+        )
+    except PhysicsOracleDependencyError as exc:
+        _render_physics_oracle_error(str(exc), as_json, 3)
+    except PhysicsOracleInputError as exc:
+        _render_physics_oracle_error(str(exc), as_json, 2)
+    except (PhysicsOracleIntegrityError, PhysicsOracleStateError) as exc:
+        _render_physics_oracle_error(str(exc), as_json, 4)
+    except Exception:
+        _render_physics_oracle_internal_error(as_json)
+    if as_json:
+        typer.echo(_stable_json(result.to_canonical_dict()))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    f"Physics oracle: {result.request.oracle_id}",
+                    f"Status: {result.status}",
+                    f"Workspace integrity: {result.integrity_verdict}",
+                    f"Network enforcement: {result.network_enforcement.capability}",
+                    f"Completion proof: {result.completion_proof_sha256}",
+                    f"Artifacts: {output}",
+                    "Model invocation: none",
+                )
+            )
+        )
+    if result.status != "passed":
+        raise typer.Exit(code=5)
 
 
 @app.command("validate-codex-request")
@@ -1322,6 +1397,32 @@ def _render_physics_internal_error(as_json: bool) -> Never:
                 {"error": message, "error_kind": "internal", "ok": False}
             )
         )
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
+
+
+def _render_physics_oracle_error(error: str, as_json: bool, exit_code: int) -> Never:
+    kind = "input" if exit_code == 2 else "dependency" if exit_code == 3 else "integrity"
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {
+                    "error": error,
+                    "error_kind": kind,
+                    "ok": False,
+                }
+            )
+        )
+    else:
+        typer.echo(f"Physics oracle error: {error}", err=True)
+    raise typer.Exit(code=exit_code)
+
+
+def _render_physics_oracle_internal_error(as_json: bool) -> Never:
+    message = "Unexpected internal Physics Oracle execution failure."
+    if as_json:
+        typer.echo(_stable_json({"error": message, "error_kind": "internal", "ok": False}))
     else:
         typer.echo(message, err=True)
     raise typer.Exit(code=1)

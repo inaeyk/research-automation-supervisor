@@ -49,11 +49,14 @@ and [campaigns](docs/campaigns.md).
 
 Future work is documented separately in the [0.3–0.6 upgrade roadmap](docs/roadmap/README.md).
 The package also contains [model-free Physics Auditor PA-1 schema and routing
-foundations](docs/physics_auditor_foundations.md); no Physics Auditor model execution or
-normal-workflow integration is available yet.
-Physics Auditor execution and workflow integration remain planning only, followed by
-provider-neutral adapters, explicit parallel DAG campaigns, and later physics research
-profiles. Those later features are not available in version 0.2.0.
+foundations](docs/physics_auditor_foundations.md) and the isolated [PA-2 trusted Physics
+Oracle execution substrate](docs/physics_oracle_execution.md). PA-2 runs only fixed,
+operator-owned, hash-pinned Python intents through Bubblewrap with actual disabled
+networking, a read-only Git workspace, scratch-only output, canonical completion
+proofs, and conservative recovery. No Physics Auditor model execution or
+normal-workflow integration is available yet. Provider-neutral adapters, explicit
+parallel DAG campaigns, and later physics research profiles are also unavailable in
+version 0.2.0.
 
 ## Current status
 
@@ -84,8 +87,9 @@ evaluator portable across arbitrary toolchains.
 - Codex CLI 0.144.0 or newer for real Worker, Auditor, or Supervisor actions.
 - Project-specific compilers, libraries, or test tools required by your frozen
   acceptance commands.
-- Docker is not required. Bubblewrap and compiler-closure dependencies are needed
-  only for the experimental packaged evaluator.
+- Docker is not required. Bubblewrap is required only for PA-2 Physics Oracle
+  execution and the experimental packaged evaluator. PA-2 fails closed without it;
+  ordinary workflows do not acquire a Bubblewrap dependency.
 
 The bundled synthetic quick start uses a local test double and never contacts a model
 service.

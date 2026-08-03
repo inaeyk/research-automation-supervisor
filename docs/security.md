@@ -64,5 +64,14 @@ a model process can reach protected material.
 - Review every fixed acceptance command: the Stage 2 runner does not provide arbitrary
   test executables with a separate OS-level network namespace.
 
+The PA-2 Physics Oracle runner has a narrower, distinct policy. It accepts no CLI argv
+and executes only a trusted catalog's hash-pinned system-Python intent. Bubblewrap
+`--unshare-all` enforces disabled networking, the workspace is a read-only bind mount,
+and scratch is the sole writable host mount. The child receives a new fixed environment
+rather than inherited variables. If this exact capability is unavailable, PA-2 fails
+closed without launching the oracle. See [trusted Physics Oracle
+execution](physics_oracle_execution.md). This does not change the ordinary Stage 2
+acceptance-test limitation above.
+
 See the official [Codex approval and security guide](https://learn.chatgpt.com/docs/agent-approvals-security.md)
 for current CLI sandbox and approval behavior.

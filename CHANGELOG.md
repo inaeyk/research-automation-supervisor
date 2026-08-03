@@ -15,6 +15,12 @@ versioning while it remains pre-1.0.
 - Public synthetic physics fixtures plus frozen 0.2.0 compatibility fixtures for
   persisted models, journals, service injection, schemas, hashes, transitions, and
   existing CLI behavior.
+- Physics Auditor PA-2 model-free oracle execution: strict operator-owned catalogs,
+  fixed hash-pinned Python intents, shell-free bounded execution, credential-free
+  environments, fail-closed Bubblewrap network namespaces, read-only Git workspaces,
+  scratch manifests, canonical completion proofs, and isolated deterministic recovery.
+- Model-free `run-physics-oracle` developer/qualification command. Physics Auditor
+  model execution and normal-workflow integration still do not exist.
 
 ### Preserved
 

@@ -63,6 +63,15 @@ the complete evidence set: it finalizes a provably completed action exactly once
 pauses when completion is uncertain. It never guesses, retries an uncertain external
 action, or silently heals contradictory evidence.
 
+The model-free PA-2 Physics Oracle substrate is deliberately separate from this state
+machine and its journal. A trusted catalog selects one fixed, hash-pinned Python
+intent. Bubblewrap supplies a read-only workspace, scratch-only writes and an actual
+separate network namespace; unavailable isolation rejects the action before launch.
+Git identity is compared before and after, and a separate PA-2 action-record chain and
+canonical completion proof bind the result. See [trusted Physics Oracle
+execution](physics_oracle_execution.md). Ordinary schema-version-1 substages never
+enter this path.
+
 ## Model boundaries
 
 The role adapter supplies fixed policy:

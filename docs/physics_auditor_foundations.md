@@ -6,8 +6,10 @@ Auditor to ordinary workflows. There is no Physics Auditor model execution, Code
 invocation, oracle execution, repair loop, workflow state, journal form, provider
 dispatch, or GL-specific production behavior in this stage.
 
-The schemas are suitable for public synthetic development and for the later PA-2
-execution layer. They do not approve publication-level scientific claims.
+The schemas are used by the separate [PA-2 trusted oracle execution
+substrate](physics_oracle_execution.md). PA-2 closes declared oracle IDs over an
+operator-owned catalog without changing these PA-1 contract/report/routing semantics.
+Neither stage approves publication-level scientific claims.
 
 ## Authority and decision boundary
 

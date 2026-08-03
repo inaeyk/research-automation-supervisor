@@ -2,10 +2,12 @@
 
 Status: PA-1 strict contract/report schemas, backward-compatibility fixtures, canonical
 serialization, read-only validation CLI, and model-free deterministic routing are
+implemented and qualified. PA-2 fixed trusted intents, isolated model-free oracle
+execution, completion proofs, Git integrity, and separate crash recovery are also
 implemented and qualified while the package remains `0.2.0`. Physics Auditor model
-execution, oracle execution, workflow integration/state, repair, and scientific review
-remain proposed for later stages targeted at `0.3.0`. Names still marked **Proposed**
-do not exist in the current package.
+execution, workflow integration/state, repair, and scientific review remain proposed
+for later stages targeted at `0.3.0`. Names still marked **Proposed** do not exist in
+the current package.
 
 ## Goal
 
@@ -687,8 +689,10 @@ only after evidence references and source anchors are stable; add numerical work
 ## Staged implementation checklist
 
 PA-1 is implemented as the deliberately model-free subset documented in
-[Physics Auditor PA-1 foundations](../physics_auditor_foundations.md). It does not make
-Stages C through E available and does not claim the complete `0.3.0` acceptance gates.
+[Physics Auditor PA-1 foundations](../physics_auditor_foundations.md). PA-2 separately
+qualifies only the Stage C substrate documented in
+[Trusted Physics Oracle execution](../physics_oracle_execution.md). Stages D and E
+remain unavailable, and neither stage claims the complete `0.3.0` acceptance gates.
 
 ### Stage A: freeze compatibility
 
@@ -709,11 +713,11 @@ Stages C through E available and does not claim the complete `0.3.0` acceptance 
 
 ### Stage C: oracle evidence
 
-- [ ] Add fixed shell-free oracle intents, bounded logs/results, completion records,
+- [x] Add fixed shell-free oracle intents, bounded logs/results, completion records,
   action IDs and hashes.
-- [ ] Strip credential-shaped environment names, disable network policy, supply only
+- [x] Strip credential-shaped environment names, disable network policy, supply only
   action scratch, and record before/after Git identity.
-- [ ] Add crash recovery that finalizes a proved completion once and pauses on uncertain
+- [x] Add crash recovery that finalizes a proved completion once and pauses on uncertain
   execution.
 
 ### Stage D: Physics Auditor action

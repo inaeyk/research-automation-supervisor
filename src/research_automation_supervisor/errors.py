@@ -80,6 +80,26 @@ class PhysicsAuditError(PhysicsValidationError):
     """A physics audit report is malformed or contradicts its task contract."""
 
 
+class PhysicsOracleError(SupervisorError):
+    """Base class for trusted, model-free physics-oracle execution errors."""
+
+
+class PhysicsOracleInputError(PhysicsOracleError):
+    """A trusted catalog, request, path, or oracle selection is invalid."""
+
+
+class PhysicsOracleDependencyError(PhysicsOracleError):
+    """A required executable or isolation capability is unavailable."""
+
+
+class PhysicsOracleStateError(PhysicsOracleError):
+    """A durable physics-oracle action cannot be recovered safely."""
+
+
+class PhysicsOracleIntegrityError(PhysicsOracleStateError):
+    """Physics-oracle evidence, workspace, or completion proof was replaced."""
+
+
 class ShadowError(SupervisorError):
     """Base class for expected Stage 3 shadow-calibration errors."""
 
