@@ -21,14 +21,15 @@ The trusted inputs are:
 - a root containing zero or more finalized PA-2 oracle action directories; and
 - a new standalone output directory.
 
-The engine constructs the evidence index and prompt. Neither a Worker nor another
-model can supply a prompt, Codex argv, oracle argv, role policy, output schema, or
-executable policy. The Physics Auditor can inspect declared workspace files using its
-normal read-only Codex workspace tools. No PA-2 oracle executable surface is added to
-the model process. The sealed PA-2 intent and argv remain outside the workspace and
-prompt. As a fail-closed backstop, PA-3 scans the qualified adapter's canonical command
-events for every sealed oracle program path; any matching command makes the action an
-`infrastructure_failure` with `oracle_execution_attempted`, and no report is routed.
+The engine constructs the evidence index, exact projected-workspace manifest, and
+prompt. Neither a Worker nor another model can supply a prompt, Codex argv, oracle
+argv, role policy, output schema, projection, or executable policy. The Physics
+Auditor sees only an action-owned projection mounted read-only at `/workspace` in a
+Bubblewrap synthetic root. The original worktree, its `.git` directory, the PA-2
+evidence tree, sealed programs and intents, ignored files, protected evaluation data,
+other repositories, and the host home are not mounted. A supplementary command-event
+scan remains fail-closed, but namespace non-availability is the primary oracle
+separation control.
 
 PA-3 is Codex-specific. It is not a provider-neutral action or generic model-exec
 adapter. Heterogeneous provider selection remains planned for a later stage.
@@ -49,7 +50,7 @@ Its closed fields are:
 | `approval_policy` | exactly `never` |
 | `network_policy` | `disabled_by_codex_policy_not_kernel_enforced` |
 | `output_schema_id` | exactly `physics_audit_report_v1` |
-| `prompt_template_version` | exactly `physics_auditor_prompt_v1` |
+| `prompt_template_version` | exactly `physics_auditor_prompt_v2` |
 | `session_policy` | exactly `fresh_ephemeral` |
 | `structured_output_policy` | exactly `strict` |
 | `trusted_executable` | optional absolute Codex path plus SHA-256 |
@@ -60,10 +61,14 @@ workspace-write policy, `danger-full-access`, or provider extension field. The b
 selector is versioned without claiming that any other backend exists.
 
 The child environment is built from a small runtime allowlist and is then passed
-through the qualified adapter's credential-name filter. In particular, an outer
-`CODEX_THREAD_ID`, API key, token, proxy, cloud credential, SSH agent, or Git credential
-override is not inherited. Provider credential values are rejected/redacted at the
-adapter boundary and are absent from the result, action record, and proof.
+through the qualified adapter's credential-name filter. An outer `CODEX_THREAD_ID`,
+API key, token, proxy, cloud credential, SSH agent, or Git configuration override is
+not inherited. The host home and original credential locators are absent. The existing
+qualified Codex isolation path mounts exactly its selected subscription authentication
+file read-only at the isolated Codex runtime location; that file is not a projected
+audit input. Its secret fragments are prohibited in adapter events, output, runtime
+state, results, records, and proofs, and the isolated runtime home is scrubbed after
+the fresh action.
 
 ## Codex Physics Auditor role policy
 
@@ -76,15 +81,42 @@ The PA-3 policy is a Codex-specific semantic layer over the unchanged adapter ro
 - no `resume`, `--last`, or `--all`;
 - no Worker or Code Auditor session identifier input;
 - no `--yolo`, `--full-auto`, or `danger-full-access`;
-- a writable action-owned temporary directory outside the project; and
+- a read-only exact projection instead of the source worktree;
+- separate bounded writable action scratch and an isolated runtime home; and
 - strict `PhysicsAuditReportV1` Structured Outputs.
 
 The fixed role-policy canonical SHA-256 is
-`953c71299fa1d0add6a7c3a400f481037661a63ce1f48a06356022b9f9fc45e3`.
+`3ef14f5e708536189df54acf88aa0c90f0aa356188e5f83c392744e9b4e2b7e6`.
+The fixed Bubblewrap policy SHA-256 is
+`d762a628b90ede5647a2475114e04aadc744f977bbaa7d97dc5834830188b560`.
 The adapter supplies `web_search="disabled"` and
 `sandbox_workspace_write.network_access=false`. This is a Codex policy, not a separate
 kernel network namespace, so PA-3 does **not** claim kernel-enforced network isolation.
 PA-2 oracle execution retains its separately qualified Bubblewrap network namespace.
+
+## Projected workspace v1
+
+`PhysicsAuditorProjectionManifestV1` is the complete allowlist. It contains every
+projected relative path, object kind, mode, byte length, SHA-256, and authority class,
+plus the source-workspace identity and fixed absence assertions. Only validated
+declared workspace files, candidate-delta files, and canonical engine control files
+are eligible. The engine control directory contains reduced contract, evidence-index,
+changed-path, oracle-summary/proof-identity, and output-schema JSON. It never contains
+raw oracle streams, a sealed intent, an executable path, or an oracle program.
+
+Projection rejects ignored declared inputs, symlinks, escapes, duplicate or
+overlapping destinations, non-empty ambiguous directory declarations, devices,
+sockets, FIFOs, nested repositories, reserved control collisions, protected path
+components, and size/count overflows. Parent directories are synthesized
+deterministically. `.git` is never copied. Materialization is create-once; recovery
+verifies an existing complete projection and does not repair an incomplete tree.
+
+The action-owned projection is mounted with `--ro-bind` at `/workspace`. The synthetic
+root includes only the existing qualified minimal system runtime, selected Codex
+binary, strict output schema, bounded action output, isolated runtime home, and
+authentication runtime material. Original workspace and PA-2 roots are declared
+forbidden mount sources. A separate PID namespace makes `/proc/self/root` and
+`/proc/1/root` refer to the same synthetic root, not the host filesystem.
 
 ## Safe evidence index v1
 
@@ -96,8 +128,9 @@ PA-2 oracle execution retains its separately qualified Bubblewrap network namesp
 - relative declared and changed workspace paths with kind, mode, size, SHA-256, and
   bounded line count;
 - one entry for every contract oracle, marked `verified` or explicitly `missing`;
-- safe PA-2 status, outcome, structured-result digest, completion-proof identity,
-  intent/policy hashes, and artifact metadata; and
+- safe PA-2 status, outcome, bounded declared boolean check results,
+  structured-result digest, completion-proof identity, intent/policy hashes, and
+  artifact metadata; and
 - fixed statements that raw streams, machine temporary paths, and protected historical
   material are excluded.
 
@@ -116,7 +149,7 @@ the report.
 
 ## Deterministic prompt
 
-The human-written `physics_auditor_prompt_v1` template has these fixed sections:
+The human-written `physics_auditor_prompt_v2` template has these fixed sections:
 
 1. role and independence;
 2. audit scope;
@@ -124,7 +157,7 @@ The human-written `physics_auditor_prompt_v1` template has these fixed sections:
 4. canonical Physics Task Contract v1;
 5. canonical safe evidence index;
 6. verified oracle summaries and proof identities;
-7. relative workspace paths and changed-path manifest;
+7. relative workspace paths, changed-path manifest, and exact projection manifest;
 8. evidence citation rules;
 9. mandatory human-gate rules;
 10. strict PhysicsAuditReportV1 requirements and output schema; and
@@ -136,7 +169,7 @@ PID, hostname, provider session ID, absolute workspace/output path, or model-gen
 instruction. It does not request hidden chain of thought.
 
 The template SHA-256 is
-`e3e444ad4b9a798f14cd0b67727150a503fba8e87651c75f6a77277a667b804c`.
+`dcc15eac412efd0b8a1628adc05f21765d744ba1265bd8296aeac0c0cd477c6c`.
 The strict output-schema SHA-256 is
 `82ffc2fe49e3929678368733c6200933d072c27abcd548d65cb52dbe62121297`.
 The public missing-evidence golden prompt is recorded in
@@ -144,11 +177,12 @@ The public missing-evidence golden prompt is recorded in
 
 ## Request, result, record, and proof
 
-`PhysicsAuditorActionRequestV1` binds the action/task IDs, contract/config/workspace,
-changed-path and evidence-index hashes, unique PA-2 result/proof/intent/policy bindings,
-declared derivation/document paths, template identity, output schema, attempt, and the
-literal standalone output-directory identity. It contains no absolute temporary path,
-command, credential, hidden evaluation locator, or provider session ID.
+`PhysicsAuditorActionRequestV1` binds the action/task IDs, contract/config/source
+workspace, changed-path, evidence-index, projection-manifest, and fixed Bubblewrap
+policy hashes, unique PA-2 result/proof/intent/policy bindings, declared
+derivation/document paths, template identity, output schema, attempt, and the literal
+standalone output-directory identity. It contains no absolute temporary path, command,
+credential, hidden evaluation locator, or provider session ID.
 
 `PhysicsAuditorActionRecordV1` is a separate immutable, self-hashed chain. It may keep
 the exact provider session/thread and Linux PID/start-tick identity as operational
@@ -169,22 +203,26 @@ A successful Codex process with malformed or unclosed structured output is
 the unchanged `derive_physics_audit_decision` function is authoritative even when it
 overrides the model's self-declared verdict.
 
-The Codex-specific action proof binds the request, contract, config, backend executable
-and version identity, model/effort, role policy, template and rendered prompt, output
-schema, initial/post-model/final workspace identities, evidence and oracle-proof
-manifests, bounded model output, parsed report, routing decision, action status, and
-integrity verdict, including the oracle-command detection verdict. Verification also
-revalidates the complete qualified-adapter artifact manifest and its exact read-only,
-ephemeral, no-resume command policy. PID, time, hostname, terminal width, absolute
-temporary paths, progress output, and provider session IDs are excluded from the
-canonical semantic proof.
+The Codex-specific action proof additionally binds the projection manifest, fixed
+Bubblewrap policy, observed Bubblewrap backend identity, projection-integrity result,
+request, contract, config, backend executable and version identity, model/effort, role
+policy, template and rendered prompt, output schema, initial/post-model/final source
+workspace identities, evidence and oracle-proof manifests, bounded model output,
+parsed report, routing decision, action status, and supplementary oracle-command
+detection verdict. Verification reconstructs the complete Bubblewrap command and
+mount allowlist as well as the adapter artifact manifest. PID, time, hostname,
+terminal width, absolute temporary paths, progress output, and provider session IDs
+remain outside the canonical semantic proof.
 
 ## Workspace integrity and recovery
 
-The qualified PA-2 identity is collected before launch, immediately after the Codex
-action returns, and again before accepting the report for routing. It covers tracked
+The qualified PA-2 source identity is collected before projection and launch,
+immediately after the Codex action returns, and again before accepting the report for
+routing. It covers tracked
 contents, staging/index state, mode, symlinks, all non-ignored untracked paths, status,
-and recursive submodule status. Any change overrides a model pass. PA-3 never reverts,
+and recursive submodule status. The complete projection is independently verified
+after materialization, before launch, after model termination, and immediately before
+routing. A source or projection mismatch overrides a model pass. PA-3 never reverts,
 deletes, chmods, or repairs a project path.
 
 The standalone phases are:
@@ -201,8 +239,10 @@ The standalone phases are:
 10. `routing_completed`
 11. `action_proof_finalized`
 
-Accepted, evidence-verified, and prompt-finalized actions can continue because no
-launch could have occurred. Once launch is possible, PA-3 never reruns blindly and
+Accepted actions can continue only when any existing projection is complete and exact;
+an incomplete projection fails closed. Evidence-verified and prompt-finalized actions
+reverify their durable projection before continuing. Once launch is possible, PA-3
+never reruns blindly and
 never resumes a Codex session. A missing, stale, live, or reused PID in an ambiguous
 post-launch record becomes `indeterminate_recovery`; a matching live process is
 terminated without continuation. Durable output recorded after an observed model exit
@@ -243,6 +283,12 @@ protected historical material, or machine-specific scientific dependencies.
 - It does not approve publication-level claims or scientific release.
 - Human-gate routing is reported but not integrated into workflow state.
 - Only Codex CLI is supported in PA-3; no provider-neutral claim is made.
+- Linux Bubblewrap user namespaces and the existing qualified Codex isolation runtime
+  are required for real execution; validation-only remains model- and Bubblewrap-free.
+- The selected subscription-authentication file is unavoidable Codex runtime material,
+  not audit evidence. Its path and contents are excluded from the projected workspace,
+  prompt, semantic proof, and durable outputs; confidentiality scanning fails closed on
+  any attempted output disclosure.
 - Codex network disablement is policy-level, not a PA-2-style kernel namespace.
 - Full physics-quality qualification, seeded-defect benchmarks, protected evaluation,
   and the GL pilot remain later work.

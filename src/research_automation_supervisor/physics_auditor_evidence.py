@@ -29,13 +29,20 @@ from research_automation_supervisor.physics_auditor_models import (
 )
 from research_automation_supervisor.physics_models import PhysicsTaskContractV1
 from research_automation_supervisor.physics_oracle_execution import (
+    CONTROL_DIRECTORY as ORACLE_CONTROL_DIRECTORY,
+)
+from research_automation_supervisor.physics_oracle_execution import (
+    DECLARED_RESULT_FILE,
     PROOF_FILE,
     RESULT_FILE,
+    SEALED_INTENT_FILE,
     verify_physics_oracle_completion,
 )
 from research_automation_supervisor.physics_oracle_models import (
     PhysicsOracleCompletionProofV1,
+    PhysicsOracleDeclaredResultV1,
     PhysicsOracleExecutionResultV1,
+    PhysicsOracleIntentV1,
     PhysicsOracleWorkspaceIdentityV1,
 )
 
@@ -57,7 +64,16 @@ _GIT_ENVIRONMENT = {
     "XDG_CONFIG_HOME": "/nonexistent",
 }
 _PROTECTED_COMPONENTS = frozenset(
-    {"gold", "hidden", "historical_gold", "protected", "private_evaluation"}
+    {
+        "candidate-evaluation",
+        "candidate_evaluation",
+        "gold",
+        "hidden",
+        "historical",
+        "historical_gold",
+        "protected",
+        "private_evaluation",
+    }
 )
 
 
@@ -68,6 +84,7 @@ class DiscoveredPhysicsAuditorEvidence:
     index: PhysicsAuditorEvidenceIndexV1
     bindings: tuple[PhysicsAuditorOracleProofBindingV1, ...]
     oracle_directories: tuple[tuple[str, Path], ...]
+    oracle_program_paths: tuple[str, ...]
 
 
 def collect_changed_path_manifest(
@@ -108,6 +125,7 @@ def discover_physics_auditor_evidence(
         str, tuple[Path, PhysicsOracleExecutionResultV1, PhysicsOracleCompletionProofV1]
     ] = {}
     proof_ids: set[str] = set()
+    oracle_program_paths: set[str] = set()
     for directory in candidate_directories:
         result = _load_exact_model(
             directory / RESULT_FILE,
@@ -119,6 +137,13 @@ def discover_physics_auditor_evidence(
             PhysicsOracleCompletionProofV1,
             "PA-2 completion proof",
         )
+        intent = _load_exact_model(
+            directory / ORACLE_CONTROL_DIRECTORY / SEALED_INTENT_FILE,
+            PhysicsOracleIntentV1,
+            "sealed PA-2 oracle intent",
+        )
+        _validate_public_relative_path(intent.program.path)
+        oracle_program_paths.add(intent.program.path)
         oracle_id = result.request.oracle_id
         if oracle_id not in contract_oracles:
             raise PhysicsAuditorIntegrityError(
@@ -159,6 +184,22 @@ def discover_physics_auditor_evidence(
         directory, result, proof = discovered
         result_hash = result.canonical_sha256()
         proof_hash = proof.canonical_sha256()
+        structured_checks = ()
+        if result.structured_output_status == "parsed":
+            declared_result = _load_exact_model(
+                directory / DECLARED_RESULT_FILE,
+                PhysicsOracleDeclaredResultV1,
+                "declared PA-2 structured result",
+            )
+            if (
+                declared_result.oracle_id != oracle.id
+                or declared_result.outcome != result.declared_outcome
+                or declared_result.canonical_sha256() != result.structured_result_sha256
+            ):
+                raise PhysicsAuditorIntegrityError(
+                    "declared PA-2 structured result contradicts its result"
+                )
+            structured_checks = declared_result.checks
         oracle_entries.append(
             PhysicsAuditorOracleEvidenceV1(
                 oracle_id=oracle.id,
@@ -174,6 +215,7 @@ def discover_physics_auditor_evidence(
                 failure_reason=result.failure_reason,
                 declared_outcome=result.declared_outcome,
                 structured_result_sha256=result.structured_result_sha256,
+                structured_checks=structured_checks,
                 artifacts=result.artifacts,
             )
         )
@@ -242,6 +284,7 @@ def discover_physics_auditor_evidence(
         index=index,
         bindings=tuple(sorted(bindings, key=lambda item: item.oracle_id)),
         oracle_directories=tuple(sorted(directories)),
+        oracle_program_paths=tuple(sorted(oracle_program_paths)),
     )
 
 
@@ -265,6 +308,14 @@ def verify_discovered_physics_auditor_evidence(
                 "PA-2 oracle completion proof verification failed"
             ) from exc
         entry = expected[oracle_id]
+        structured_checks = ()
+        if result.structured_output_status == "parsed":
+            declared_result = _load_exact_model(
+                directory / DECLARED_RESULT_FILE,
+                PhysicsOracleDeclaredResultV1,
+                "declared PA-2 structured result",
+            )
+            structured_checks = declared_result.checks
         if (
             entry.availability != "verified"
             or result.request.task_id != task_id
@@ -278,6 +329,7 @@ def verify_discovered_physics_auditor_evidence(
             or result.request.action_id != entry.completion_proof_id
             or result.request.trusted_intent_sha256 != entry.trusted_intent_sha256
             or result.request.execution_policy_sha256 != entry.execution_policy_sha256
+            or structured_checks != entry.structured_checks
         ):
             raise PhysicsAuditorIntegrityError(
                 "PA-2 oracle evidence contradicts task, policy, or workspace authority"

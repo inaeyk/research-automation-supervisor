@@ -1,6 +1,7 @@
 {
-  "missing_evidence_prompt_byte_count": 13643,
-  "missing_evidence_prompt_sha256": "66134010bfe102575f6a9d2cad03f2d2d5f18d0a6614e8515d6a9b0eb810a557",
+  "missing_evidence_prompt_byte_count": 16611,
+  "missing_evidence_prompt_sha256": "dacc627eab721bdbb6211f0b8c043baff461c8b3f548f2e4764ce3745597031f",
   "output_schema_sha256": "82ffc2fe49e3929678368733c6200933d072c27abcd548d65cb52dbe62121297",
-  "prompt_template_sha256": "e3e444ad4b9a798f14cd0b67727150a503fba8e87651c75f6a77277a667b804c"
+  "projection_manifest_sha256": "57f6292d5e48153b8d472d456723b2cdb3e45302843aa3f117fe2db1cd5b5f95",
+  "prompt_template_sha256": "dcc15eac412efd0b8a1628adc05f21765d744ba1265bd8296aeac0c0cd477c6c"
 }

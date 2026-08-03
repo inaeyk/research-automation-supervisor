@@ -11,6 +11,7 @@ from research_automation_supervisor.physics_auditor_models import (
     PHYSICS_AUDITOR_PROMPT_TEMPLATE_VERSION,
     PhysicsAuditorChangedPathManifestV1,
     PhysicsAuditorEvidenceIndexV1,
+    PhysicsAuditorProjectionManifestV1,
 )
 from research_automation_supervisor.physics_models import (
     PHYSICS_AUDIT_REPORT_OUTPUT_SCHEMA,
@@ -46,6 +47,15 @@ _CITATIONS = (
     "derivation, or document. A missing oracle entry may be cited only as evidence that required "
     "evidence is missing. Never invent a path, ID, command, oracle result, artifact, test, or "
     "contract field."
+)
+_REQUIRED_EVIDENCE = (
+    "For every required-identity or limiting-case check whose status is passed or failed, cite "
+    "evidence satisfying every required_evidence_kinds entry declared for that target. A verified "
+    "oracle reference contributes both 'oracle' and that oracle's declared contract kind (for "
+    "example, an analytic oracle satisfies an analytic requirement). An unresolved check may lack "
+    "a required kind only when its evidence_sufficiency and evidence-blocking finding consistently "
+    "state that the authority is missing. A sign defect does not by itself fail a zero-input "
+    "limiting case: assess that case separately and cite its analytic authority."
 )
 _HUMAN_GATES = (
     "Report a human gate for any convention change, unresolved gauge or constraint ambiguity, "
@@ -90,9 +100,12 @@ PHYSICS_AUDITOR_PROMPT_TEMPLATE_TEXT = "\n".join(
         "7. DECLARED WORKSPACE PATHS AND CHANGED-PATH MANIFEST",
         "<ENGINE_CANONICAL_CHANGED_PATHS_JSON>",
         "<ENGINE_CANONICAL_WORKSPACE_FILES_JSON>",
+        "The filesystem visible at /workspace is exactly this read-only projection manifest:",
+        "<ENGINE_CANONICAL_PROJECTION_MANIFEST_JSON>",
         "",
         "8. EVIDENCE CITATION RULES",
         _CITATIONS,
+        _REQUIRED_EVIDENCE,
         "",
         "9. HUMAN-GATE RULES",
         _HUMAN_GATES,
@@ -121,6 +134,7 @@ class RenderedPhysicsAuditorPrompt:
     contract_sha256: str
     evidence_index_sha256: str
     changed_path_manifest_sha256: str
+    projection_manifest_sha256: str
     output_schema_sha256: str
     rendered_sha256: str
     byte_count: int
@@ -130,6 +144,7 @@ def build_physics_auditor_prompt(
     contract: PhysicsTaskContractV1,
     evidence_index: PhysicsAuditorEvidenceIndexV1,
     changed_paths: PhysicsAuditorChangedPathManifestV1,
+    projection_manifest: PhysicsAuditorProjectionManifestV1,
 ) -> RenderedPhysicsAuditorPrompt:
     """Render the exact PA-3 prompt in fixed section and collection order."""
     contract_bytes = contract.to_canonical_json()
@@ -142,12 +157,16 @@ def build_physics_auditor_prompt(
         [item.model_dump(mode="json") for item in evidence_index.workspace_files]
     )
     schema_bytes = canonical_json(PHYSICS_AUDIT_REPORT_OUTPUT_SCHEMA)
+    projection_bytes = projection_manifest.to_canonical_json()
     replacements = {
         "<ENGINE_CANONICAL_CONTRACT_JSON>": contract_bytes.decode("ascii").rstrip("\n"),
         "<ENGINE_CANONICAL_EVIDENCE_INDEX_JSON>": evidence_bytes.decode("ascii").rstrip("\n"),
         "<ENGINE_CANONICAL_ORACLE_SUMMARIES_JSON>": oracle_bytes.decode("ascii").rstrip("\n"),
         "<ENGINE_CANONICAL_CHANGED_PATHS_JSON>": changed_bytes.decode("ascii").rstrip("\n"),
         "<ENGINE_CANONICAL_WORKSPACE_FILES_JSON>": workspace_files_bytes.decode("ascii").rstrip(
+            "\n"
+        ),
+        "<ENGINE_CANONICAL_PROJECTION_MANIFEST_JSON>": projection_bytes.decode("ascii").rstrip(
             "\n"
         ),
         "<ENGINE_CANONICAL_OUTPUT_SCHEMA_JSON>": schema_bytes.decode("ascii").rstrip("\n"),
@@ -169,6 +188,7 @@ def build_physics_auditor_prompt(
         contract_sha256=contract.canonical_sha256(),
         evidence_index_sha256=evidence_index.canonical_sha256(),
         changed_path_manifest_sha256=changed_paths.canonical_sha256(),
+        projection_manifest_sha256=projection_manifest.canonical_sha256(),
         output_schema_sha256=hashlib.sha256(schema_bytes).hexdigest(),
         rendered_sha256=hashlib.sha256(content).hexdigest(),
         byte_count=len(content),

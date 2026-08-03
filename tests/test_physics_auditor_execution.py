@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import subprocess
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ import yaml
 from research_automation_supervisor.codex_models import CodexRunResult
 from research_automation_supervisor.durable_state import canonical_json
 from research_automation_supervisor.errors import (
+    LiveShadowDependencyError,
+    PhysicsAuditorDependencyError,
     PhysicsAuditorInputError,
     PhysicsAuditorIntegrityError,
 )
@@ -25,6 +28,9 @@ from research_automation_supervisor.physics_auditor_execution import (
     verify_physics_auditor_action,
 )
 from research_automation_supervisor.physics_oracle_execution import run_physics_oracle
+from research_automation_supervisor.physics_oracle_workspace import (
+    collect_physics_oracle_workspace_identity,
+)
 
 ROOT = Path(__file__).parents[1]
 SYNTHETIC = ROOT / "examples/physics_auditor/synthetic"
@@ -115,6 +121,76 @@ def _pinned_fake_config(tmp_path: Path) -> Path:
     return path
 
 
+def _pinned_config_for(tmp_path: Path, executable: Path) -> Path:
+    config = yaml.safe_load((SYNTHETIC / "execution-config.yaml").read_text())
+    config["trusted_executable"] = {
+        "path": str(executable),
+        "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+    }
+    path = tmp_path / "namespace-execution-config.json"
+    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def _write_namespace_probe_codex(
+    path: Path,
+    *,
+    source_workspace: Path,
+    oracle_evidence_root: Path,
+) -> None:
+    report = (SYNTHETIC / "reports/clean.json").read_text()
+    source = f"""#!/usr/bin/python3
+import json
+import os
+import pathlib
+import sys
+
+SOURCE = {str(source_workspace)!r}
+ORACLE_EVIDENCE = {str(oracle_evidence_root)!r}
+
+def option(name):
+    index = sys.argv.index(name)
+    return sys.argv[index + 1]
+
+def visible(root):
+    result = []
+    for directory, directories, files in os.walk(root):
+        directories.sort()
+        files.sort()
+        relative_root = pathlib.Path(directory).relative_to(root)
+        for name in directories + files:
+            result.append((relative_root / name).as_posix())
+    return sorted(result)
+
+sys.stdin.buffer.read()
+write_denied = False
+try:
+    pathlib.Path("/workspace/model-write-probe").write_text("forbidden")
+except OSError:
+    write_denied = True
+probe = {{
+    "argv": sys.argv[1:],
+    "cwd": os.getcwd(),
+    "visible": visible(pathlib.Path("/workspace")),
+    "source_workspace_absent": not os.path.exists(SOURCE),
+    "oracle_evidence_absent": not os.path.exists(ORACLE_EVIDENCE),
+    "proc_self_source_absent": not os.path.exists("/proc/self/root" + SOURCE),
+    "proc_one_source_absent": not os.path.exists("/proc/1/root" + SOURCE),
+    "git_absent": not os.path.exists("/workspace/.git"),
+    "oracle_program_absent": not os.path.exists("/workspace/oracle.py"),
+    "workspace_write_denied": write_denied,
+    "environment_names": sorted(os.environ),
+}}
+pathlib.Path("/scratch/namespace-probe.json").write_text(
+    json.dumps(probe, sort_keys=True), encoding="utf-8"
+)
+pathlib.Path(option("--output-last-message")).write_text({report!r}, encoding="utf-8")
+print(json.dumps({{"type": "thread.started", "thread_id": "fresh-projected-session"}}))
+"""
+    path.write_text(textwrap.dedent(source), encoding="utf-8")
+    path.chmod(0o700)
+
+
 def _evidence(tmp_path: Path, workspace: Path) -> Path:
     evidence = tmp_path / "evidence"
     evidence.mkdir()
@@ -151,7 +227,7 @@ class ScriptedCodex:
         executable = Path(kwargs["codex_executable"])
         output = self.report.read_bytes()
         if self.mutate_path is not None:
-            (self.prepared.workspace / self.mutate_path).write_text("mutated\n")
+            (kwargs["source_workspace"] / self.mutate_path).write_text("mutated\n")
         return PhysicsAuditorCodexRun(
             adapter_result=CodexRunResult(
                 run_id=self.prepared.request.run_id,
@@ -173,6 +249,9 @@ class ScriptedCodex:
             provider_session_id="fresh-physics-session",
             provider_thread_started_ids=("fresh-physics-session",),
             backend_policy_evidence_sha256=hashlib.sha256(b"fake-policy").hexdigest(),
+            bubblewrap_backend_identity_sha256=hashlib.sha256(
+                b"scripted-bubblewrap-policy"
+            ).hexdigest(),
             codex_executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
             codex_cli_version="scripted-test-v1",
         )
@@ -244,14 +323,14 @@ def test_qualified_adapter_command_is_fresh_read_only_and_drops_outer_session(
     tmp_path: Path,
 ) -> None:
     workspace = _workspace(tmp_path)
-    observation = tmp_path / "fake-observation.json"
+    observation = "/scratch/fake-observation.json"
     (workspace / ".fake-codex.json").write_text(
         json.dumps(
             {
                 "require_stage2_policy": True,
                 "expected_sandbox": "read-only",
                 "expected_ephemeral": True,
-                "observation_path": str(observation),
+                "observation_path": observation,
                 "stdout_lines": ['{"thread_id":"fresh-physics-thread","type":"thread.started"}'],
                 "final": (SYNTHETIC / "reports/clean.json").read_text(),
             }
@@ -275,7 +354,13 @@ def test_qualified_adapter_command_is_fresh_read_only_and_drops_outer_session(
 
     assert result.routing_decision is not None
     assert result.routing_decision.outcome == "pass"
-    observed = json.loads(observation.read_text())
+    observed = json.loads(
+        (
+            tmp_path
+            / "audit-output/codex-action/physics-audit-synthetic-task-1/scratch"
+            / "fake-observation.json"
+        ).read_text()
+    )
     argv = observed["argv"]
     assert "--ephemeral" in argv
     assert argv[argv.index("--sandbox") + 1] == "read-only"
@@ -292,6 +377,116 @@ def test_qualified_adapter_command_is_fresh_read_only_and_drops_outer_session(
     assert b"outer-yolo-session" not in durable
 
 
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-3 isolation unavailable")
+def test_production_namespace_exposes_only_projection_and_hides_host_authority(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    (workspace / ".gitignore").write_text("ignored-secret\nprotected/\n", encoding="ascii")
+    (workspace / "ignored-secret").write_text("secret\n", encoding="ascii")
+    protected = workspace / "protected"
+    protected.mkdir()
+    (protected / "historical_gold.json").write_text("{}\n", encoding="ascii")
+    _git(workspace, "add", ".gitignore")
+    _git(workspace, "commit", "-qm", "exclude private synthetic files")
+    evidence = _evidence(tmp_path, workspace)
+    fake = tmp_path / "namespace-probe-codex"
+    _write_namespace_probe_codex(
+        fake,
+        source_workspace=workspace,
+        oracle_evidence_root=evidence,
+    )
+    output = tmp_path / "audit-output"
+    before = collect_physics_oracle_workspace_identity(workspace)
+
+    result = run_physics_auditor(
+        contract_path=SYNTHETIC / "contract.yaml",
+        execution_config_path=_pinned_config_for(tmp_path, fake),
+        task_id="synthetic-task",
+        workspace=workspace,
+        oracle_evidence_root=evidence,
+        output_directory=output,
+        environ={
+            **os.environ,
+            "CODEX_THREAD_ID": "outer-yolo-session",
+            "OPENAI_API_KEY": "outer-provider-token",
+            "SSH_AUTH_SOCK": "/tmp/outer-agent",
+            "GIT_CONFIG_GLOBAL": "/tmp/outer-gitconfig",
+        },
+    )
+
+    assert result.status == "routing_completed"
+    assert result.routing_decision is not None
+    assert result.routing_decision.outcome == "pass"
+    assert result.projected_workspace_integrity == "unchanged"
+    probe_path = output / "codex-action/physics-audit-synthetic-task-1/scratch/namespace-probe.json"
+    probe = json.loads(probe_path.read_text())
+    assert probe["cwd"] == "/workspace"
+    assert probe["source_workspace_absent"] is True
+    assert probe["oracle_evidence_absent"] is True
+    assert probe["proc_self_source_absent"] is True
+    assert probe["proc_one_source_absent"] is True
+    assert probe["git_absent"] is True
+    assert probe["oracle_program_absent"] is True
+    assert probe["workspace_write_denied"] is True
+    assert "--ephemeral" in probe["argv"]
+    assert "--skip-git-repo-check" in probe["argv"]
+    assert "--yolo" not in probe["argv"]
+    assert "danger-full-access" not in probe["argv"]
+    assert "OPENAI_API_KEY" not in probe["environment_names"]
+    assert "CODEX_THREAD_ID" not in probe["environment_names"]
+    assert "SSH_AUTH_SOCK" not in probe["environment_names"]
+    assert "GIT_CONFIG_GLOBAL" not in probe["environment_names"]
+    visible = set(probe["visible"])
+    assert "implementation.py" in visible
+    assert "derivation.md" in visible
+    assert "oracle.py" not in visible
+    assert "ignored-secret" not in visible
+    assert not any(item.startswith("protected") for item in visible)
+    assert collect_physics_oracle_workspace_identity(workspace) == before
+    assert (
+        verify_physics_auditor_action(
+            contract_path=SYNTHETIC / "contract.yaml",
+            execution_config_path=_pinned_config_for(tmp_path, fake),
+            task_id="synthetic-task",
+            workspace=workspace,
+            oracle_evidence_root=evidence,
+            output_directory=output,
+        )
+        == result
+    )
+    proof = json.loads((output / "action-proof.json").read_text())
+    assert proof["projection_manifest_sha256"] == result.projection_manifest_sha256
+    assert proof["bubblewrap_policy_sha256"] == result.bubblewrap_policy_sha256
+    assert proof["bubblewrap_backend_identity_sha256"] != hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
+def test_missing_bubblewrap_capability_fails_closed_before_codex_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    evidence = _evidence(tmp_path, workspace)
+
+    def unavailable(**_kwargs: Any) -> None:
+        raise LiveShadowDependencyError("Bubblewrap unavailable")
+
+    monkeypatch.setattr(
+        "research_automation_supervisor.physics_auditor_execution.preflight_bubblewrap_isolation",
+        unavailable,
+    )
+    with pytest.raises(PhysicsAuditorDependencyError, match="transport failed"):
+        run_physics_auditor(
+            contract_path=SYNTHETIC / "contract.yaml",
+            execution_config_path=_pinned_fake_config(tmp_path),
+            task_id="synthetic-task",
+            workspace=workspace,
+            oracle_evidence_root=evidence,
+            output_directory=tmp_path / "audit-output",
+        )
+
+
 @pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
 def test_model_command_naming_sealed_oracle_program_fails_closed(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
@@ -301,7 +496,7 @@ def test_model_command_naming_sealed_oracle_program_fails_closed(tmp_path: Path)
                 "require_stage2_policy": True,
                 "expected_sandbox": "read-only",
                 "expected_ephemeral": True,
-                "observation_path": str(tmp_path / "fake-observation.json"),
+                "observation_path": "/scratch/fake-observation.json",
                 "stdout_lines": [
                     '{"thread_id":"fresh-oracle-attempt","type":"thread.started"}',
                     json.dumps(
@@ -565,6 +760,62 @@ def test_workspace_mutation_overrides_a_valid_pass_report(tmp_path: Path) -> Non
     assert (workspace / "implementation.py").read_text() == "mutated\n"
 
 
+class ProjectionMutatingCodex(ScriptedCodex):
+    def __call__(self, **kwargs: Any) -> PhysicsAuditorCodexRun:
+        projected = kwargs["prepared"].workspace / "implementation.py"
+        projected.chmod(0o600)
+        projected.write_text("projection mutation\n", encoding="ascii")
+        return super().__call__(**kwargs)
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
+def test_projection_mutation_overrides_valid_report_without_changing_source(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    evidence = _evidence(tmp_path, workspace)
+    before = collect_physics_oracle_workspace_identity(workspace)
+
+    result = run_physics_auditor(
+        contract_path=SYNTHETIC / "contract.yaml",
+        execution_config_path=SYNTHETIC / "execution-config.yaml",
+        task_id="synthetic-task",
+        workspace=workspace,
+        oracle_evidence_root=evidence,
+        output_directory=tmp_path / "audit-output",
+        codex_invoker=ProjectionMutatingCodex(SYNTHETIC / "reports/clean.json"),
+    )
+
+    assert result.status == "workspace_integrity_failure"
+    assert result.failure_reason == "projection_changed"
+    assert result.projected_workspace_integrity == "changed"
+    assert result.integrity_verdict == "unchanged"
+    assert result.routing_decision is None
+    assert collect_physics_oracle_workspace_identity(workspace) == before
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
+def test_changed_sealed_oracle_program_is_rejected_before_model_launch(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    (workspace / "oracle.py").write_text("raise SystemExit(0)\n", encoding="ascii")
+    evidence = _evidence(tmp_path, workspace)
+    model = ScriptedCodex(SYNTHETIC / "reports/clean.json")
+
+    with pytest.raises(PhysicsAuditorInputError, match="sealed PA-2 oracle program"):
+        run_physics_auditor(
+            contract_path=SYNTHETIC / "contract.yaml",
+            execution_config_path=SYNTHETIC / "execution-config.yaml",
+            task_id="synthetic-task",
+            workspace=workspace,
+            oracle_evidence_root=evidence,
+            output_directory=tmp_path / "audit-output",
+            codex_invoker=model,
+        )
+    assert model.calls == 0
+
+
 @pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
 def test_workspace_is_rechecked_immediately_before_model_launch(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
@@ -596,7 +847,7 @@ class MutatingCodex(ScriptedCodex):
         self.mutation = mutation
 
     def __call__(self, **kwargs: Any) -> PhysicsAuditorCodexRun:
-        workspace = kwargs["prepared"].workspace
+        workspace = kwargs["source_workspace"]
         if self.mutation == "staged":
             (workspace / "implementation.py").write_text("staged mutation\n")
             _git(workspace, "add", "implementation.py")
@@ -807,6 +1058,7 @@ def test_action_proof_tampering_is_detected(tmp_path: Path) -> None:
     "relative_path",
     [
         "control/prompt.txt",
+        "control/projection-manifest.json",
         "model-output.json",
         "physics-audit-report.json",
         "routing-decision.json",
@@ -843,8 +1095,81 @@ def test_bound_action_artifact_tampering_is_detected(
         )
 
 
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
+def test_finalized_projection_tampering_is_detected_without_relaunch(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    evidence = _evidence(tmp_path, workspace)
+    output = tmp_path / "audit-output"
+    model = ScriptedCodex(SYNTHETIC / "reports/clean.json")
+    run_physics_auditor(
+        contract_path=SYNTHETIC / "contract.yaml",
+        execution_config_path=SYNTHETIC / "execution-config.yaml",
+        task_id="synthetic-task",
+        workspace=workspace,
+        oracle_evidence_root=evidence,
+        output_directory=output,
+        codex_invoker=model,
+    )
+    projected = output / "quarantine/workspace/implementation.py"
+    projected.chmod(0o600)
+    projected.write_text("tampered projection\n", encoding="ascii")
+
+    with pytest.raises(PhysicsAuditorIntegrityError, match="projected"):
+        resume_physics_auditor(
+            contract_path=SYNTHETIC / "contract.yaml",
+            execution_config_path=SYNTHETIC / "execution-config.yaml",
+            task_id="synthetic-task",
+            workspace=workspace,
+            oracle_evidence_root=evidence,
+            output_directory=output,
+            codex_invoker=model,
+        )
+    assert model.calls == 1
+
+
 class InjectedCrash(RuntimeError):
     pass
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
+def test_incomplete_projection_after_prelaunch_crash_fails_closed(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    evidence = _evidence(tmp_path, workspace)
+    output = tmp_path / "audit-output"
+    model = ScriptedCodex(SYNTHETIC / "reports/clean.json")
+
+    def checkpoint(phase: str) -> None:
+        if phase == "action_accepted":
+            raise InjectedCrash(phase)
+
+    with pytest.raises(InjectedCrash):
+        run_physics_auditor(
+            contract_path=SYNTHETIC / "contract.yaml",
+            execution_config_path=SYNTHETIC / "execution-config.yaml",
+            task_id="synthetic-task",
+            workspace=workspace,
+            oracle_evidence_root=evidence,
+            output_directory=output,
+            codex_invoker=model,
+            checkpoint=checkpoint,
+        )
+    partial = output / "quarantine/workspace"
+    partial.mkdir(parents=True)
+    (partial / "implementation.py").write_text("partial\n", encoding="ascii")
+
+    with pytest.raises(PhysicsAuditorIntegrityError, match="projected"):
+        resume_physics_auditor(
+            contract_path=SYNTHETIC / "contract.yaml",
+            execution_config_path=SYNTHETIC / "execution-config.yaml",
+            task_id="synthetic-task",
+            workspace=workspace,
+            oracle_evidence_root=evidence,
+            output_directory=output,
+            codex_invoker=model,
+        )
+    assert model.calls == 0
 
 
 @pytest.mark.parametrize(

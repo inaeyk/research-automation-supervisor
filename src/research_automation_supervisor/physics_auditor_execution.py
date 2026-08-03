@@ -10,18 +10,18 @@ import shutil
 import signal
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from pydantic import ValidationError
 
 from research_automation_supervisor.codex_adapter import (
     AUDITOR_SANDBOX_DISPOSITION,
     AdapterLimits,
-    build_codex_command,
+    CodexProcessLaunch,
     build_subprocess_environment,
     run_prepared_codex,
 )
@@ -39,11 +39,23 @@ from research_automation_supervisor.durable_state import (
 )
 from research_automation_supervisor.errors import (
     CodexAdapterError,
+    LiveShadowDependencyError,
+    LiveShadowIntegrityError,
     PhysicsAuditError,
     PhysicsAuditorDependencyError,
     PhysicsAuditorInputError,
     PhysicsAuditorIntegrityError,
     PhysicsAuditorStateError,
+)
+from research_automation_supervisor.live_shadow_isolation import (
+    RECORDED_AUTH_SOURCE,
+    BubblewrapBackendIdentity,
+    build_bubblewrap_process_launch,
+    load_backend_identity,
+    preflight_bubblewrap_isolation,
+    reset_runtime_home_contents,
+    verify_projected_auditor_bubblewrap_command,
+    write_backend_identity,
 )
 from research_automation_supervisor.physics_auditor_evidence import (
     DiscoveredPhysicsAuditorEvidence,
@@ -54,6 +66,7 @@ from research_automation_supervisor.physics_auditor_evidence import (
 )
 from research_automation_supervisor.physics_auditor_models import (
     MAX_PHYSICS_AUDITOR_OUTPUT_BYTES,
+    PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1,
     PHYSICS_AUDITOR_CODEX_ROLE_POLICY_V1,
     PhysicsAuditorActionProofV1,
     PhysicsAuditorActionRecordV1,
@@ -68,6 +81,15 @@ from research_automation_supervisor.physics_auditor_models import (
     load_physics_auditor_execution_config,
     validate_trusted_codex_executable,
     zero_sha256,
+)
+from research_automation_supervisor.physics_auditor_projection import (
+    PROJECTION_DIRECTORY,
+    PROJECTION_MANIFEST_FILE,
+    RUNTIME_HOME_DIRECTORY,
+    PhysicsAuditorProjectionPlan,
+    build_physics_auditor_projection,
+    materialize_physics_auditor_projection,
+    verify_physics_auditor_projection,
 )
 from research_automation_supervisor.physics_auditor_prompts import (
     RenderedPhysicsAuditorPrompt,
@@ -115,6 +137,8 @@ REQUEST_FILE = "action-request.json"
 PROMPT_FILE = "prompt.txt"
 OUTPUT_SCHEMA_FILE = "physics-audit-report-output-schema.json"
 ROLE_POLICY_FILE = "codex-role-policy.json"
+BUBBLEWRAP_POLICY_FILE = "bubblewrap-policy.json"
+BUBBLEWRAP_BACKEND_FILE = "bubblewrap-backend-identity.json"
 PROVIDER_OBSERVATION_FILE = "provider-observation.json"
 MODEL_OUTPUT_FILE = "model-output.json"
 REPORT_FILE = "physics-audit-report.json"
@@ -123,6 +147,7 @@ RESULT_FILE = "result.json"
 PROOF_FILE = "action-proof.json"
 
 Checkpoint = Callable[[str], None]
+ProjectionIntegrity: TypeAlias = Literal["not_materialized", "unchanged", "changed"]
 
 
 @dataclass(frozen=True)
@@ -135,6 +160,7 @@ class PhysicsAuditorCodexRun:
     provider_session_id: str | None
     provider_thread_started_ids: tuple[str, ...]
     backend_policy_evidence_sha256: str
+    bubblewrap_backend_identity_sha256: str
     codex_executable_sha256: str
     codex_cli_version: str | None
     oracle_execution_detected: bool = False
@@ -153,6 +179,9 @@ class PhysicsAuditorCodexInvoker(Protocol):
         output_schema: Path,
         environ: Mapping[str, str] | None,
         process_started: Callable[[int], None],
+        source_workspace: Path,
+        oracle_evidence_root: Path,
+        action_root: Path,
     ) -> PhysicsAuditorCodexRun: ...
 
 
@@ -167,6 +196,7 @@ class PhysicsAuditorValidationSummaryV1:
     workspace_identity_sha256: str
     evidence_index_sha256: str
     prompt_sha256: str
+    projection_manifest_sha256: str
     missing_required_oracle_ids: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -181,6 +211,7 @@ class PhysicsAuditorValidationSummaryV1:
             "workspace_identity_sha256": self.workspace_identity_sha256,
             "evidence_index_sha256": self.evidence_index_sha256,
             "prompt_sha256": self.prompt_sha256,
+            "projection_manifest_sha256": self.projection_manifest_sha256,
             "missing_required_oracle_ids": list(self.missing_required_oracle_ids),
             "model_launched": False,
         }
@@ -191,10 +222,12 @@ class _PreparedAction:
     config: PhysicsAuditorExecutionConfigV1
     contract: PhysicsTaskContractV1
     workspace: Path
+    oracle_evidence_root: Path
     initial_identity: PhysicsOracleWorkspaceIdentityV1
     changed_paths: PhysicsAuditorChangedPathManifestV1
     discovered: DiscoveredPhysicsAuditorEvidence
     prompt: RenderedPhysicsAuditorPrompt
+    projection: PhysicsAuditorProjectionPlan
     request: PhysicsAuditorActionRequestV1
 
 
@@ -237,6 +270,7 @@ def validate_physics_auditor_action(
         workspace_identity_sha256=prepared.initial_identity.canonical_sha256(),
         evidence_index_sha256=prepared.discovered.index.canonical_sha256(),
         prompt_sha256=prepared.prompt.rendered_sha256,
+        projection_manifest_sha256=prepared.projection.manifest.canonical_sha256(),
         missing_required_oracle_ids=missing,
     )
 
@@ -265,7 +299,11 @@ def run_physics_auditor(
         action_id=action_id,
         attempt_number=attempt_number,
     )
-    output = _new_output_directory(output_directory, prepared.workspace)
+    output = _new_output_directory(
+        output_directory,
+        prepared.workspace,
+        prepared.oracle_evidence_root,
+    )
     with _action_lock(output):
         _persist_accepted_control(output, prepared)
         current = _append_record(
@@ -384,6 +422,7 @@ def verify_physics_auditor_action(
         workspace_identity=prepared.initial_identity,
     )
     _verify_accepted_control(output, prepared)
+    observed_projection_integrity = _projection_integrity(output, prepared)
     result = _load_exact_model(output / RESULT_FILE, PhysicsAuditorActionResultV1, "action result")
     proof = _load_exact_model(output / PROOF_FILE, PhysicsAuditorActionProofV1, "action proof")
     if (
@@ -439,11 +478,14 @@ def verify_physics_auditor_action(
         decision=decision,
         post_identity=result.post_model_workspace_identity,
         final_identity=result.final_workspace_identity,
+        projection_integrity=result.projected_workspace_integrity,
     )
     if proof != expected_proof:
         raise PhysicsAuditorIntegrityError("Physics Auditor action proof was replaced")
     if prepared.initial_identity != result.final_workspace_identity:
         raise PhysicsAuditorIntegrityError("workspace changed after Physics Auditor completion")
+    if observed_projection_integrity != result.projected_workspace_integrity:
+        raise PhysicsAuditorIntegrityError("projected workspace integrity was substituted")
     return cast(PhysicsAuditorActionResultV1, result)
 
 
@@ -460,6 +502,10 @@ def _prepare_action(
     config = load_physics_auditor_execution_config(execution_config_path)
     contract = load_physics_task_contract(contract_path)
     workspace_root = _canonical_workspace(workspace)
+    try:
+        evidence_root = oracle_evidence_root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise PhysicsAuditorInputError("oracle evidence root is unavailable") from exc
     initial = collect_physics_oracle_workspace_identity(workspace_root)
     changed = collect_changed_path_manifest(workspace_root, initial)
     selected_action_id = action_id or _default_action_id(task_id, attempt_number)
@@ -471,7 +517,21 @@ def _prepare_action(
         changed_paths=changed,
         oracle_evidence_root=oracle_evidence_root,
     )
-    prompt = build_physics_auditor_prompt(contract, discovered.index, changed)
+    if set(changed.paths) & set(discovered.oracle_program_paths):
+        raise PhysicsAuditorInputError("candidate delta includes a sealed PA-2 oracle program")
+    projection = build_physics_auditor_projection(
+        contract=contract,
+        evidence_index=discovered.index,
+        changed_paths=changed,
+        source_workspace=workspace_root,
+        oracle_program_paths=discovered.oracle_program_paths,
+    )
+    prompt = build_physics_auditor_prompt(
+        contract,
+        discovered.index,
+        changed,
+        projection.manifest,
+    )
     derivations = tuple(
         item.path
         for item in contract.evidence
@@ -490,6 +550,8 @@ def _prepare_action(
             workspace_identity_sha256=initial.canonical_sha256(),
             changed_path_manifest_sha256=changed.canonical_sha256(),
             evidence_index_sha256=discovered.index.canonical_sha256(),
+            projection_manifest_sha256=projection.manifest.canonical_sha256(),
+            bubblewrap_policy_sha256=PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256(),
             oracle_completion_proofs=discovered.bindings,
             declared_derivation_paths=derivations,
             declared_document_paths=documents,
@@ -502,7 +564,16 @@ def _prepare_action(
     except ValidationError as exc:
         raise PhysicsAuditorInputError("Physics Auditor action request is invalid") from exc
     return _PreparedAction(
-        config, contract, workspace_root, initial, changed, discovered, prompt, request
+        config,
+        contract,
+        workspace_root,
+        evidence_root,
+        initial,
+        changed,
+        discovered,
+        prompt,
+        projection,
+        request,
     )
 
 
@@ -547,11 +618,17 @@ def _continue_action(
                 final_identity=identity,
                 checkpoint=checkpoint,
             )
+        _prepare_projection_layout(output)
+        materialize_physics_auditor_projection(
+            prepared.projection,
+            _projection_root(output),
+        )
         current = _append_record(
             output,
             request=prepared.request,
             phase="evidence_verified",
             previous=current,
+            projected_workspace_integrity="unchanged",
         )
         checkpoint("evidence_verified")
     if current.phase == "evidence_verified":
@@ -565,13 +642,18 @@ def _continue_action(
         checkpoint("prompt_finalized")
     if current.phase == "prompt_finalized":
         launch_identity = collect_physics_oracle_workspace_identity(prepared.workspace)
-        if launch_identity != prepared.initial_identity:
+        projection_integrity = _projection_integrity(output, prepared)
+        if launch_identity != prepared.initial_identity or projection_integrity != "unchanged":
             return _finalize(
                 output=output,
                 prepared=prepared,
                 current=current,
                 status="workspace_integrity_failure",
-                failure_reason="workspace_changed",
+                failure_reason=(
+                    "workspace_changed"
+                    if launch_identity != prepared.initial_identity
+                    else "projection_changed"
+                ),
                 provider=None,
                 model_output=b"",
                 report=None,
@@ -614,11 +696,17 @@ def _continue_action(
                 runs_dir=output / BACKEND_DIRECTORY,
                 codex_executable=executable,
                 config=prepared.config,
-                output_schema=output / CONTROL_DIRECTORY / OUTPUT_SCHEMA_FILE,
+                output_schema=_isolated_output_schema(
+                    output,
+                    prepared.request.action_id,
+                ),
                 environ=environ,
                 process_started=process_started,
+                source_workspace=prepared.workspace,
+                oracle_evidence_root=prepared.oracle_evidence_root,
+                action_root=output,
             )
-        except CodexAdapterError as exc:
+        except (CodexAdapterError, LiveShadowDependencyError, LiveShadowIntegrityError) as exc:
             raise PhysicsAuditorDependencyError("Codex Physics Auditor transport failed") from exc
         codex_run = replace(
             codex_run,
@@ -628,6 +716,7 @@ def _continue_action(
             ),
         )
         post_identity = collect_physics_oracle_workspace_identity(prepared.workspace)
+        projection_integrity = _projection_integrity(output, prepared)
         _persist_provider_observation(output, codex_run)
         current = _append_record(
             output,
@@ -640,6 +729,7 @@ def _continue_action(
             provider_thread_started_ids=codex_run.provider_thread_started_ids,
             backend_artifact_manifest_sha256=codex_run.backend_policy_evidence_sha256,
             post_model_workspace_identity=post_identity,
+            projected_workspace_integrity=projection_integrity,
         )
         checkpoint("model_exit_observed")
     if current.phase == "model_exit_observed":
@@ -661,19 +751,25 @@ def _continue_action(
             model_output_sha256=hashlib.sha256(model_output).hexdigest(),
             model_output_byte_length=len(model_output),
             post_model_workspace_identity=recorded_post_identity,
+            projected_workspace_integrity=current.projected_workspace_integrity,
         )
         checkpoint("output_captured")
     if current.phase == "output_captured":
         provider = _load_provider_observation(output)
         model_output = _read_exact_bytes(output / MODEL_OUTPUT_FILE)
         post_identity = cast(Any, current.post_model_workspace_identity)
-        if post_identity != prepared.initial_identity:
+        projection_integrity = _projection_integrity(output, prepared)
+        if post_identity != prepared.initial_identity or projection_integrity != "unchanged":
             return _finalize(
                 output=output,
                 prepared=prepared,
                 current=current,
                 status="workspace_integrity_failure",
-                failure_reason="workspace_changed",
+                failure_reason=(
+                    "workspace_changed"
+                    if post_identity != prepared.initial_identity
+                    else "projection_changed"
+                ),
                 provider=provider,
                 model_output=model_output,
                 report=None,
@@ -731,6 +827,7 @@ def _continue_action(
             model_output_byte_length=len(model_output),
             parsed_report_sha256=report.canonical_sha256(),
             post_model_workspace_identity=post_identity,
+            projected_workspace_integrity=projection_integrity,
         )
         checkpoint("report_validated")
     if current.phase == "report_validated":
@@ -738,6 +835,7 @@ def _continue_action(
         model_output = _read_exact_bytes(output / MODEL_OUTPUT_FILE)
         report = _load_persisted_report(output, prepared)
         final_identity = collect_physics_oracle_workspace_identity(prepared.workspace)
+        projection_integrity = _projection_integrity(output, prepared)
         current = _append_record(
             output,
             request=prepared.request,
@@ -753,15 +851,20 @@ def _continue_action(
             parsed_report_sha256=report.canonical_sha256(),
             post_model_workspace_identity=current.post_model_workspace_identity,
             final_workspace_identity=final_identity,
+            projected_workspace_integrity=projection_integrity,
         )
         checkpoint("workspace_rechecked")
-        if final_identity != prepared.initial_identity:
+        if final_identity != prepared.initial_identity or projection_integrity != "unchanged":
             return _finalize(
                 output=output,
                 prepared=prepared,
                 current=current,
                 status="workspace_integrity_failure",
-                failure_reason="workspace_changed",
+                failure_reason=(
+                    "workspace_changed"
+                    if final_identity != prepared.initial_identity
+                    else "projection_changed"
+                ),
                 provider=provider,
                 model_output=model_output,
                 report=None,
@@ -797,6 +900,7 @@ def _continue_action(
             parsed_report_sha256=report.canonical_sha256(),
             post_model_workspace_identity=current.post_model_workspace_identity,
             final_workspace_identity=current.final_workspace_identity,
+            projected_workspace_integrity=current.projected_workspace_integrity,
             routing_decision_sha256=decision.canonical_sha256(),
         )
         checkpoint("routing_completed")
@@ -879,6 +983,18 @@ def _finalize(
     final_identity: PhysicsOracleWorkspaceIdentityV1,
     checkpoint: Checkpoint,
 ) -> PhysicsAuditorActionResultV1:
+    final_identity = collect_physics_oracle_workspace_identity(prepared.workspace)
+    projection_integrity = _projection_integrity(output, prepared)
+    if final_identity != prepared.initial_identity:
+        status = "workspace_integrity_failure"
+        failure_reason = "workspace_changed"
+        report = None
+        decision = None
+    elif projection_integrity == "changed":
+        status = "workspace_integrity_failure"
+        failure_reason = "projection_changed"
+        report = None
+        decision = None
     proof = _proof(
         prepared=prepared,
         status=status,
@@ -888,6 +1004,7 @@ def _finalize(
         decision=decision,
         post_identity=post_identity,
         final_identity=final_identity,
+        projection_integrity=projection_integrity,
     )
     proof_hash = proof.canonical_sha256()
     result = PhysicsAuditorActionResultV1(
@@ -910,6 +1027,12 @@ def _finalize(
         initial_workspace_identity=prepared.initial_identity,
         post_model_workspace_identity=post_identity,
         final_workspace_identity=final_identity,
+        projection_manifest_sha256=prepared.projection.manifest.canonical_sha256(),
+        bubblewrap_policy_sha256=PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256(),
+        bubblewrap_backend_identity_sha256=(
+            provider.bubblewrap_backend_identity_sha256 if provider is not None else zero_sha256()
+        ),
+        projected_workspace_integrity=projection_integrity,
         integrity_verdict=(
             "unchanged"
             if post_identity == prepared.initial_identity
@@ -947,6 +1070,7 @@ def _finalize(
         parsed_report_sha256=report.canonical_sha256() if report is not None else None,
         post_model_workspace_identity=post_identity,
         final_workspace_identity=final_identity,
+        projected_workspace_integrity=projection_integrity,
         routing_decision_sha256=decision.canonical_sha256() if decision is not None else None,
         result_sha256=result.canonical_sha256(),
         action_proof_sha256=proof_hash,
@@ -966,6 +1090,7 @@ def _proof(
     decision: PhysicsRoutingDecisionV1 | None,
     post_identity: PhysicsOracleWorkspaceIdentityV1,
     final_identity: PhysicsOracleWorkspaceIdentityV1,
+    projection_integrity: ProjectionIntegrity,
 ) -> PhysicsAuditorActionProofV1:
     oracle_manifest = canonical_json(
         [item.model_dump(mode="json") for item in prepared.request.oracle_completion_proofs]
@@ -988,6 +1113,11 @@ def _proof(
         canonical_prompt_sha256=prepared.prompt.rendered_sha256,
         output_schema_sha256=prepared.request.output_schema_sha256,
         initial_workspace_identity=prepared.initial_identity,
+        projection_manifest_sha256=prepared.projection.manifest.canonical_sha256(),
+        bubblewrap_policy_sha256=PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256(),
+        bubblewrap_backend_identity_sha256=(
+            provider.bubblewrap_backend_identity_sha256 if provider is not None else zero_sha256()
+        ),
         evidence_index_sha256=prepared.request.evidence_index_sha256,
         changed_path_manifest_sha256=prepared.request.changed_path_manifest_sha256,
         oracle_completion_proof_manifest_sha256=hashlib.sha256(oracle_manifest).hexdigest(),
@@ -1010,6 +1140,7 @@ def _proof(
         routing_decision_sha256=decision.canonical_sha256() if decision is not None else None,
         post_model_workspace_identity=post_identity,
         final_workspace_identity=final_identity,
+        projected_workspace_integrity=cast(Any, projection_integrity),
         integrity_verdict=(
             "unchanged"
             if post_identity == prepared.initial_identity
@@ -1026,7 +1157,7 @@ def _prepared_codex_request(output: Path, prepared: _PreparedAction) -> Prepared
         schema_version=1,
         run_id=prepared.request.action_id,
         role="auditor",
-        workspace=str(prepared.workspace),
+        workspace=str(_projection_root(output)),
         prompt_path=str(prompt_path),
         model=prepared.config.model,
         reasoning_effort=prepared.config.reasoning_effort,
@@ -1035,7 +1166,7 @@ def _prepared_codex_request(output: Path, prepared: _PreparedAction) -> Prepared
     return PreparedCodexRequest(
         request_path=output / CONTROL_DIRECTORY / REQUEST_FILE,
         request=request,
-        workspace=prepared.workspace,
+        workspace=_projection_root(output),
         prompt_path=prompt_path,
         prompt_bytes=prepared.prompt.content,
         prompt_sha256=prepared.prompt.rendered_sha256,
@@ -1052,31 +1183,85 @@ def _invoke_qualified_codex(
     output_schema: Path,
     environ: Mapping[str, str] | None,
     process_started: Callable[[int], None],
+    source_workspace: Path,
+    oracle_evidence_root: Path,
+    action_root: Path,
 ) -> PhysicsAuditorCodexRun:
     parent_environment = os.environ if environ is None else environ
     _, _, sensitive_values = build_subprocess_environment(parent_environment)
-    result = run_prepared_codex(
-        prepared,
-        runs_dir=runs_dir,
+    _assert_oracle_execution_surface_absent()
+    capability = preflight_bubblewrap_isolation(
+        bubblewrap_executable=None,
         codex_executable=str(codex_executable),
-        environ=_minimal_codex_environment(parent_environment),
-        limits=AdapterLimits(
-            stdout_bytes=config.max_stdout_bytes,
-            stderr_bytes=config.max_stderr_bytes,
-        ),
-        output_schema=output_schema,
-        resume_thread_id=None,
-        confidential_fragments=sensitive_values,
-        rejected_confidential_fragments=sensitive_values,
-        process_started=process_started,
+        authentication_file=None,
+        environ=parent_environment,
+        forbidden_roots=(source_workspace, oracle_evidence_root),
     )
-    return _verify_codex_run(
-        prepared=prepared,
-        result=result,
-        executable=codex_executable,
-        config=config,
-        output_schema=output_schema,
-    )
+    identity_path = action_root / CONTROL_DIRECTORY / BUBBLEWRAP_BACKEND_FILE
+    if identity_path.exists():
+        if load_backend_identity(identity_path) != capability.identity:
+            raise LiveShadowIntegrityError("Bubblewrap backend identity changed")
+    else:
+        write_backend_identity(identity_path, capability.identity)
+    runtime_home = action_root / RUNTIME_HOME_DIRECTORY
+    auth_fragments = capability.authentication_confidentiality.text_fragments()
+
+    def isolated_launch(
+        command: Sequence[str],
+        request: PreparedCodexRequest,
+        environment: Mapping[str, str],
+        final_message_path: Path,
+        resolved_schema: Path | None,
+    ) -> CodexProcessLaunch:
+        indexes = [index for index, item in enumerate(command) if item == "--add-dir"]
+        if len(indexes) != 1 or indexes[0] + 1 >= len(command):
+            raise LiveShadowIntegrityError("Physics Auditor scratch authority is absent")
+        scratch = Path(command[indexes[0] + 1])
+        return build_bubblewrap_process_launch(
+            command,
+            request,
+            environment,
+            final_message_path,
+            resolved_schema,
+            capability=capability,
+            stage4_run_root=action_root,
+            runtime_home=runtime_home,
+            forbidden_roots=(source_workspace, oracle_evidence_root),
+            auditor_scratch=scratch,
+        )
+
+    try:
+        result = run_prepared_codex(
+            prepared,
+            runs_dir=runs_dir,
+            codex_executable=str(codex_executable),
+            environ=_minimal_codex_environment(parent_environment),
+            limits=AdapterLimits(
+                stdout_bytes=config.max_stdout_bytes,
+                stderr_bytes=config.max_stderr_bytes,
+            ),
+            output_schema=output_schema,
+            resume_thread_id=None,
+            skip_git_repo_check=True,
+            confidential_fragments=(*sensitive_values, *auth_fragments),
+            rejected_confidential_fragments=(*sensitive_values, *auth_fragments),
+            durable_command_replacements={
+                str(capability.authentication_file): RECORDED_AUTH_SOURCE,
+            },
+            process_launch_builder=isolated_launch,
+            version_probe=lambda _executable, _environment, _workspace: None,
+            process_started=process_started,
+        )
+        return _verify_codex_run(
+            prepared=prepared,
+            result=result,
+            executable=codex_executable,
+            config=config,
+            output_schema=output_schema,
+            bubblewrap_identity=capability.identity,
+        )
+    finally:
+        reset_runtime_home_contents(runtime_home)
 
 
 def _verify_codex_run(
@@ -1086,6 +1271,7 @@ def _verify_codex_run(
     executable: Path,
     config: PhysicsAuditorExecutionConfigV1,
     output_schema: Path,
+    bubblewrap_identity: BubblewrapBackendIdentity,
 ) -> PhysicsAuditorCodexRun:
     directory = Path(result.artifact_directory)
     request = _load_pretty_model(
@@ -1098,15 +1284,15 @@ def _verify_codex_run(
     )
     if persisted_result != result:
         raise PhysicsAuditorIntegrityError("Codex result was substituted")
-    expected_command = build_codex_command(
-        prepared,
-        str(executable),
-        Path("<FINAL_MESSAGE_TEMP>"),
+    verify_projected_auditor_bubblewrap_command(
+        metadata,
+        identity=bubblewrap_identity,
+        projected_workspace=prepared.workspace,
+        runtime_home=prepared.workspace.parent / "codex-home",
         output_schema=output_schema,
-        resume_thread_id=None,
-        writable_scratch=directory / "scratch",
+        codex_executable=executable,
+        artifact_directory=directory,
     )
-    expected_command[-1] = "<PROMPT_FROM_STDIN>"
     if (
         request.role != "auditor"
         or request.policy.sandbox != "read-only"
@@ -1117,7 +1303,6 @@ def _verify_codex_run(
         or metadata.approval_policy != "never"
         or not metadata.ephemeral
         or metadata.resume_thread_id is not None
-        or metadata.command != tuple(expected_command)
         or "--ephemeral" not in metadata.command
         or "resume" in metadata.command
         or "--yolo" in metadata.command
@@ -1160,6 +1345,10 @@ def _verify_codex_run(
         "command_policy": "fresh_ephemeral_read_only_no_resume_v1",
         "network_policy": config.network_policy,
         "environment_profile": config.environment_allowlist_profile,
+        "projection_policy_sha256": PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256(),
+        "bubblewrap_backend_identity_sha256": hashlib.sha256(
+            canonical_json(bubblewrap_identity.to_dict())
+        ).hexdigest(),
     }
     provider_session = metadata.thread_id or metadata.session_id
     return PhysicsAuditorCodexRun(
@@ -1169,6 +1358,9 @@ def _verify_codex_run(
         provider_session_id=provider_session,
         provider_thread_started_ids=metadata.thread_started_ids,
         backend_policy_evidence_sha256=hashlib.sha256(canonical_json(semantic)).hexdigest(),
+        bubblewrap_backend_identity_sha256=hashlib.sha256(
+            canonical_json(bubblewrap_identity.to_dict())
+        ).hexdigest(),
         codex_executable_sha256=executable_hash,
         codex_cli_version=metadata.codex_version,
     )
@@ -1182,6 +1374,7 @@ def _persist_accepted_control(output: Path, prepared: _PreparedAction) -> None:
         (CONTRACT_FILE, prepared.contract),
         (CHANGED_PATHS_FILE, prepared.changed_paths),
         (EVIDENCE_INDEX_FILE, prepared.discovered.index),
+        (PROJECTION_MANIFEST_FILE, prepared.projection.manifest),
         (REQUEST_FILE, prepared.request),
     ):
         _write_once_or_verify(control / name, model.to_canonical_json(), name)
@@ -1200,6 +1393,18 @@ def _persist_prompt_control(output: Path, prepared: _PreparedAction) -> None:
         PHYSICS_AUDITOR_CODEX_ROLE_POLICY_V1.to_canonical_json(),
         "Physics Auditor Codex role policy",
     )
+    _write_once_or_verify(
+        control / BUBBLEWRAP_POLICY_FILE,
+        PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.to_canonical_json(),
+        "Physics Auditor Bubblewrap policy",
+    )
+    isolated_schema = _isolated_output_schema(output, prepared.request.action_id)
+    isolated_schema.parent.mkdir(parents=True, exist_ok=True)
+    _write_once_or_verify(
+        isolated_schema,
+        canonical_json(PHYSICS_AUDIT_REPORT_OUTPUT_SCHEMA),
+        "isolated PhysicsAuditReportV1 output schema",
+    )
 
 
 def _verify_accepted_control(output: Path, prepared: _PreparedAction) -> None:
@@ -1209,6 +1414,7 @@ def _verify_accepted_control(output: Path, prepared: _PreparedAction) -> None:
         CONTRACT_FILE: prepared.contract.to_canonical_json(),
         CHANGED_PATHS_FILE: prepared.changed_paths.to_canonical_json(),
         EVIDENCE_INDEX_FILE: prepared.discovered.index.to_canonical_json(),
+        PROJECTION_MANIFEST_FILE: prepared.projection.manifest.to_canonical_json(),
         REQUEST_FILE: prepared.request.to_canonical_json(),
     }
     if (control / PROMPT_FILE).exists():
@@ -1217,11 +1423,16 @@ def _verify_accepted_control(output: Path, prepared: _PreparedAction) -> None:
                 PROMPT_FILE: prepared.prompt.content,
                 OUTPUT_SCHEMA_FILE: canonical_json(PHYSICS_AUDIT_REPORT_OUTPUT_SCHEMA),
                 ROLE_POLICY_FILE: PHYSICS_AUDITOR_CODEX_ROLE_POLICY_V1.to_canonical_json(),
+                BUBBLEWRAP_POLICY_FILE: PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.to_canonical_json(),
             }
         )
     for name, content in expected.items():
         if _read_exact_bytes(control / name) != content:
             raise PhysicsAuditorIntegrityError(f"Physics Auditor control file {name} was replaced")
+    if (control / PROMPT_FILE).exists() and _read_exact_bytes(
+        _isolated_output_schema(output, prepared.request.action_id)
+    ) != canonical_json(PHYSICS_AUDIT_REPORT_OUTPUT_SCHEMA):
+        raise PhysicsAuditorIntegrityError("Physics Auditor isolated output schema was replaced")
 
 
 def _load_persisted_report(
@@ -1255,6 +1466,7 @@ def _provider_observation(run: PhysicsAuditorCodexRun) -> PhysicsAuditorProvider
         provider_session_id=run.provider_session_id,
         provider_thread_started_ids=run.provider_thread_started_ids,
         backend_policy_evidence_sha256=run.backend_policy_evidence_sha256,
+        bubblewrap_backend_identity_sha256=run.bubblewrap_backend_identity_sha256,
         model_output_sha256=hashlib.sha256(run.model_output).hexdigest(),
         model_output_byte_length=len(run.model_output),
         model_output_truncated=run.model_output_truncated,
@@ -1305,16 +1517,22 @@ def _verify_persisted_provider(
         or completion.role != "auditor"
         or completion.artifact_directory != str(resolved_directory)
         or completion.prompt_sha256 != prepared.prompt.rendered_sha256
-        or completion.output_schema_path != str(output / CONTROL_DIRECTORY / OUTPUT_SCHEMA_FILE)
+        or completion.output_schema_path
+        != str(_isolated_output_schema(output, prepared.request.action_id))
         or completion.output_schema_sha256 != prepared.prompt.output_schema_sha256
     ):
         raise PhysicsAuditorIntegrityError("Codex completion manifest is incomplete")
+    identity = load_backend_identity(output / CONTROL_DIRECTORY / BUBBLEWRAP_BACKEND_FILE)
+    identity_sha256 = hashlib.sha256(canonical_json(identity.to_dict())).hexdigest()
+    if identity_sha256 != provider.bubblewrap_backend_identity_sha256:
+        raise PhysicsAuditorIntegrityError("Bubblewrap backend identity was substituted")
     verified = _verify_codex_run(
         prepared=_prepared_codex_request(output, prepared),
         result=provider.adapter_result,
         executable=Path(metadata.codex_executable),
         config=prepared.config,
-        output_schema=output / CONTROL_DIRECTORY / OUTPUT_SCHEMA_FILE,
+        output_schema=_isolated_output_schema(output, prepared.request.action_id),
+        bubblewrap_identity=identity,
     )
     verified = replace(
         verified,
@@ -1483,6 +1701,31 @@ def _minimal_codex_environment(source: Mapping[str, str]) -> dict[str, str]:
     return environment
 
 
+def _assert_oracle_execution_surface_absent() -> None:
+    """Reject a host runtime that would expose the packaged PA-2 CLI in /usr."""
+    executable_candidates = (
+        Path("/usr/bin/research-supervisor"),
+        Path("/usr/sbin/research-supervisor"),
+        Path("/bin/research-supervisor"),
+        Path("/sbin/research-supervisor"),
+    )
+    module_candidates = tuple(Path("/usr/lib").glob("python*/dist-packages")) + tuple(
+        Path("/usr/lib").glob("python*/site-packages")
+    )
+    try:
+        exposed = any(path.exists() for path in executable_candidates) or any(
+            (root / "research_automation_supervisor").exists() for root in module_candidates
+        )
+    except OSError as exc:
+        raise PhysicsAuditorDependencyError(
+            "system oracle-execution surface could not be excluded"
+        ) from exc
+    if exposed:
+        raise PhysicsAuditorDependencyError(
+            "system runtime would expose run-physics-oracle to the Physics Auditor"
+        )
+
+
 def _append_record(
     output: Path,
     *,
@@ -1645,7 +1888,56 @@ def _canonical_workspace(path: Path) -> Path:
     return resolved
 
 
-def _new_output_directory(path: Path, workspace: Path) -> Path:
+def _projection_root(output: Path) -> Path:
+    return output / PROJECTION_DIRECTORY
+
+
+def _runtime_home(output: Path) -> Path:
+    return output / RUNTIME_HOME_DIRECTORY
+
+
+def _isolated_output_schema(output: Path, action_id: str) -> Path:
+    return output / "decisions" / action_id / "output-schema.json"
+
+
+def _prepare_projection_layout(output: Path) -> None:
+    quarantine = output / "quarantine"
+    runtime = _runtime_home(output)
+    try:
+        quarantine.mkdir(mode=0o700, exist_ok=True)
+        if quarantine.is_symlink() or not stat.S_ISDIR(quarantine.lstat().st_mode):
+            raise PhysicsAuditorIntegrityError("projection quarantine is unsafe")
+        runtime.mkdir(mode=0o700, exist_ok=True)
+        if runtime.is_symlink() or not stat.S_ISDIR(runtime.lstat().st_mode):
+            raise PhysicsAuditorIntegrityError("Codex runtime home is unsafe")
+        if any(runtime.iterdir()):
+            raise PhysicsAuditorIntegrityError(
+                "Codex runtime home is not empty before the fresh session"
+            )
+    except PhysicsAuditorIntegrityError:
+        raise
+    except OSError as exc:
+        raise PhysicsAuditorIntegrityError("projection layout could not be prepared") from exc
+
+
+def _projection_integrity(
+    output: Path,
+    prepared: _PreparedAction,
+) -> ProjectionIntegrity:
+    root = _projection_root(output)
+    if not root.exists():
+        materialization_committed = any(
+            (output / RECORDS_DIRECTORY).glob("*-evidence_verified.json")
+        )
+        return "changed" if materialization_committed else "not_materialized"
+    try:
+        verify_physics_auditor_projection(prepared.projection.manifest, root)
+    except PhysicsAuditorIntegrityError:
+        return "changed"
+    return "unchanged"
+
+
+def _new_output_directory(path: Path, workspace: Path, oracle_evidence_root: Path) -> Path:
     if ".." in path.parts or not path.name:
         raise PhysicsAuditorInputError("Physics Auditor output path is invalid")
     try:
@@ -1653,8 +1945,14 @@ def _new_output_directory(path: Path, workspace: Path) -> Path:
         output = parent / path.name
     except (OSError, RuntimeError, ValueError) as exc:
         raise PhysicsAuditorInputError("Physics Auditor output parent is unavailable") from exc
-    if output.exists() or _paths_overlap(output, workspace):
-        raise PhysicsAuditorInputError("Physics Auditor output must be new and outside workspace")
+    if (
+        output.exists()
+        or _paths_overlap(output, workspace)
+        or _paths_overlap(output, oracle_evidence_root)
+    ):
+        raise PhysicsAuditorInputError(
+            "Physics Auditor output must be new and outside input authorities"
+        )
     try:
         output.mkdir(mode=0o700)
     except OSError as exc:

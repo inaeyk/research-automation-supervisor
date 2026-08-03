@@ -12,6 +12,11 @@ contain no protected or historical material.
 - `execution-config.yaml` selects only the Codex CLI fresh read-only policy.
 - `prompt-golden.json` freezes the canonical missing-evidence prompt.
 
+The auditor never receives this fixture tree directly. PA-3 projects only the selected
+implementation/derivation and reduced canonical authority files into a fresh
+Bubblewrap synthetic root. In particular, `oracle.py`, `.git`, ignored files, and the
+completed PA-2 action tree are absent from the model-visible workspace.
+
 First copy one implementation directory plus `clean/oracle.py` into a new Git
 worktree. Create a trusted PA-2 catalog for `force_oracle` using the exact system
 Python and program hashes, then run `research-supervisor run-physics-oracle`. The

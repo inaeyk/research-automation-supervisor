@@ -36,6 +36,7 @@ ISOLATED_ACTION_DIRECTORY = "/action"
 ISOLATED_OUTPUT_SCHEMA_PATH = "/control/output-schema.json"
 ISOLATED_HOME = "/home/supervisor"
 ISOLATED_AUTH_PATH = "/home/supervisor/auth.json"
+ISOLATED_AUDITOR_SCRATCH_PATH = "/scratch"
 ISOLATED_TMPDIR = "/tmp"
 RECORDED_AUTH_SOURCE = "<AUTHENTICATION_FILE>"
 MAX_RUNTIME_HOME_FILES = 4096
@@ -321,6 +322,7 @@ def build_bubblewrap_process_launch(
     stage4_run_root: Path,
     runtime_home: Path,
     forbidden_roots: Sequence[Path],
+    auditor_scratch: Path | None = None,
 ) -> CodexProcessLaunch:
     """Wrap one exact semantic Codex command in a verified synthetic filesystem."""
     _verify_stage4_skip_git_repo_check(semantic_command)
@@ -392,6 +394,7 @@ def build_bubblewrap_process_launch(
         runtime_home=home,
         codex_executable=codex,
         authentication_file=capability.authentication_file,
+        auditor_scratch=auditor_scratch,
     )
     _validate_mount_allowlist(
         mounts,
@@ -401,12 +404,14 @@ def build_bubblewrap_process_launch(
         action_directory=action_directory,
         output_schema=schema,
         runtime_home=home,
+        auditor_scratch=auditor_scratch,
     )
     rewritten = _rewrite_engine_owned_arguments(
         semantic_command,
         expected_workspace=workspace,
         expected_final_message=final_message_path,
         expected_output_schema=schema,
+        expected_auditor_scratch=auditor_scratch,
     )
     command = _bubblewrap_prefix(
         Path(capability.identity.canonical_bubblewrap_path),
@@ -610,6 +615,124 @@ def verify_recorded_bubblewrap_command(
         )
 
 
+def verify_projected_auditor_bubblewrap_command(
+    metadata: CodexMetadata,
+    *,
+    identity: BubblewrapBackendIdentity,
+    projected_workspace: Path,
+    runtime_home: Path,
+    output_schema: Path,
+    codex_executable: Path,
+    artifact_directory: Path,
+) -> None:
+    """Independently reconstruct the exact PA-3 synthetic-root command."""
+    command = metadata.command
+    try:
+        separator = command.index("--")
+    except ValueError as exc:
+        raise LiveShadowIntegrityError(
+            "Physics Auditor command lacks the Bubblewrap separator"
+        ) from exc
+    nested_observed = command[separator + 1 :]
+    _verify_stage4_skip_git_repo_check(nested_observed)
+    if "resume" in nested_observed:
+        raise LiveShadowIntegrityError(
+            "Physics Auditor command attempted session resume"
+        )
+    mount_arguments = command[:separator]
+    action_sources = [
+        Path(mount_arguments[index + 1])
+        for index, item in enumerate(mount_arguments[:-2])
+        if item == "--bind" and mount_arguments[index + 2] == ISOLATED_ACTION_DIRECTORY
+    ]
+    auth_sources = [
+        Path(mount_arguments[index + 1])
+        for index, item in enumerate(mount_arguments[:-2])
+        if item == "--ro-bind" and mount_arguments[index + 2] == ISOLATED_AUTH_PATH
+    ]
+    scratch_sources = [
+        Path(mount_arguments[index + 1])
+        for index, item in enumerate(mount_arguments[:-2])
+        if item == "--bind"
+        and mount_arguments[index + 2] == ISOLATED_AUDITOR_SCRATCH_PATH
+    ]
+    expected_scratch = artifact_directory / "scratch"
+    if (
+        len(action_sources) != 1
+        or len(auth_sources) != 1
+        or auth_sources[0] != Path(RECORDED_AUTH_SOURCE)
+        or scratch_sources != [expected_scratch]
+    ):
+        raise LiveShadowIntegrityError(
+            "Physics Auditor command changed an isolated writable or auth mount"
+        )
+    action_source = action_sources[0]
+    if (
+        not action_source.is_absolute()
+        or ".." in action_source.parts
+        or action_source.parent != Path(tempfile.gettempdir())
+        or not action_source.name.startswith("research-supervisor-codex-")
+    ):
+        raise LiveShadowIntegrityError(
+            "Physics Auditor command changed its volatile action mount"
+        )
+    mounts = _build_mounts(
+        workspace=projected_workspace,
+        action_directory=action_source,
+        output_schema=output_schema,
+        runtime_home=runtime_home,
+        codex_executable=codex_executable,
+        authentication_file=Path(RECORDED_AUTH_SOURCE),
+        auditor_scratch=expected_scratch,
+    )
+    expected = _bubblewrap_prefix(
+        Path(identity.canonical_bubblewrap_path),
+        mounts,
+    )
+    expected.extend(
+        (
+            "--",
+            ISOLATED_CODEX_PATH,
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--skip-git-repo-check",
+            "--json",
+            "--output-last-message",
+            "<FINAL_MESSAGE_TEMP>",
+            "--model",
+            metadata.model,
+            "-c",
+            f"model_reasoning_effort={metadata.reasoning_effort}",
+            "-c",
+            'web_search="disabled"',
+            "-c",
+            "sandbox_workspace_write.network_access=false",
+            "-c",
+            "features.skill_mcp_dependency_install=false",
+            "--sandbox",
+            "read-only",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
+            "--cd",
+            ISOLATED_WORKSPACE_PATH,
+            "--add-dir",
+            ISOLATED_AUDITOR_SCRATCH_PATH,
+            "--ephemeral",
+            "--output-schema",
+            ISOLATED_OUTPUT_SCHEMA_PATH,
+            "<PROMPT_FROM_STDIN>",
+        )
+    )
+    if tuple(expected) != command or any(
+        item in command for item in ("--yolo", "danger-full-access")
+    ):
+        raise LiveShadowIntegrityError(
+            "Physics Auditor command does not preserve projected read-only policy"
+        )
+
+
 def _verify_stage4_skip_git_repo_check(command: Sequence[str]) -> None:
     """Require the one installed-CLI parser position used by both Stage 4 turns."""
     indexes = [
@@ -715,6 +838,7 @@ def _build_mounts(
     runtime_home: Path,
     codex_executable: Path,
     authentication_file: Path,
+    auditor_scratch: Path | None = None,
 ) -> tuple[_Mount, ...]:
     mounts: list[_Mount] = []
     for source_text, destination in (
@@ -804,6 +928,15 @@ def _build_mounts(
             ),
         )
     )
+    if auditor_scratch is not None:
+        mounts.append(
+            _Mount(
+                "--bind",
+                auditor_scratch,
+                ISOLATED_AUDITOR_SCRATCH_PATH,
+                "auditor-scratch",
+            )
+        )
     return tuple(mounts)
 
 
@@ -848,6 +981,7 @@ def _rewrite_engine_owned_arguments(
     expected_workspace: Path,
     expected_final_message: Path,
     expected_output_schema: Path,
+    expected_auditor_scratch: Path | None = None,
 ) -> tuple[str, ...]:
     rewritten = list(command)
     if not rewritten:
@@ -878,6 +1012,24 @@ def _rewrite_engine_owned_arguments(
                 f"semantic Codex command changed its {option} path"
             )
         rewritten[value_index] = replacement
+    scratch_indexes = [
+        index for index, item in enumerate(rewritten) if item == "--add-dir"
+    ]
+    if expected_auditor_scratch is None:
+        if scratch_indexes:
+            raise LiveShadowIntegrityError(
+                "semantic Codex command unexpectedly exposes auditor scratch"
+            )
+    elif len(scratch_indexes) != 1:
+        raise LiveShadowIntegrityError(
+            "semantic Codex command has invalid auditor scratch"
+        )
+    elif scratch_indexes[0] + 1 >= len(rewritten) or rewritten[
+        scratch_indexes[0] + 1
+    ] != str(expected_auditor_scratch):
+        raise LiveShadowIntegrityError("semantic Codex command changed auditor scratch")
+    else:
+        rewritten[scratch_indexes[0] + 1] = ISOLATED_AUDITOR_SCRATCH_PATH
     return tuple(rewritten)
 
 
@@ -890,6 +1042,7 @@ def _validate_mount_allowlist(
     action_directory: Path,
     output_schema: Path,
     runtime_home: Path,
+    auditor_scratch: Path | None = None,
 ) -> None:
     canonical_forbidden = tuple(
         _canonical_forbidden_root(forbidden_roots, index)
@@ -922,7 +1075,13 @@ def _validate_mount_allowlist(
         if (
             stage4_run_root is not None
             and _is_relative_to(source, stage4_run_root)
-            and source not in {workspace, output_schema, runtime_home}
+            and source
+            not in {
+                workspace,
+                output_schema,
+                runtime_home,
+                auditor_scratch,
+            }
         ):
             raise LiveShadowIntegrityError(
                 "Bubblewrap mount exposes an unapproved Stage 4 artifact"
@@ -931,6 +1090,8 @@ def _validate_mount_allowlist(
         (action_directory, ISOLATED_ACTION_DIRECTORY),
         (runtime_home, ISOLATED_HOME),
     }
+    if auditor_scratch is not None:
+        expected_writable.add((auditor_scratch, ISOLATED_AUDITOR_SCRATCH_PATH))
     actual_writable = {
         (mount.source, mount.destination)
         for mount in mounts

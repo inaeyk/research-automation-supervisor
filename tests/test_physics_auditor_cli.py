@@ -67,6 +67,7 @@ def test_validate_only_does_not_locate_codex_create_output_or_mutate_workspace(
     assert payload["ok"] is True
     assert payload["validate_only"] is True
     assert payload["model_launched"] is False
+    assert len(payload["projection_manifest_sha256"]) == 64
     assert payload["missing_required_oracle_ids"] == ["force_oracle"]
     assert not output.exists()
     after = {path.name: path.read_bytes() for path in workspace.iterdir() if path.is_file()}
@@ -108,14 +109,14 @@ def test_missing_codex_is_reported_only_when_execution_is_requested(tmp_path: Pa
 @pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 verification unavailable")
 def test_standalone_cli_emits_safe_summary_and_never_repairs(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
-    observation = tmp_path / "fake-observation.json"
+    observation = "/scratch/fake-observation.json"
     (workspace / ".fake-codex.json").write_text(
         json.dumps(
             {
                 "require_stage2_policy": True,
                 "expected_sandbox": "read-only",
                 "expected_ephemeral": True,
-                "observation_path": str(observation),
+                "observation_path": observation,
                 "stdout_lines": [
                     '{"thread_id":"fresh-cli-physics-thread","type":"thread.started"}'
                 ],

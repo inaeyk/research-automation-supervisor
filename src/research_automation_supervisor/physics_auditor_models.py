@@ -41,6 +41,7 @@ from research_automation_supervisor.physics_oracle_models import (
     OracleFailureReason,
     OracleStatus,
     PhysicsOracleArtifactV1,
+    PhysicsOracleDeclaredCheckV1,
     PhysicsOracleWorkspaceIdentityV1,
     Sha256,
 )
@@ -50,8 +51,10 @@ from research_automation_supervisor.workflow_models import Identifier, _freeze_s
 MAX_PHYSICS_AUDITOR_CONFIG_BYTES = 2 * 1024 * 1024
 MAX_PHYSICS_AUDITOR_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_PHYSICS_AUDITOR_FILES = 1_000
+MAX_PHYSICS_AUDITOR_PROJECTED_FILE_BYTES = 16 * 1024 * 1024
+MAX_PHYSICS_AUDITOR_PROJECTION_BYTES = 64 * 1024 * 1024
 MAX_PHYSICS_AUDITOR_STREAM_BYTES = 100 * 1024 * 1024
-PHYSICS_AUDITOR_PROMPT_TEMPLATE_VERSION = "physics_auditor_prompt_v1"
+PHYSICS_AUDITOR_PROMPT_TEMPLATE_VERSION = "physics_auditor_prompt_v2"
 PHYSICS_AUDITOR_OUTPUT_SCHEMA_ID = "physics_audit_report_v1"
 
 PhysicsAuditorPhase: TypeAlias = Literal[
@@ -85,6 +88,8 @@ PhysicsAuditorFailureReason: TypeAlias = Literal[
     "oracle_execution_attempted",
     "invalid_structured_output",
     "workspace_changed",
+    "projection_changed",
+    "isolation_unavailable",
     "recovery_ambiguous",
     "stale_process_identity",
     "reused_process_identity",
@@ -156,7 +161,7 @@ class PhysicsAuditorExecutionConfigV1(PhysicsCanonicalModel):
     approval_policy: Literal["never"]
     network_policy: Literal["disabled_by_codex_policy_not_kernel_enforced"]
     output_schema_id: Literal["physics_audit_report_v1"]
-    prompt_template_version: Literal["physics_auditor_prompt_v1"]
+    prompt_template_version: Literal["physics_auditor_prompt_v2"]
     session_policy: Literal["fresh_ephemeral"]
     structured_output_policy: Literal["strict"]
     trusted_executable: PhysicsAuditorExecutableIdentityV1 | None = None
@@ -180,9 +185,32 @@ class PhysicsAuditorCodexRolePolicyV1(PhysicsCanonicalModel):
     network_enforcement: Literal["codex_policy_disabled_not_kernel_enforced"] = (
         "codex_policy_disabled_not_kernel_enforced"
     )
+    filesystem_enforcement: Literal["bubblewrap_exact_projection_v1"] = (
+        "bubblewrap_exact_projection_v1"
+    )
 
 
 PHYSICS_AUDITOR_CODEX_ROLE_POLICY_V1 = PhysicsAuditorCodexRolePolicyV1()
+
+
+class PhysicsAuditorBubblewrapPolicyV1(PhysicsCanonicalModel):
+    """Fixed PA-3 namespace policy, distinct from volatile backend identity."""
+
+    schema_version: Literal[1] = 1
+    backend: Literal["bubblewrap"] = "bubblewrap"
+    filesystem_policy: Literal["synthetic_root_exact_projection_v1"] = (
+        "synthetic_root_exact_projection_v1"
+    )
+    source_workspace_mount: Literal["absent"] = "absent"
+    oracle_evidence_mount: Literal["absent"] = "absent"
+    projected_workspace_mount: Literal["read_only"] = "read_only"
+    action_output_mount: Literal["bounded_writable"] = "bounded_writable"
+    runtime_home_mount: Literal["isolated_writable"] = "isolated_writable"
+    git_metadata: Literal["absent"] = "absent"
+    session_policy: Literal["fresh_ephemeral_no_resume"] = "fresh_ephemeral_no_resume"
+
+
+PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1 = PhysicsAuditorBubblewrapPolicyV1()
 
 
 class PhysicsAuditorChangedPathManifestV1(PhysicsCanonicalModel):
@@ -191,6 +219,68 @@ class PhysicsAuditorChangedPathManifestV1(PhysicsCanonicalModel):
     schema_version: Literal[1] = 1
     workspace_identity_sha256: Sha256
     paths: CanonicalPaths
+
+
+class PhysicsAuditorProjectionObjectV1(PhysicsCanonicalModel):
+    """One exact object exposed in the read-only auditor workspace."""
+
+    path: RelativePhysicsPath
+    kind: Literal["regular", "directory"]
+    mode: Annotated[int, Field(ge=0, le=0o7777)]
+    byte_length: Annotated[int, Field(ge=0, le=MAX_PHYSICS_AUDITOR_PROJECTED_FILE_BYTES)]
+    sha256: Sha256
+    authority: Literal["declared_workspace", "candidate_delta", "engine_control"]
+
+    @model_validator(mode="after")
+    def validate_object(self) -> PhysicsAuditorProjectionObjectV1:
+        if self.kind == "directory" and (
+            self.byte_length != 0 or self.sha256 != hashlib.sha256(b"").hexdigest()
+        ):
+            raise ValueError("projected directories must use the canonical empty digest")
+        return self
+
+
+class PhysicsAuditorProjectionManifestV1(PhysicsCanonicalModel):
+    """Deterministic exact allowlist for the synthetic auditor workspace."""
+
+    schema_version: Literal[1]
+    policy: Literal["exact_read_only_projection_v1"]
+    source_workspace_identity_sha256: Sha256
+    objects: Annotated[
+        tuple[PhysicsAuditorProjectionObjectV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(max_length=MAX_PHYSICS_AUDITOR_FILES),
+    ]
+    total_regular_file_bytes: Annotated[int, Field(ge=0, le=MAX_PHYSICS_AUDITOR_PROJECTION_BYTES)]
+    git_metadata_present: Literal[False] = False
+    ignored_files_present: Literal[False] = False
+    symlinks_present: Literal[False] = False
+    oracle_programs_present: Literal[False] = False
+    protected_material_present: Literal[False] = False
+
+    @field_validator("objects")
+    @classmethod
+    def canonicalize_objects(
+        cls, value: tuple[PhysicsAuditorProjectionObjectV1, ...]
+    ) -> tuple[PhysicsAuditorProjectionObjectV1, ...]:
+        items = tuple(sorted(value, key=lambda item: item.path))
+        if len({item.path for item in items}) != len(items):
+            raise ValueError("projection destinations must be unique")
+        return items
+
+    @model_validator(mode="after")
+    def validate_totals(self) -> PhysicsAuditorProjectionManifestV1:
+        total = sum(item.byte_length for item in self.objects if item.kind == "regular")
+        if total != self.total_regular_file_bytes:
+            raise ValueError("projection byte total is contradictory")
+        paths = {PurePosixPath(item.path): item.kind for item in self.objects}
+        for path in paths:
+            for parent in path.parents:
+                if parent == PurePosixPath("."):
+                    break
+                if paths.get(parent) != "directory":
+                    raise ValueError("projection manifest omits an ancestor directory")
+        return self
 
 
 class PhysicsAuditorWorkspaceFileV1(PhysicsCanonicalModel):
@@ -243,6 +333,11 @@ class PhysicsAuditorOracleEvidenceV1(PhysicsCanonicalModel):
     failure_reason: OracleFailureReason | None
     declared_outcome: Literal["passed", "functional_failure"] | None
     structured_result_sha256: Sha256 | None
+    structured_checks: Annotated[
+        tuple[PhysicsOracleDeclaredCheckV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(max_length=200),
+    ] = ()
     artifacts: Annotated[
         tuple[PhysicsOracleArtifactV1, ...],
         BeforeValidator(_freeze_sequence),
@@ -267,6 +362,7 @@ class PhysicsAuditorOracleEvidenceV1(PhysicsCanonicalModel):
             any(item is not None for item in bound)
             or self.declared_outcome is not None
             or self.structured_result_sha256 is not None
+            or self.structured_checks
             or self.artifacts
         ):
             raise ValueError("missing oracle evidence unexpectedly claims PA-2 authority")
@@ -347,6 +443,8 @@ class PhysicsAuditorActionRequestV1(PhysicsCanonicalModel):
     workspace_identity_sha256: Sha256
     changed_path_manifest_sha256: Sha256
     evidence_index_sha256: Sha256
+    projection_manifest_sha256: Sha256
+    bubblewrap_policy_sha256: Sha256
     oracle_completion_proofs: Annotated[
         tuple[PhysicsAuditorOracleProofBindingV1, ...],
         BeforeValidator(_freeze_sequence),
@@ -354,7 +452,7 @@ class PhysicsAuditorActionRequestV1(PhysicsCanonicalModel):
     ]
     declared_derivation_paths: CanonicalPaths = ()
     declared_document_paths: CanonicalPaths = ()
-    prompt_template_version: Literal["physics_auditor_prompt_v1"]
+    prompt_template_version: Literal["physics_auditor_prompt_v2"]
     prompt_template_sha256: Sha256
     output_schema_sha256: Sha256
     attempt_number: Annotated[int, Field(ge=1, le=1000)]
@@ -401,6 +499,7 @@ class PhysicsAuditorProviderObservationV1(PhysicsCanonicalModel):
         Field(max_length=20),
     ]
     backend_policy_evidence_sha256: Sha256
+    bubblewrap_backend_identity_sha256: Sha256
     model_output_sha256: Sha256
     model_output_byte_length: Annotated[int, Field(ge=0)]
     model_output_truncated: bool
@@ -425,6 +524,7 @@ class PhysicsAuditorActionRecordV1(PhysicsCanonicalModel):
         Field(max_length=20),
     ] = ()
     backend_artifact_manifest_sha256: Sha256 | None = None
+    projected_workspace_integrity: Literal["not_materialized", "unchanged", "changed"] | None = None
     model_output_sha256: Sha256 | None = None
     model_output_byte_length: Annotated[int, Field(ge=0)] | None = None
     parsed_report_sha256: Sha256 | None = None
@@ -459,11 +559,14 @@ class PhysicsAuditorActionProofV1(PhysicsCanonicalModel):
     model: ModelName
     reasoning_effort: ReasoningEffort
     role_policy_sha256: Sha256
-    prompt_template_version: Literal["physics_auditor_prompt_v1"]
+    prompt_template_version: Literal["physics_auditor_prompt_v2"]
     prompt_template_sha256: Sha256
     canonical_prompt_sha256: Sha256
     output_schema_sha256: Sha256
     initial_workspace_identity: PhysicsOracleWorkspaceIdentityV1
+    projection_manifest_sha256: Sha256
+    bubblewrap_policy_sha256: Sha256
+    bubblewrap_backend_identity_sha256: Sha256
     evidence_index_sha256: Sha256
     changed_path_manifest_sha256: Sha256
     oracle_completion_proof_manifest_sha256: Sha256
@@ -476,6 +579,7 @@ class PhysicsAuditorActionProofV1(PhysicsCanonicalModel):
     routing_decision_sha256: Sha256 | None
     post_model_workspace_identity: PhysicsOracleWorkspaceIdentityV1
     final_workspace_identity: PhysicsOracleWorkspaceIdentityV1
+    projected_workspace_integrity: Literal["not_materialized", "unchanged", "changed"]
     integrity_verdict: Literal["unchanged", "changed"]
     action_status: PhysicsAuditorStatus
 
@@ -489,10 +593,19 @@ class PhysicsAuditorActionProofV1(PhysicsCanonicalModel):
             raise ValueError("Physics Auditor proof workspace verdict is contradictory")
         if changed and self.action_status != "workspace_integrity_failure":
             raise ValueError("workspace drift must override the Physics Auditor outcome")
-        if self.action_status == "routing_completed" and (
-            self.parsed_report_sha256 is None or self.routing_decision_sha256 is None
+        if (
+            self.projected_workspace_integrity == "changed"
+            and self.action_status != "workspace_integrity_failure"
         ):
-            raise ValueError("completed routing requires both report and decision hashes")
+            raise ValueError("projection drift must override the Physics Auditor outcome")
+        if self.action_status == "routing_completed" and (
+            self.parsed_report_sha256 is None
+            or self.routing_decision_sha256 is None
+            or self.projected_workspace_integrity != "unchanged"
+        ):
+            raise ValueError(
+                "completed routing requires report, decision, and unchanged projection"
+            )
         if self.action_status != "routing_completed" and self.routing_decision_sha256 is not None:
             raise ValueError("non-routed proof unexpectedly binds a routing decision")
         if self.oracle_execution_detected and self.action_status != "infrastructure_failure":
@@ -518,6 +631,10 @@ class PhysicsAuditorActionResultV1(PhysicsCanonicalModel):
     initial_workspace_identity: PhysicsOracleWorkspaceIdentityV1
     post_model_workspace_identity: PhysicsOracleWorkspaceIdentityV1
     final_workspace_identity: PhysicsOracleWorkspaceIdentityV1
+    projection_manifest_sha256: Sha256
+    bubblewrap_policy_sha256: Sha256
+    bubblewrap_backend_identity_sha256: Sha256
+    projected_workspace_integrity: Literal["not_materialized", "unchanged", "changed"]
     integrity_verdict: Literal["unchanged", "changed"]
     action_proof_sha256: Sha256
 
@@ -531,13 +648,21 @@ class PhysicsAuditorActionResultV1(PhysicsCanonicalModel):
             raise ValueError("Physics Auditor result workspace verdict is contradictory")
         if changed and self.status != "workspace_integrity_failure":
             raise ValueError("workspace drift must override every Physics Auditor outcome")
+        if (
+            self.projected_workspace_integrity == "changed"
+            and self.status != "workspace_integrity_failure"
+        ):
+            raise ValueError("projection drift must override every Physics Auditor outcome")
         if self.status == "routing_completed":
             if (
                 not self.report_validated
                 or self.routing_decision is None
                 or self.parsed_report_sha256 is None
+                or self.projected_workspace_integrity != "unchanged"
             ):
-                raise ValueError("routing completion requires a validated report and decision")
+                raise ValueError(
+                    "routing completion requires a validated report, decision, and projection"
+                )
             if self.failure_reason != "none":
                 raise ValueError("routing completion cannot claim a failure")
         elif self.routing_decision is not None:

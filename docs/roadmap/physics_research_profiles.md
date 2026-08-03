@@ -2,10 +2,11 @@
 
 Status: proposed post-Physics-Auditor expansion, targeted no earlier than `0.6.0`.
 Version 0.2.0 now contains the qualified PA-1 `physics_implementation` contract,
-untrusted audit-report, policy and model-free routing foundations in addition to the
-general `AuditorModelResult`. It does not execute a Physics Auditor or integrate the
-profile into a live workflow. The additional profiles below are not current
-capabilities. Names marked **Proposed** do not exist in 0.2.0.
+untrusted audit-report and model-free routing, PA-2 trusted oracle execution, and the
+standalone PA-3 Codex Physics Auditor. PA-3 runs only through a fresh read-only
+Bubblewrap projection and does not integrate the profile into a live workflow. The
+additional profiles below are not current capabilities. Names marked **Proposed** do
+not exist in 0.2.0.
 
 ## Purpose
 

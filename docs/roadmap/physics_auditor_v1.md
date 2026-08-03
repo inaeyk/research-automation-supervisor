@@ -4,10 +4,12 @@ Status: PA-1 strict contract/report schemas, backward-compatibility fixtures, ca
 serialization, read-only validation CLI, and model-free deterministic routing are
 implemented and qualified. PA-2 fixed trusted intents, isolated model-free oracle
 execution, completion proofs, Git integrity, and separate crash recovery are also
-implemented and qualified while the package remains `0.2.0`. Physics Auditor model
-execution, workflow integration/state, repair, and scientific review remain proposed
-for later stages targeted at `0.3.0`. Names still marked **Proposed** do not exist in
-the current package.
+implemented and qualified while the package remains `0.2.0`. PA-3 adds a qualified
+standalone Codex Physics Auditor over an exact read-only Bubblewrap projection. It is
+not integrated into workflow state and performs no repair or scientific release.
+Workflow integration/state, repair, and scientific review remain proposed for later
+stages targeted at `0.3.0`. Names still marked **Proposed** do not exist in the current
+package.
 
 ## Goal
 
@@ -691,8 +693,10 @@ only after evidence references and source anchors are stable; add numerical work
 PA-1 is implemented as the deliberately model-free subset documented in
 [Physics Auditor PA-1 foundations](../physics_auditor_foundations.md). PA-2 separately
 qualifies only the Stage C substrate documented in
-[Trusted Physics Oracle execution](../physics_oracle_execution.md). Stages D and E
-remain unavailable, and neither stage claims the complete `0.3.0` acceptance gates.
+[Trusted Physics Oracle execution](../physics_oracle_execution.md). PA-3 qualifies the
+standalone Stage D action documented in
+[Standalone Codex Physics Auditor](../physics_auditor_execution.md). Stage E remains
+unavailable, and Stage D does not claim the complete `0.3.0` acceptance gates.
 
 ### Stage A: freeze compatibility
 
@@ -722,11 +726,13 @@ remain unavailable, and neither stage claims the complete `0.3.0` acceptance gat
 
 ### Stage D: Physics Auditor action
 
-- [ ] Add deterministic prompt assembly and a distinct physics output schema.
-- [ ] Invoke current Codex with the existing read-only fresh-auditor policy.
-- [ ] Record a distinct action kind/report proof without weakening current Codex
+- [x] Add deterministic prompt assembly and a distinct physics output schema.
+- [x] Invoke current Codex with the existing read-only fresh-auditor policy inside an
+  exact Bubblewrap-projected workspace.
+- [x] Record a distinct action kind/report proof without weakening current Codex
   artifact verification.
-- [ ] Ensure Physics Auditor evidence never includes protected evaluation paths/content.
+- [x] Ensure Physics Auditor evidence never includes protected evaluation paths/content,
+  oracle programs, or undeclared workspace files.
 
 ### Stage E: state routing and human gate
 

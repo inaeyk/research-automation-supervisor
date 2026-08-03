@@ -14,6 +14,9 @@ from research_automation_supervisor.physics_auditor_models import (
     PhysicsAuditorChangedPathManifestV1,
     PhysicsAuditorEvidenceIndexV1,
 )
+from research_automation_supervisor.physics_auditor_projection import (
+    build_physics_auditor_projection,
+)
 from research_automation_supervisor.physics_auditor_prompts import (
     PHYSICS_AUDITOR_PROMPT_TEMPLATE_SHA256,
     build_physics_auditor_prompt,
@@ -89,8 +92,19 @@ def test_prompt_is_deterministic_ordered_and_has_golden_hash(tmp_path: Path) -> 
             "changed_path_manifest_sha256": golden_changed.canonical_sha256(),
         }
     )
-    first = build_physics_auditor_prompt(contract, golden_index, golden_changed)
-    second = build_physics_auditor_prompt(contract, golden_index, golden_changed)
+    projection = build_physics_auditor_projection(
+        contract=contract,
+        evidence_index=golden_index,
+        changed_paths=golden_changed,
+        source_workspace=workspace,
+        oracle_program_paths=(),
+    )
+    first = build_physics_auditor_prompt(
+        contract, golden_index, golden_changed, projection.manifest
+    )
+    second = build_physics_auditor_prompt(
+        contract, golden_index, golden_changed, projection.manifest
+    )
 
     assert first == second
     assert first.template_sha256 == PHYSICS_AUDITOR_PROMPT_TEMPLATE_SHA256
@@ -107,3 +121,4 @@ def test_prompt_is_deterministic_ordered_and_has_golden_hash(tmp_path: Path) -> 
     assert first.byte_count == golden["missing_evidence_prompt_byte_count"]
     assert first.template_sha256 == golden["prompt_template_sha256"]
     assert first.output_schema_sha256 == golden["output_schema_sha256"]
+    assert first.projection_manifest_sha256 == golden["projection_manifest_sha256"]

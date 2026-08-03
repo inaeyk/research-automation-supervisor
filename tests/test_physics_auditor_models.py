@@ -24,7 +24,7 @@ def _config() -> dict[str, object]:
         "approval_policy": "never",
         "network_policy": "disabled_by_codex_policy_not_kernel_enforced",
         "output_schema_id": "physics_audit_report_v1",
-        "prompt_template_version": "physics_auditor_prompt_v1",
+        "prompt_template_version": "physics_auditor_prompt_v2",
         "session_policy": "fresh_ephemeral",
         "structured_output_policy": "strict",
         "trusted_executable": None,

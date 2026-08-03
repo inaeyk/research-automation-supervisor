@@ -1,0 +1,143 @@
+{
+  "base_commit": "bb357cc83aae7b63461532d5c528a662f83ef7d8",
+  "bubblewrap": {
+    "backend_identity_sha256": "e7ffcfcfc7611c7cc6bb5913841e6385684429b8ab9b0c4c7b7c506fd94eaedc",
+    "fixed_policy_sha256": "d762a628b90ede5647a2475114e04aadc744f977bbaa7d97dc5834830188b560",
+    "version": "bubblewrap 0.11.1"
+  },
+  "build": {
+    "sdist_sha256": "88ab544a113cfebe8e5e3e5a9d03c89f6d36f79fa5bf73bfe9855f2190e05932",
+    "status": "passed",
+    "wheel_sha256": "48b6e864b2377e8c63fe4030085461d3f154542ecf0807d504a979e56dbf306a"
+  },
+  "calibrations": [
+    {
+      "action_proof_sha256": "ff4083db109c7bb911179e5c54510b4ab5f1df67500475608588000bae9d9b72",
+      "case": "clean",
+      "duration_seconds": 43.961545,
+      "fresh_ephemeral": true,
+      "model_output_sha256": "76873cf9ff1ba5c372e4e5007b6a23bd1aeb17c1b494baf5efdf8b0b52fd6088",
+      "oracle_execution_detected": false,
+      "projected_workspace_integrity": "unchanged",
+      "projection_manifest_sha256": "bf612167eb6a2cd0ea6e6a975d34d9a18aa5458607192f4ec4a2972f1b04a962",
+      "prompt_sha256": "e0c9bffdaed5dfe53ee26bd604217786690702e35b8078c6e18f6e8579858972",
+      "provider_session_id": "019fc764-d2ed-7852-8dc7-3392e40f18f5",
+      "provider_thread_started_count": 1,
+      "read_only": true,
+      "report_validated": true,
+      "report_verdict": "pass",
+      "routing_decision": "pass",
+      "usage": {
+        "cached_input_tokens": 16128,
+        "input_tokens": 33991,
+        "output_tokens": 1536,
+        "reasoning_output_tokens": 566
+      },
+      "workspace_identity_sha256": "a06d71345665b8c2a41f841bb2f787aba5c1c5c212e7261eb5cc89d8b87d2b35",
+      "workspace_integrity": "unchanged"
+    },
+    {
+      "action_proof_sha256": "67169900b58ab49084ff85b04abefb2b5dc67d0bf6c92353e82639fea1f9974e",
+      "case": "sign_error",
+      "duration_seconds": 54.491809,
+      "fresh_ephemeral": true,
+      "model_output_sha256": "18885ce229a17b6dfe691fab5cf4000d466d29a8cfeec9aaa1d11277b073ca7b",
+      "oracle_execution_detected": false,
+      "projected_workspace_integrity": "unchanged",
+      "projection_manifest_sha256": "43ffebbbb7ff35a968a7216ed6888bd865d2058a5a954f32922153c161f1101d",
+      "prompt_sha256": "32e9ea5883918084e71012409dfc318dad2454cabbab97d53556aaf6a42be102",
+      "provider_session_id": "019fc765-9ffd-72a3-9010-0c73566f9736",
+      "provider_thread_started_count": 1,
+      "read_only": true,
+      "report_validated": true,
+      "report_verdict": "fail_repairable",
+      "routing_decision": "request_repair",
+      "usage": {
+        "cached_input_tokens": 16128,
+        "input_tokens": 33728,
+        "output_tokens": 1835,
+        "reasoning_output_tokens": 847
+      },
+      "workspace_identity_sha256": "94b9887bd2063e14f3a4efdbf4c8937706cd8ea948573752fd9a3852389b10c5",
+      "workspace_integrity": "unchanged"
+    },
+    {
+      "action_proof_sha256": "e2aed82f2625b59d300d287a4a9ffeb171dad10b435bdf8ef2cb680493b59a49",
+      "case": "missing_evidence",
+      "duration_seconds": 76.608266,
+      "fresh_ephemeral": true,
+      "model_output_sha256": "dcc070aef5650a61b228f4b83cf3bf71218370e0b99a677aa22a0fc6169cd13f",
+      "oracle_execution_detected": false,
+      "projected_workspace_integrity": "unchanged",
+      "projection_manifest_sha256": "65e97bc3f7967c418d3a1fbfc4ec07d869e7fd527b297652f67b9e3fbe9e367a",
+      "prompt_sha256": "5bd454b92529686a6fc867cb74255e0361b6bf0b3df5a283c626cee25c8db961",
+      "provider_session_id": "019fc766-9abd-7311-b2ff-cda7004f6294",
+      "provider_thread_started_count": 1,
+      "read_only": true,
+      "report_validated": true,
+      "report_verdict": "blocked_insufficient_evidence",
+      "routing_decision": "block_insufficient_evidence",
+      "usage": {
+        "cached_input_tokens": 15104,
+        "input_tokens": 33042,
+        "output_tokens": 2053,
+        "reasoning_output_tokens": 997
+      },
+      "workspace_identity_sha256": "c85896c3fc77f9feb0651d1d24c67f752deb727e3d492f94e9cb1b51730521a0",
+      "workspace_integrity": "unchanged"
+    }
+  ],
+  "codex": {
+    "cli_version": "codex-cli 0.146.0",
+    "executable_sha256": "2e863156ed35ecc5253b1e2f907a9143077b9f7cb51942070c61996471ff6e04",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "role_policy_sha256": "3ef14f5e708536189df54acf88aa0c90f0aa356188e5f83c392744e9b4e2b7e6"
+  },
+  "date": "2026-08-03",
+  "independent_final_audit": {
+    "blocking_findings": 0,
+    "hard_stop_triggered": false,
+    "result": "passed"
+  },
+  "installation": {
+    "installed_cli_help": "passed",
+    "installed_package_version": "0.2.0",
+    "public_package_completeness": "passed",
+    "status": "passed",
+    "synthetic_fake_adapter_smoke": "3 passed"
+  },
+  "package_version": "0.2.0",
+  "prompt": {
+    "output_schema_sha256": "82ffc2fe49e3929678368733c6200933d072c27abcd548d65cb52dbe62121297",
+    "template_sha256": "dcc15eac412efd0b8a1628adc05f21765d744ba1265bd8296aeac0c0cd477c6c",
+    "template_version": "physics_auditor_prompt_v2"
+  },
+  "qualification_caveats": [
+    "The three public synthetic cases calibrate the mechanism, not broad Physics Auditor scientific quality.",
+    "Network disablement is Codex-policy-level and is not claimed as a kernel network namespace.",
+    "The selected subscription-authentication file is explicit qualified read-only Codex runtime material, not projected audit evidence; host credential locators, environment tokens, prompt/proof content, and durable outputs exclude it and leakage scanning fails closed.",
+    "One initial parallel PA-2 test invocation encountered its existing workspace-identity timing guard; the isolated test and complete PA-2 group passed unchanged, and the complete repository suite passed."
+  ],
+  "recovery_checkpoint_commit": "b38cd750736d4182655cc6ded19de0ab9034fb86",
+  "repair_pass_used": false,
+  "schema_version": 1,
+  "sign_error_repair": {
+    "root_cause": "The recovered prompt exposed only aggregate oracle failure authority and did not make the per-case boolean results, required evidence-kind closure, or independent zero-input limiting-case treatment explicit enough for a strict valid report.",
+    "repair": "Bind verified bounded PA-2 structured checks into the safe index and prompt, state exact evidence-kind citation closure, and require the sign identity and zero-force limit to be assessed independently without weakening report validation or routing."
+  },
+  "stage": "PA-3",
+  "tests": {
+    "codex_adapter_and_models": "100 passed",
+    "complete_suite": "1298 passed, 1 skipped",
+    "documentation_and_examples_after_status_update": "6 passed",
+    "focused_pa3": "68 passed",
+    "frozen_0_2_0_compatibility": "10 passed",
+    "live_bubblewrap_isolation": "71 passed, 1 skipped",
+    "mypy": "passed, 56 source files",
+    "pa1": "66 passed",
+    "pa2": "54 passed",
+    "ruff": "passed",
+    "workflow_code_auditor_integrity_state_journal": "196 passed"
+  }
+}
