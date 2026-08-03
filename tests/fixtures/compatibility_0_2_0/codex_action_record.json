@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "action_id": "worker-r000",
+  "kind": "worker",
+  "repair_round": 0,
+  "complete": true,
+  "run_id": "worker-r000",
+  "stage1_artifact_directory": "/synthetic/run/worker/codex/worker-r000",
+  "artifact_hashes": {
+    "/synthetic/run/worker/codex/worker-r000/result.json": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "handoff_path": "/synthetic/run/handoffs/worker-r000.json",
+  "handoff_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "output_schema_path": "/synthetic/run/handoffs/worker-output-schema.json",
+  "output_schema_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "adapter_result": {
+    "schema_version": 1,
+    "run_id": "worker-r000",
+    "status": "succeeded",
+    "exit_code": 0,
+    "started_at": "2026-01-01T00:00:00.000000Z",
+    "ended_at": "2026-01-01T00:00:01.250000Z",
+    "duration_seconds": 1.25,
+    "artifact_directory": "/synthetic/run/worker/codex/worker-r000",
+    "event_count": 2,
+    "malformed_event_count": 0,
+    "final_message_present": true,
+    "permission_evidence": false,
+    "summary": "Codex run succeeded.",
+    "error": null
+  },
+  "thread_started_ids": ["synthetic-worker-thread"],
+  "structured_result_valid": true,
+  "structured_result_path": "/synthetic/run/worker/worker-r000.structured.json",
+  "structured_result_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "blocked_insufficient_evidence",
+  "evidence_sufficiency": "insufficient",
+  "summary": "The synthetic trace-free identity lacks its required test evidence.",
+  "human_gate_triggers": [],
+  "checks": [
+    {"id": "check_analytic_identity", "target_kind": "oracle", "target_id": "analytic_identity", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null}], "rationale": "The analytic authority is recorded."},
+    {"id": "check_background_limit_oracle", "target_kind": "oracle", "target_id": "background_limit_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The limit oracle is recorded."},
+    {"id": "check_trace_free", "target_kind": "required_identity", "target_id": "trace_free_A", "status": "unresolved", "evidence_sufficiency": "insufficient", "evidence": [], "rationale": "The required regression result is absent."},
+    {"id": "check_trace_free_oracle", "target_kind": "oracle", "target_id": "trace_free_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "trace_free_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The oracle declaration exists, but the identity evidence is incomplete."},
+    {"id": "check_uniform_background", "target_kind": "limiting_case", "target_id": "uniform_background", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The limit evidence is recorded."}
+  ],
+  "findings": [
+    {"id": "finding_missing_evidence", "severity": "high", "category": "missing_required_evidence", "status": "open", "disposition": "evidence_blocking", "check_ids": ["check_trace_free"], "forbidden_claim_ids": [], "evidence": [{"kind": "task_contract", "reference": "required_identities.trace_free_A", "path": null, "line_start": null, "line_end": null}], "statement": "A required test result is missing.", "required_action": "Supply validated declared evidence before routing can continue."}
+  ],
+  "unresolved_questions": []
+}

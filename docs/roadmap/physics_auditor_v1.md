@@ -1,8 +1,11 @@
 # Physics Auditor v1 roadmap
 
-Status: detailed design for the first implementation milestone, targeted at `0.3.0`.
-Nothing in this document is available in `0.2.0`. Names marked **Proposed** do not
-exist in the current package.
+Status: PA-1 strict contract/report schemas, backward-compatibility fixtures, canonical
+serialization, read-only validation CLI, and model-free deterministic routing are
+implemented and qualified while the package remains `0.2.0`. Physics Auditor model
+execution, oracle execution, workflow integration/state, repair, and scientific review
+remain proposed for later stages targeted at `0.3.0`. Names still marked **Proposed**
+do not exist in the current package.
 
 ## Goal
 
@@ -683,21 +686,25 @@ only after evidence references and source anchors are stable; add numerical work
 
 ## Staged implementation checklist
 
+PA-1 is implemented as the deliberately model-free subset documented in
+[Physics Auditor PA-1 foundations](../physics_auditor_foundations.md). It does not make
+Stages C through E available and does not claim the complete `0.3.0` acceptance gates.
+
 ### Stage A: freeze compatibility
 
-- [ ] Capture current schema-version-1 load, prompt-hash, transition, action-record,
+- [x] Capture current schema-version-1 load, prompt-hash, transition, action-record,
   recovery, repair-limit, CLI and package-build regression fixtures.
-- [ ] Confirm old workflow runs dispatch to unchanged v1 models and integrity code.
-- [ ] Document the exact existing `AuditorModelResult` as Code Auditor behavior.
+- [x] Confirm old workflow runs dispatch to unchanged v1 models and integrity code.
+- [x] Document the exact existing `AuditorModelResult` as Code Auditor behavior.
 
 ### Stage B: models and deterministic decision
 
 - [ ] Add **Proposed** `physics_models.py` with all strict contract/report/oracle/review
   types and closed enums.
 - [ ] Add cross-reference closure and protected-path validation before any action.
-- [ ] Generate and validate a production-compatible JSON schema through existing
+- [x] Generate and validate a production-compatible JSON schema through existing
   `structured_outputs` rules.
-- [ ] Implement and exhaustively unit-test `derive_physics_audit_decision` without any
+- [x] Implement and exhaustively unit-test `derive_physics_audit_decision` without any
   model or subprocess.
 
 ### Stage C: oracle evidence

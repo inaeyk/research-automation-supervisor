@@ -1,8 +1,10 @@
 # Later physics research profiles
 
 Status: proposed post-Physics-Auditor expansion, targeted no earlier than `0.6.0`.
-Version 0.2.0 has only the general `AuditorModelResult`; version 0.3.0 is planned to
-introduce only `physics_implementation_v1`. The profiles below are not current
+Version 0.2.0 now contains the qualified PA-1 `physics_implementation` contract,
+untrusted audit-report, policy and model-free routing foundations in addition to the
+general `AuditorModelResult`. It does not execute a Physics Auditor or integrate the
+profile into a live workflow. The additional profiles below are not current
 capabilities. Names marked **Proposed** do not exist in 0.2.0.
 
 ## Purpose
@@ -440,9 +442,10 @@ contents, hidden tests, private evidence or live campaigns.
 
 ## Module-level implementation map
 
-| Proposed component | Existing/planned touchpoints | Constraint |
+| Component | Existing/planned touchpoints | Constraint |
 |---|---|---|
-| Profile/derivation models | planned `physics_models.py`; current `workflow_models.py` | Closed discriminated profile versions |
+| PA-1 implementation profile foundations | implemented `physics_models.py`, `physics_routing.py`; unchanged `workflow_models.py` | Only `physics_implementation`; strict contract/report/policy and model-free routing, no workflow execution |
+| Proposed later profile/derivation models | future versioned physics models; current `workflow_models.py` | Closed discriminated profile versions |
 | Claim ledger models/loader | `contract.py`, planned physics models, `structured_outputs.py` | Strict IDs/hashes; no model authority |
 | Profile prompts/reports | `workflow_prompts.py`, planned `physics_prompts.py` | Canonical evidence references, bounded output |
 | Oracle kind results | `test_runner.py`, planned `physics_oracles.py` | Fixed offline commands and distinct typed failures |

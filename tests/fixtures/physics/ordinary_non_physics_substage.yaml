@@ -1,0 +1,25 @@
+schema_version: 1
+substage_id: ordinary_substage
+title: Ordinary 0.2.0 synthetic substage
+workspace: ../project
+contract_path: ../project/control/contract.md
+worker_initial_prompt_path: ../project/control/worker-initial.md
+worker_repair_prompt_path: ../project/control/worker-repair.md
+auditor_prompt_path: ../project/control/auditor.md
+worker_model: gpt-5.6-sol
+worker_reasoning_effort: high
+worker_timeout_seconds: 60
+auditor_model: gpt-5.6-sol
+auditor_reasoning_effort: high
+auditor_timeout_seconds: 60
+acceptance_tests:
+  - id: fixed_test
+    argv: [/usr/bin/python3, tools/acceptance.py]
+    cwd: ../project
+    timeout_seconds: 30
+    max_stdout_bytes: 4096
+    max_stderr_bytes: 4096
+allowed_paths: [src/**]
+protected_paths: [control/**, tools/**]
+max_repair_rounds: 1
+checkpoint_after: false

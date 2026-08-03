@@ -1,0 +1,18 @@
+{
+  "field_names": [
+    "codex_executable",
+    "codex_invoker",
+    "test_invoker",
+    "environ",
+    "token_factory",
+    "utc_now",
+    "prompt_source",
+    "require_canonical_thread_ids"
+  ],
+  "codex_executable": null,
+  "codex_invoker": "run_prepared_codex",
+  "test_invoker": "run_test_attempt",
+  "environ": null,
+  "prompt_source": null,
+  "require_canonical_thread_ids": false
+}

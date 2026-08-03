@@ -1,0 +1,31 @@
+{
+  "baseline_version": "0.2.0",
+  "starting_commit": "9357b5a816953ea15a8a1412755aff90c211801f",
+  "canonical_model_sha256": {
+    "auditor_result.json": "743d4b70ed970a258bf05d4bdb457fa30272256f1926800dfe0b69f794b7244b",
+    "campaign.yaml": "d3828c283b1720a9e1c56abf9e475d569ee20c16a8f723641f5a72927fb81100",
+    "campaign_state.json": "1bf7d8ef92dd3c91e262f9c3bf83b6e65cb02c84f4b405131c5185446de91a7d",
+    "codex_action_record.json": "e543bb715c21782e29b605825cf1dc08fb37b0a3c22b40c71647b68032409535",
+    "ordinary_non_physics_substage.yaml": "0da3bdd02b9c0f820da52c602a9c9d8c2a70f8c32cf3e2bf138c10b288a51509",
+    "pending_action.json": "3dca19b9d1ca86166e140390153e980036c876db88c61ccb3580d8b00a91b8f3",
+    "workflow_state.json": "3609ed0572d31a7884ecc313c377f786f471b5e72d7a640dd9b836cd5164998f"
+  },
+  "model_schema_sha256": {
+    "AuditorModelResult": "2cf12098cf23ee027f97df01600476e1820192e0783f34107763d6a481d4896d",
+    "CodexActionRecord": "f36bd2583826e82e42b6b0a1fa3b7c53c01083fd319efa1230a1faf34fa1df1e",
+    "JournalEntry": "fa634d7d356529b2882b312d231db3e7b1048750bead421eed606e3f67001704",
+    "PendingAction": "bae0d75e67f40a09a548bf0e7b3353f4ee6ed4c33123811d1c2d328605ef3d1c",
+    "ReplayCampaignSpecification": "066c748c76ed785d3d75f14e7ea8e2afbdfc858239f39fe367192477c2cc357c",
+    "ReplayCampaignState": "a973e69e483689c73f46f61e6a280a5fbc3e2ba397b2b37d41e39b342b47f8f6",
+    "SubstageSpecification": "330bec82af133c1b1e47c566b4057ae61fc5ee172b08e8671c6c5ec2db0af0cb",
+    "WorkflowState": "cc9b556c5788491ebe1cd7860b096e564044f78a5bed2c24eade127204e42e4a"
+  },
+  "initial_worker_prompt": {
+    "byte_count": 1782,
+    "rendered_sha256": "c32d379c23f84c8c841f58cc0511663ea4c3ef4b3f1c20c571c37d0ad3b70540"
+  },
+  "workflow_output_schema_sha256": {
+    "auditor": "1190d9fa7dc9a4cd82121c0632edef6db10c7e68e4528b220e7ac4af0035a682",
+    "worker": "e4ae6ae7d25cb87f806ac555ed0bab982112a0db05c0eecf1ab2252ec219fc41"
+  }
+}

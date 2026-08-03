@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "human_review",
+  "evidence_sufficiency": "sufficient",
+  "summary": "The synthetic change requests a different Fourier convention.",
+  "human_gate_triggers": ["convention_change"],
+  "checks": [
+    {"id": "check_analytic_identity", "target_kind": "oracle", "target_id": "analytic_identity", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null}], "rationale": "The analytic authority is fixed."},
+    {"id": "check_background_limit_oracle", "target_kind": "oracle", "target_id": "background_limit_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The limit oracle is recorded."},
+    {"id": "check_trace_free", "target_kind": "required_identity", "target_id": "trace_free_A", "status": "failed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null}, {"kind": "test", "reference": "trace_free_regression", "path": null, "line_start": null, "line_end": null}], "rationale": "The proposed convention differs from locked authority."},
+    {"id": "check_trace_free_oracle", "target_kind": "oracle", "target_id": "trace_free_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "trace_free_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The public regression is recorded."},
+    {"id": "check_uniform_background", "target_kind": "limiting_case", "target_id": "uniform_background", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The limit evidence is recorded."}
+  ],
+  "findings": [
+    {"id": "finding_convention_change", "severity": "high", "category": "convention_change_requested", "status": "open", "disposition": "human_review", "check_ids": ["check_trace_free"], "forbidden_claim_ids": [], "evidence": [{"kind": "task_contract", "reference": "conventions.fourier_convention", "path": null, "line_start": null, "line_end": null}], "statement": "The proposed implementation changes the frozen convention.", "required_action": "A human must revise task authority in a new contract and run."}
+  ],
+  "unresolved_questions": []
+}

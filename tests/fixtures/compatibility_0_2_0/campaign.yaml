@@ -1,0 +1,24 @@
+schema_version: 1
+campaign_id: synthetic_campaign
+title: Public synthetic 0.2.0 campaign
+visible_package_root: .
+supervisor_policy_path: control/supervisor.md
+supervisor_model: gpt-5.6-sol
+supervisor_reasoning_effort: high
+supervisor_timeout_seconds: 60
+tasks:
+  - task_id: synthetic_task
+    title: Public synthetic task
+    stage2_specification_path: config/substage.yaml
+    project_context_paths: [README.md]
+    source_provenance:
+      repository_id: synthetic_repository
+      source_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_tree: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      baseline_archive_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    gold_evaluations: []
+    gold_artifact_roots: []
+    production_profile:
+      hot_path: [src/**]
+      post_update: [docs/**]
+      validation_only: [tests/**]

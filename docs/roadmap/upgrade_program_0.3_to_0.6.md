@@ -132,14 +132,15 @@ flowchart LR
 
 ## Module-level implementation map
 
-Proposed modules are new; all other names exist in 0.2.0.
+The PA-1 `physics_models.py` and `physics_routing.py` foundations exist in 0.2.0.
+Entries marked **Proposed** remain future work; all other names existed before PA-1.
 
 | Proposed component | Likely existing modules to modify or wrap | Purpose |
 |---|---|---|
-| **Proposed** `physics_models.py` | `workflow_models.py`, `structured_outputs.py` | Strict physics-contract, oracle-result, report, and decision models |
+| PA-1 `physics_models.py`, `physics_routing.py` | isolated from unchanged `workflow_models.py`; reuses `structured_outputs.py` validation conventions | Strict physics contract/report/policy/decision models and model-free deterministic routing; no oracle execution or workflow integration |
 | **Proposed** `physics_prompts.py` | `workflow_prompts.py` | Deterministic physics evidence assembly and engine-owned JSON schema |
 | **Proposed** `physics_oracles.py` | `test_runner.py`, `git_evidence.py`, `durable_state.py` | Fixed offline oracle commands, bounded typed results, no-workspace-change check |
-| **Proposed** `physics_auditor.py` | `workflow_engine.py`, `workflow_integrity.py` | Physics-audit action intent/proof, report validation, deterministic routing |
+| **Proposed** `physics_auditor.py` | `workflow_engine.py`, `workflow_integrity.py`; reuse PA-1 models/router | Physics-audit action intent/proof and versioned workflow integration |
 | Versioned substage/state dispatch | `workflow_models.py`, `workflow_engine.py`, `workflow_integrity.py`, `cli.py` | Keep schema/state version 1 behavior exact while adding physics version 2 |
 | **Proposed** `agent_models.py` | `codex_models.py`, `workflow_models.py` | Normalized provider-neutral request/result/capability types |
 | **Proposed** `agent_adapter.py` | `codex_adapter.py`, `workflow_engine.CodexInvoker`, `WorkflowServices` | Protocol, registry, negotiation, and launch boundary |

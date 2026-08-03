@@ -68,6 +68,18 @@ class WorkflowPromptSourceError(WorkflowError):
         self.adapter_status = adapter_status
 
 
+class PhysicsValidationError(SupervisorError):
+    """Base class for model-free Physics Auditor foundation input errors."""
+
+
+class PhysicsContractError(PhysicsValidationError):
+    """A physics task contract could not be read, parsed, or validated."""
+
+
+class PhysicsAuditError(PhysicsValidationError):
+    """A physics audit report is malformed or contradicts its task contract."""
+
+
 class ShadowError(SupervisorError):
     """Base class for expected Stage 3 shadow-calibration errors."""
 

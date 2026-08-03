@@ -1,0 +1,42 @@
+schema_version: 1
+profile: physics_implementation
+conventions:
+  - id: metric_signature
+    value: "-++++"
+    authority: project_locked
+assumptions:
+  - id: uniform_gp_background
+    statement: The synthetic implementation uses a locked uniform background.
+required_identities:
+  - id: trace_free_A
+    statement: The synthetic conformal tensor is trace free.
+    required_evidence_kinds: [test]
+    oracle_ids: [trace_free_oracle]
+limiting_cases:
+  - id: uniform_background
+    statement: The synthetic implementation reduces to the locked uniform background.
+    required_evidence_kinds: [analytic]
+    oracle_ids: []
+evidence:
+  - id: trace_free_regression
+    kind: test
+    description: Public synthetic trace-free regression test.
+    path: null
+    required_for: [trace_free_A]
+oracles:
+  - id: trace_free_oracle
+    kind: test
+    reference: trace_free_regression
+    statement: Use the declared regression result; PA-1 does not execute it.
+    check_ids: [trace_free_A]
+    required: true
+forbidden_claims:
+  - id: no_constraint_mode_claim
+    statement: A constraint-dominated synthetic mode must not be called physical.
+human_gate:
+  required_for:
+    - convention_change
+    - new_physical_interpretation
+    - unresolved_gauge_constraint_ambiguity
+audit_policy: null
+auditor_role_ref: null

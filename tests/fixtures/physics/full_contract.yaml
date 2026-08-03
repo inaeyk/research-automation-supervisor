@@ -1,0 +1,78 @@
+schema_version: 1
+profile: physics_implementation
+conventions:
+  - id: fourier_convention
+    value: exp(+ikz)
+    authority: task_locked
+  - id: metric_signature
+    value: "-++++"
+    authority: project_locked
+assumptions:
+  - id: uniform_gp_background
+    statement: The synthetic implementation uses a locked uniform ingoing background.
+required_identities:
+  - id: trace_free_A
+    statement: The synthetic conformal tensor is trace free.
+    required_evidence_kinds: [analytic, test]
+    oracle_ids: [analytic_identity, trace_free_oracle]
+limiting_cases:
+  - id: uniform_background
+    statement: The synthetic implementation reduces to the locked uniform background.
+    required_evidence_kinds: [analytic]
+    oracle_ids: [background_limit_oracle]
+evidence:
+  - id: derivation_note
+    kind: derivation
+    description: Public synthetic derivation note.
+    path: docs/derivation/trace_free.md
+    required_for: [trace_free_A]
+  - id: implementation_source
+    kind: artifact
+    description: Public synthetic implementation source.
+    path: src/physics/implementation.py
+    required_for: [trace_free_A, uniform_background]
+  - id: residual_data
+    kind: numerical
+    description: Machine-readable synthetic residual evidence.
+    path: tests/data/residual.json
+    required_for: [uniform_background]
+  - id: trace_free_regression
+    kind: test
+    description: Public synthetic trace-free regression test.
+    path: null
+    required_for: [trace_free_A]
+oracles:
+  - id: analytic_identity
+    kind: analytic
+    reference: analytic_trace_free
+    statement: The declared analytic trace-free identity is fixed task authority.
+    check_ids: [trace_free_A]
+    required: true
+  - id: background_limit_oracle
+    kind: analytic
+    reference: analytic_uniform_background
+    statement: The declared uniform-background limit is fixed task authority.
+    check_ids: [uniform_background]
+    required: true
+  - id: trace_free_oracle
+    kind: test
+    reference: trace_free_regression
+    statement: Use the declared regression result; PA-1 does not execute it.
+    check_ids: [trace_free_A]
+    required: true
+forbidden_claims:
+  - id: no_constraint_mode_claim
+    statement: A constraint-dominated synthetic mode must not be called physical.
+human_gate:
+  required_for:
+    - convention_change
+    - new_physical_interpretation
+    - unresolved_gauge_constraint_ambiguity
+audit_policy:
+  schema_version: 1
+  insufficient_required_evidence: block
+  conflicting_required_evidence: human_review
+  medium_severity: request_repair
+  low_severity: allow_pass
+  informational_severity: allow_pass
+auditor_role_ref: physics_auditor

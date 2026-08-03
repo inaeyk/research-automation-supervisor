@@ -48,9 +48,12 @@ See [architecture](docs/architecture.md), [single-substage behavior](docs/workfl
 and [campaigns](docs/campaigns.md).
 
 Future work is documented separately in the [0.3–0.6 upgrade roadmap](docs/roadmap/README.md).
-It is planning only: Physics Auditor v1 is the first proposed milestone, followed by
+The package also contains [model-free Physics Auditor PA-1 schema and routing
+foundations](docs/physics_auditor_foundations.md); no Physics Auditor model execution or
+normal-workflow integration is available yet.
+Physics Auditor execution and workflow integration remain planning only, followed by
 provider-neutral adapters, explicit parallel DAG campaigns, and later physics research
-profiles. Those features are not available in version 0.2.0.
+profiles. Those later features are not available in version 0.2.0.
 
 ## Current status
 

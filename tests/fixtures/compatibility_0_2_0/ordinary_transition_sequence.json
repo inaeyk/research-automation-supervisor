@@ -1,0 +1,18 @@
+[
+  ["transition", null, "initialized", "workflow_initialized"],
+  ["transition", "initialized", "worker_running", "initial_worker_requested"],
+  ["action_intent", "worker_running", "worker_running", "worker_action_intent"],
+  ["action_completion", "worker_running", "worker_running", "worker_action_completed"],
+  ["evidence", "worker_running", "worker_running", "worker_result_validated"],
+  ["transition", "worker_running", "scope_checking", "worker_reported_completed"],
+  ["evidence", "scope_checking", "scope_checking", "git_scope_evidence_collected"],
+  ["transition", "scope_checking", "tests_running", "scope_check_passed"],
+  ["action_intent", "tests_running", "tests_running", "test_action_intent"],
+  ["action_completion", "tests_running", "tests_running", "test_action_completed"],
+  ["evidence", "tests_running", "tests_running", "fixed_tests_finalized"],
+  ["transition", "tests_running", "auditor_running", "fixed_tests_passed"],
+  ["action_intent", "auditor_running", "auditor_running", "auditor_action_intent"],
+  ["action_completion", "auditor_running", "auditor_running", "auditor_action_completed"],
+  ["evidence", "auditor_running", "auditor_running", "auditor_result_validated"],
+  ["transition", "auditor_running", "completed", "auditor_passed"]
+]

@@ -3,6 +3,25 @@
 All notable user-facing changes are recorded here. This project follows semantic
 versioning while it remains pre-1.0.
 
+## [Unreleased]
+
+### Added
+
+- Physics Auditor PA-1 model-free foundations: strict standalone version-1 physics
+  task contracts and untrusted audit reports, closed evidence references, canonical
+  serialization/hashes, and an authoritative pure deterministic verdict router.
+- Read-only `validate-physics-contract` and `validate-physics-audit` commands. No
+  Physics Auditor model execution or workflow integration is available yet.
+- Public synthetic physics fixtures plus frozen 0.2.0 compatibility fixtures for
+  persisted models, journals, service injection, schemas, hashes, transitions, and
+  existing CLI behavior.
+
+### Preserved
+
+- Package version 0.2.0, schema-version-1 ordinary workflow/campaign behavior,
+  Codex-specific persisted action proof, existing journal semantic forms, and the
+  authoritative historical campaign record remain unchanged.
+
 ## [0.2.0] - 2026-07-31
 
 ### Added

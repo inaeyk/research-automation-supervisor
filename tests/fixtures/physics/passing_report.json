@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "pass",
+  "evidence_sufficiency": "sufficient",
+  "summary": "All synthetic required checks have sufficient declared evidence.",
+  "human_gate_triggers": [],
+  "checks": [
+    {
+      "id": "check_analytic_identity",
+      "target_kind": "oracle",
+      "target_id": "analytic_identity",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [
+        {"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null}
+      ],
+      "rationale": "The declared analytic identity evidence is internally consistent."
+    },
+    {
+      "id": "check_background_limit_oracle",
+      "target_kind": "oracle",
+      "target_id": "background_limit_oracle",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [
+        {"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}
+      ],
+      "rationale": "The declared analytic limit evidence is internally consistent."
+    },
+    {
+      "id": "check_trace_free",
+      "target_kind": "required_identity",
+      "target_id": "trace_free_A",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [
+        {"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null},
+        {"kind": "test", "reference": "trace_free_regression", "path": null, "line_start": null, "line_end": null},
+        {"kind": "source", "reference": null, "path": "src/physics/implementation.py", "line_start": 10, "line_end": 20}
+      ],
+      "rationale": "The synthetic analytic and test evidence support the required identity."
+    },
+    {
+      "id": "check_trace_free_oracle",
+      "target_kind": "oracle",
+      "target_id": "trace_free_oracle",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [
+        {"kind": "oracle", "reference": "trace_free_oracle", "path": null, "line_start": null, "line_end": null}
+      ],
+      "rationale": "The declared public regression evidence is internally consistent."
+    },
+    {
+      "id": "check_uniform_background",
+      "target_kind": "limiting_case",
+      "target_id": "uniform_background",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [
+        {"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}
+      ],
+      "rationale": "The synthetic implementation has the declared limiting behavior."
+    }
+  ],
+  "findings": [],
+  "unresolved_questions": []
+}

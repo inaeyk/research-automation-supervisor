@@ -1,0 +1,43 @@
+{
+  "contract_cases": [
+    "unknown_field",
+    "duplicate_convention_ids",
+    "whitespace_identifier",
+    "invalid_convention_authority",
+    "absolute_evidence_path",
+    "drive_relative_evidence_path",
+    "scheme_evidence_path",
+    "traversal_evidence_path",
+    "undeclared_oracle_reference",
+    "undeclared_evidence_requirement",
+    "contradictory_not_applicable_convention",
+    "missing_profile_required_collection",
+    "missing_mandatory_human_gate",
+    "unsupported_profile",
+    "unsupported_schema_version",
+    "mapping_instead_of_ordered_list"
+  ],
+  "report_cases": [
+    "unknown_field",
+    "duplicate_finding_ids",
+    "duplicate_check_ids",
+    "absolute_source_path",
+    "drive_relative_source_path",
+    "scheme_source_path",
+    "traversal_document_path",
+    "negative_line_number",
+    "reversed_line_range",
+    "undeclared_oracle_reference",
+    "undeclared_test_reference",
+    "finding_without_evidence",
+    "pass_with_critical_finding",
+    "pass_with_insufficient_evidence",
+    "contradictory_check_status_and_verdict",
+    "mapping_instead_of_ordered_list",
+    "convention_change_marked_repairable",
+    "resolved_human_gate_bypass",
+    "nonintegrity_infrastructure_bypass",
+    "gauge_ambiguity_marked_pass",
+    "new_interpretation_marked_pass"
+  ]
+}

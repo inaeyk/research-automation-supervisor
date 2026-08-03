@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "fail_repairable",
+  "evidence_sufficiency": "sufficient",
+  "summary": "One synthetic implementation coefficient has the wrong sign.",
+  "human_gate_triggers": [],
+  "checks": [
+    {"id": "check_analytic_identity", "target_kind": "oracle", "target_id": "analytic_identity", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null}], "rationale": "The analytic authority is fixed."},
+    {"id": "check_background_limit_oracle", "target_kind": "oracle", "target_id": "background_limit_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The limit oracle remains consistent."},
+    {"id": "check_trace_free", "target_kind": "required_identity", "target_id": "trace_free_A", "status": "failed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "analytic_identity", "path": null, "line_start": null, "line_end": null}, {"kind": "test", "reference": "trace_free_regression", "path": null, "line_start": null, "line_end": null}, {"kind": "source", "reference": null, "path": "src/physics/implementation.py", "line_start": 12, "line_end": 12}], "rationale": "The source sign disagrees with the fixed identity."},
+    {"id": "check_trace_free_oracle", "target_kind": "oracle", "target_id": "trace_free_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "trace_free_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The test evidence is available."},
+    {"id": "check_uniform_background", "target_kind": "limiting_case", "target_id": "uniform_background", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "background_limit_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The limiting case still passes."}
+  ],
+  "findings": [
+    {
+      "id": "finding_wrong_sign",
+      "severity": "high",
+      "category": "sign_or_normalization_error",
+      "status": "open",
+      "disposition": "repairable",
+      "check_ids": ["check_trace_free"],
+      "forbidden_claim_ids": [],
+      "evidence": [{"kind": "source", "reference": null, "path": "src/physics/implementation.py", "line_start": 12, "line_end": 12}],
+      "statement": "The synthetic coefficient has the opposite fixed sign.",
+      "required_action": "Correct only the implementation coefficient and rerun evidence."
+    }
+  ],
+  "unresolved_questions": []
+}

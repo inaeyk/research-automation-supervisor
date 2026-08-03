@@ -32,6 +32,8 @@ from research_automation_supervisor.errors import (
     LiveShadowInputError,
     LiveShadowLockError,
     LiveShadowStateError,
+    PhysicsAuditError,
+    PhysicsContractError,
     ReplayCampaignDependencyError,
     ReplayCampaignInputError,
     ReplayCampaignLockError,
@@ -64,6 +66,14 @@ from research_automation_supervisor.live_shadow_isolation import (
     resolve_authentication_confidentiality,
 )
 from research_automation_supervisor.live_shadow_models import LiveShadowResult
+from research_automation_supervisor.physics_models import (
+    DEFAULT_PHYSICS_AUDIT_POLICY_V1,
+    load_physics_audit_report,
+    load_physics_task_contract,
+)
+from research_automation_supervisor.physics_routing import (
+    derive_physics_audit_decision,
+)
 from research_automation_supervisor.redaction import redact_text
 from research_automation_supervisor.replay_campaign_engine import (
     DEFAULT_REPLAY_RUNS_DIRECTORY,
@@ -206,6 +216,84 @@ def validate_contract(
         typer.echo(_stable_json(result))
     else:
         typer.echo(f"Valid contract {contract.stage_id}: {path}")
+
+
+@app.command("validate-physics-contract")
+def validate_physics_contract_command(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Standalone Physics Task Contract v1 YAML/JSON."),
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate a physics contract without model execution or repository mutation."""
+    try:
+        contract = load_physics_task_contract(path)
+    except PhysicsContractError as exc:
+        _render_physics_error(str(exc), as_json)
+    except Exception:
+        _render_physics_internal_error(as_json)
+    result = {
+        "canonical_sha256": contract.canonical_sha256(),
+        "check_count": len(contract.required_identities) + len(contract.limiting_cases),
+        "ok": True,
+        "oracle_count": len(contract.oracles),
+        "path": str(path),
+        "profile": contract.profile,
+        "schema_version": contract.schema_version,
+    }
+    if as_json:
+        typer.echo(_stable_json(result))
+    else:
+        typer.echo(
+            f"Valid Physics Task Contract v1 ({contract.profile}): {path}\n"
+            f"Required checks: {result['check_count']}\n"
+            f"Declared oracles: {result['oracle_count']}\n"
+            "Model execution: unavailable in PA-1"
+        )
+
+
+@app.command("validate-physics-audit")
+def validate_physics_audit_command(
+    contract_path: Annotated[
+        Path,
+        typer.Option("--contract", help="Validated Physics Task Contract v1."),
+    ],
+    report_path: Annotated[
+        Path,
+        typer.Option("--report", help="Physics Audit Report v1 YAML/JSON."),
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate and deterministically route a report without invoking a model."""
+    try:
+        contract = load_physics_task_contract(contract_path)
+        report = load_physics_audit_report(report_path, contract)
+        policy = contract.audit_policy or DEFAULT_PHYSICS_AUDIT_POLICY_V1
+        decision = derive_physics_audit_decision(contract, policy, report)
+    except (PhysicsContractError, PhysicsAuditError) as exc:
+        _render_physics_error(str(exc), as_json)
+    except Exception:
+        _render_physics_internal_error(as_json)
+    result = {
+        "contract": str(contract_path),
+        "decision": decision.to_canonical_dict(),
+        "ok": True,
+        "report": str(report_path),
+    }
+    if as_json:
+        typer.echo(_stable_json(result))
+    else:
+        typer.echo(
+            f"Valid Physics Audit Report v1: {report_path}\n"
+            f"Deterministic route: {decision.outcome}\n"
+            f"Rules fired: {len(decision.rules)}\n"
+            "Model execution: unavailable in PA-1"
+        )
 
 
 @app.command("validate-codex-request")
@@ -1207,6 +1295,33 @@ def _render_workflow_internal_error(as_json: bool) -> Never:
     message = "Unexpected internal workflow engine failure."
     if as_json:
         typer.echo(_stable_json({"error": message, "error_kind": "internal", "ok": False}))
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
+
+
+def _render_physics_error(error: str, as_json: bool) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized = redact_text(error, sensitive_values)
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {"error": sanitized, "error_kind": "input", "ok": False}
+            )
+        )
+    else:
+        typer.echo(f"Physics validation error: {sanitized}", err=True)
+    raise typer.Exit(code=2)
+
+
+def _render_physics_internal_error(as_json: bool) -> Never:
+    message = "Unexpected internal physics validation failure."
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {"error": message, "error_kind": "internal", "ok": False}
+            )
+        )
     else:
         typer.echo(message, err=True)
     raise typer.Exit(code=1)

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "verdict": "fail_repairable",
+  "summary": "Synthetic 0.2.0 Code Auditor result.",
+  "scope_compliant": true,
+  "contract_satisfied": false,
+  "findings": [
+    {
+      "id": "finding_001",
+      "severity": "medium",
+      "category": "correctness",
+      "file": "src/example.py",
+      "line": 7,
+      "evidence": "The public synthetic value differs from the frozen contract.",
+      "required_fix": "Restore the frozen public synthetic value."
+    }
+  ],
+  "human_questions": []
+}
