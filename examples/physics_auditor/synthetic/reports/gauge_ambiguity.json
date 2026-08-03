@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "human_review",
+  "evidence_sufficiency": "conflicting",
+  "summary": "The supplied evidence cannot distinguish the claimed mode from a constraint mode.",
+  "human_gate_triggers": ["unresolved_gauge_constraint_ambiguity"],
+  "checks": [
+    {"id": "check_force_oracle", "target_kind": "oracle", "target_id": "force_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The narrow oracle passes but does not resolve the interpretation."},
+    {"id": "check_signed_force", "target_kind": "required_identity", "target_id": "signed_force_identity", "status": "unresolved", "evidence_sufficiency": "conflicting", "evidence": [{"kind": "task_contract", "reference": "forbidden_claims.no_discovery_claim", "path": null, "line_start": null, "line_end": null}], "rationale": "The physical-versus-constraint interpretation remains ambiguous."},
+    {"id": "check_zero_force", "target_kind": "limiting_case", "target_id": "zero_force_limit", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The narrow limiting case passes."}
+  ],
+  "findings": [
+    {"id": "finding_gauge", "severity": "high", "category": "gauge_constraint_ambiguity", "status": "open", "disposition": "human_review", "check_ids": ["check_signed_force"], "forbidden_claim_ids": [], "evidence": [{"kind": "task_contract", "reference": "forbidden_claims.no_discovery_claim", "path": null, "line_start": null, "line_end": null}], "statement": "Constraint contamination cannot be excluded.", "required_action": "Obtain human scientific review and additional authority."}
+  ],
+  "unresolved_questions": [
+    {"id": "question_mode", "category": "gauge_constraint_ambiguity", "question": "Is the observed mode physical under the frozen constraint authority?", "evidence": [{"kind": "task_contract", "reference": "forbidden_claims.no_discovery_claim", "path": null, "line_start": null, "line_end": null}]}
+  ]
+}

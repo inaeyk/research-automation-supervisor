@@ -33,6 +33,10 @@ from research_automation_supervisor.errors import (
     LiveShadowLockError,
     LiveShadowStateError,
     PhysicsAuditError,
+    PhysicsAuditorDependencyError,
+    PhysicsAuditorInputError,
+    PhysicsAuditorIntegrityError,
+    PhysicsAuditorStateError,
     PhysicsContractError,
     PhysicsOracleDependencyError,
     PhysicsOracleInputError,
@@ -70,6 +74,11 @@ from research_automation_supervisor.live_shadow_isolation import (
     resolve_authentication_confidentiality,
 )
 from research_automation_supervisor.live_shadow_models import LiveShadowResult
+from research_automation_supervisor.physics_auditor_execution import (
+    resume_physics_auditor,
+    run_physics_auditor,
+    validate_physics_auditor_action,
+)
 from research_automation_supervisor.physics_models import (
     DEFAULT_PHYSICS_AUDIT_POLICY_V1,
     load_physics_audit_report,
@@ -369,6 +378,143 @@ def run_physics_oracle_command(
         )
     if result.status != "passed":
         raise typer.Exit(code=5)
+
+
+@app.command("audit-physics")
+def audit_physics_command(
+    contract_path: Annotated[
+        Path,
+        typer.Option("--contract", help="Validated Physics Task Contract v1."),
+    ],
+    execution_config_path: Annotated[
+        Path,
+        typer.Option(
+            "--execution-config",
+            help="Trusted Codex Physics Auditor execution configuration v1.",
+        ),
+    ],
+    task_id: Annotated[
+        str,
+        typer.Option("--task-id", help="Stable task identifier bound into the proof."),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Canonical Git worktree inspected read-only."),
+    ],
+    oracle_evidence: Annotated[
+        Path,
+        typer.Option(
+            "--oracle-evidence",
+            help="Root containing completed and verified PA-2 oracle actions.",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="New standalone action directory, or existing on resume."),
+    ],
+    action_id: Annotated[
+        str | None,
+        typer.Option("--action-id", help="Optional stable action ID; otherwise engine-derived."),
+    ] = None,
+    attempt_number: Annotated[
+        int,
+        typer.Option("--attempt", min=1, max=1000, help="Bounded standalone attempt number."),
+    ] = 1,
+    validate_only: Annotated[
+        bool,
+        typer.Option(
+            "--validate-only",
+            help="Verify authority and render the prompt in memory without Codex or writes.",
+        ),
+    ] = False,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume",
+            help="Recover an existing action without resuming or rerunning a Codex session.",
+        ),
+    ] = False,
+    as_json: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a safe machine-readable summary."),
+    ] = False,
+) -> None:
+    """Run one standalone fresh read-only Physics Auditor; no repair is performed."""
+    if validate_only and resume:
+        _render_physics_auditor_error(
+            "--validate-only and --resume are mutually exclusive",
+            as_json,
+            2,
+        )
+    try:
+        if validate_only:
+            summary = validate_physics_auditor_action(
+                contract_path=contract_path,
+                execution_config_path=execution_config_path,
+                task_id=task_id,
+                workspace=workspace,
+                oracle_evidence_root=oracle_evidence,
+                action_id=action_id,
+                attempt_number=attempt_number,
+            )
+            payload = summary.to_dict()
+        else:
+            operation = resume_physics_auditor if resume else run_physics_auditor
+            result = operation(
+                contract_path=contract_path,
+                execution_config_path=execution_config_path,
+                task_id=task_id,
+                workspace=workspace,
+                oracle_evidence_root=oracle_evidence,
+                output_directory=output,
+                action_id=action_id,
+                attempt_number=attempt_number,
+            )
+            payload = result.to_canonical_dict()
+    except PhysicsAuditorDependencyError as exc:
+        _render_physics_auditor_error(str(exc), as_json, 3)
+    except PhysicsAuditorInputError as exc:
+        _render_physics_auditor_error(str(exc), as_json, 2)
+    except (PhysicsAuditorIntegrityError, PhysicsAuditorStateError) as exc:
+        _render_physics_auditor_error(str(exc), as_json, 4)
+    except Exception:
+        _render_physics_auditor_internal_error(as_json)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    elif validate_only:
+        typer.echo(
+            "\n".join(
+                (
+                    "Standalone Physics Auditor inputs are valid.",
+                    f"Prompt SHA-256: {payload['prompt_sha256']}",
+                    "Codex launched: no",
+                    "Warning: this standalone action does not repair code or mutate "
+                    "workflow state.",
+                )
+            )
+        )
+    else:
+        decision = cast(dict[str, object] | None, payload.get("routing_decision"))
+        route = decision.get("outcome") if decision is not None else "not_available"
+        typer.echo(
+            "\n".join(
+                (
+                    f"Physics Auditor status: {payload['status']}",
+                    f"Report validated: {str(payload['report_validated']).lower()}",
+                    f"Deterministic route: {route}",
+                    f"Workspace integrity: {payload['integrity_verdict']}",
+                    f"Action proof: {payload['action_proof_sha256']}",
+                    "Warning: standalone PA-3 reports routing only; it performs no repair.",
+                )
+            )
+        )
+    if not validate_only:
+        status = cast(str, payload["status"])
+        if status != "routing_completed":
+            raise typer.Exit(code=4)
+        route_value = cast(dict[str, object], payload["routing_decision"])["outcome"]
+        if route_value != "pass":
+            raise typer.Exit(code=5)
 
 
 @app.command("validate-codex-request")
@@ -1397,6 +1543,38 @@ def _render_physics_internal_error(as_json: bool) -> Never:
                 {"error": message, "error_kind": "internal", "ok": False}
             )
         )
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
+
+
+def _render_physics_auditor_error(
+    error: str,
+    as_json: bool,
+    exit_code: int,
+) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized = redact_text(error, sensitive_values)
+    kind = "input" if exit_code == 2 else "dependency" if exit_code == 3 else "integrity"
+    if as_json:
+        typer.echo(
+            _stable_json(
+                {
+                    "error": sanitized,
+                    "error_kind": kind,
+                    "ok": False,
+                }
+            )
+        )
+    else:
+        typer.echo(f"Physics Auditor error: {sanitized}", err=True)
+    raise typer.Exit(code=exit_code)
+
+
+def _render_physics_auditor_internal_error(as_json: bool) -> Never:
+    message = "Unexpected internal standalone Physics Auditor failure."
+    if as_json:
+        typer.echo(_stable_json({"error": message, "error_kind": "internal", "ok": False}))
     else:
         typer.echo(message, err=True)
     raise typer.Exit(code=1)

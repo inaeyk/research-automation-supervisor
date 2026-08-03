@@ -80,6 +80,26 @@ class PhysicsAuditError(PhysicsValidationError):
     """A physics audit report is malformed or contradicts its task contract."""
 
 
+class PhysicsAuditorError(SupervisorError):
+    """Base class for standalone Codex Physics Auditor action failures."""
+
+
+class PhysicsAuditorInputError(PhysicsAuditorError):
+    """A trusted PA-3 configuration, request, path, or evidence input is invalid."""
+
+
+class PhysicsAuditorDependencyError(PhysicsAuditorError):
+    """The qualified Codex Physics Auditor transport is unavailable."""
+
+
+class PhysicsAuditorStateError(PhysicsAuditorError):
+    """A standalone Physics Auditor action cannot be recovered safely."""
+
+
+class PhysicsAuditorIntegrityError(PhysicsAuditorStateError):
+    """Physics Auditor evidence, output, workspace, or proof was substituted."""
+
+
 class PhysicsOracleError(SupervisorError):
     """Base class for trusted, model-free physics-oracle execution errors."""
 

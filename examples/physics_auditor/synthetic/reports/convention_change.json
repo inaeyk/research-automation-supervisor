@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "human_review",
+  "evidence_sufficiency": "partial",
+  "summary": "The candidate requests a change to the locked force-sign convention.",
+  "human_gate_triggers": ["convention_change"],
+  "checks": [
+    {"id": "check_force_oracle", "target_kind": "oracle", "target_id": "force_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The existing frozen oracle passes under the existing convention."},
+    {"id": "check_signed_force", "target_kind": "required_identity", "target_id": "signed_force_identity", "status": "unresolved", "evidence_sufficiency": "partial", "evidence": [{"kind": "task_contract", "reference": "conventions.force_sign", "path": null, "line_start": null, "line_end": null}], "rationale": "A convention change is outside model authority."},
+    {"id": "check_zero_force", "target_kind": "limiting_case", "target_id": "zero_force_limit", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The zero-force limit is unaffected."}
+  ],
+  "findings": [
+    {"id": "finding_convention", "severity": "high", "category": "convention_change_requested", "status": "open", "disposition": "human_review", "check_ids": ["check_signed_force"], "forbidden_claim_ids": [], "evidence": [{"kind": "task_contract", "reference": "conventions.force_sign", "path": null, "line_start": null, "line_end": null}], "statement": "The locked sign convention would change.", "required_action": "Require a human-owned revised contract."}
+  ],
+  "unresolved_questions": []
+}

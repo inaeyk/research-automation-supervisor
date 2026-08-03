@@ -13,6 +13,13 @@ from research_automation_supervisor import __version__
 from research_automation_supervisor.cli import app
 from research_automation_supervisor.durable_state import canonical_json
 from research_automation_supervisor.git_evidence import GitBaseline
+from research_automation_supervisor.physics_auditor_models import (
+    PhysicsAuditorActionProofV1,
+    PhysicsAuditorActionRecordV1,
+    PhysicsAuditorActionRequestV1,
+    PhysicsAuditorActionResultV1,
+    PhysicsAuditorExecutionConfigV1,
+)
 from research_automation_supervisor.physics_oracle_models import (
     PhysicsOracleActionRecordV1,
     PhysicsOracleCatalogV1,
@@ -312,3 +319,30 @@ def test_pa2_execution_models_are_isolated_from_frozen_workflow_types() -> None:
     assert oracle_types.isdisjoint(frozen_types)
     assert "physics_oracle" not in WorkflowServices.__dataclass_fields__
     assert all("physics_oracle" not in form for form in JOURNAL_SEMANTIC_FORMS)
+
+
+def test_pa3_standalone_models_are_isolated_from_every_frozen_workflow_surface() -> None:
+    auditor_types = {
+        PhysicsAuditorExecutionConfigV1,
+        PhysicsAuditorActionRequestV1,
+        PhysicsAuditorActionRecordV1,
+        PhysicsAuditorActionResultV1,
+        PhysicsAuditorActionProofV1,
+    }
+    frozen_types = {
+        PendingAction,
+        CodexActionRecord,
+        WorkflowState,
+        JournalEntry,
+        SubstageSpecification,
+        AuditorModelResult,
+        ReplayCampaignSpecification,
+        ReplayCampaignState,
+    }
+
+    assert auditor_types.isdisjoint(frozen_types)
+    assert "physics_auditor" not in WorkflowServices.__dataclass_fields__
+    assert all("physics_auditor" not in form for form in JOURNAL_SEMANTIC_FORMS)
+    assert "physics" not in PendingAction.model_fields
+    assert "physics" not in CodexActionRecord.model_fields
+    assert "physics" not in WorkflowState.model_fields

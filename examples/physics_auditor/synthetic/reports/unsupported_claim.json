@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "human_review",
+  "evidence_sufficiency": "sufficient",
+  "summary": "A discovery claim exceeds the bounded synthetic evidence.",
+  "human_gate_triggers": ["new_physical_interpretation"],
+  "checks": [
+    {"id": "check_force_oracle", "target_kind": "oracle", "target_id": "force_oracle", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The narrow synthetic oracle passes."},
+    {"id": "check_signed_force", "target_kind": "required_identity", "target_id": "signed_force_identity", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}, {"kind": "test", "reference": "force_regression", "path": null, "line_start": null, "line_end": null}], "rationale": "The bounded identity is supported."},
+    {"id": "check_zero_force", "target_kind": "limiting_case", "target_id": "zero_force_limit", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The bounded limit is supported."}
+  ],
+  "findings": [
+    {"id": "finding_claim", "severity": "medium", "category": "unsupported_physical_claim", "status": "open", "disposition": "human_review", "check_ids": ["check_signed_force"], "forbidden_claim_ids": ["no_discovery_claim"], "evidence": [{"kind": "task_contract", "reference": "forbidden_claims.no_discovery_claim", "path": null, "line_start": null, "line_end": null}], "statement": "The claimed discovery is not supported by the synthetic evidence.", "required_action": "Remove the claim or obtain new human-owned authority and evidence."}
+  ],
+  "unresolved_questions": []
+}

@@ -1,0 +1,58 @@
+schema_version: 1
+profile: physics_implementation
+conventions:
+  - id: force_sign
+    value: positive means acceleration in the positive x direction
+    authority: task_locked
+assumptions:
+  - id: unit_mass
+    statement: The public synthetic particle has unit mass.
+required_identities:
+  - id: signed_force_identity
+    statement: Acceleration equals the declared signed force for unit mass.
+    required_evidence_kinds: [analytic, test]
+    oracle_ids: [force_oracle]
+limiting_cases:
+  - id: zero_force_limit
+    statement: Zero force produces zero acceleration.
+    required_evidence_kinds: [analytic]
+    oracle_ids: [force_oracle]
+evidence:
+  - id: implementation_source
+    kind: artifact
+    description: Public synthetic force implementation.
+    path: implementation.py
+    required_for: [signed_force_identity, zero_force_limit]
+  - id: derivation_note
+    kind: derivation
+    description: Public synthetic unit-mass derivation.
+    path: derivation.md
+    required_for: [signed_force_identity]
+  - id: force_regression
+    kind: test
+    description: Declared public synthetic force regression.
+    path: null
+    required_for: [signed_force_identity]
+oracles:
+  - id: force_oracle
+    kind: analytic
+    reference: analytic_force_check
+    statement: The trusted PA-2 oracle checks positive, negative, and zero force cases.
+    check_ids: [signed_force_identity, zero_force_limit]
+    required: true
+forbidden_claims:
+  - id: no_discovery_claim
+    statement: The synthetic check must not be described as a new physical discovery.
+human_gate:
+  required_for:
+    - convention_change
+    - new_physical_interpretation
+    - unresolved_gauge_constraint_ambiguity
+audit_policy:
+  schema_version: 1
+  insufficient_required_evidence: block
+  conflicting_required_evidence: human_review
+  medium_severity: request_repair
+  low_severity: allow_pass
+  informational_severity: allow_pass
+auditor_role_ref: physics_auditor

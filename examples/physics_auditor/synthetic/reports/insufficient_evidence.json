@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "blocked_insufficient_evidence",
+  "evidence_sufficiency": "insufficient",
+  "summary": "The required trusted oracle completion proof is absent.",
+  "human_gate_triggers": [],
+  "checks": [
+    {"id": "check_force_oracle", "target_kind": "oracle", "target_id": "force_oracle", "status": "unresolved", "evidence_sufficiency": "insufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The index explicitly records the required oracle as missing."},
+    {"id": "check_signed_force", "target_kind": "required_identity", "target_id": "signed_force_identity", "status": "unresolved", "evidence_sufficiency": "insufficient", "evidence": [{"kind": "task_contract", "reference": "required_identities.signed_force_identity", "path": null, "line_start": null, "line_end": null}], "rationale": "Required analytic evidence is absent."},
+    {"id": "check_zero_force", "target_kind": "limiting_case", "target_id": "zero_force_limit", "status": "unresolved", "evidence_sufficiency": "insufficient", "evidence": [{"kind": "task_contract", "reference": "limiting_cases.zero_force_limit", "path": null, "line_start": null, "line_end": null}], "rationale": "Required analytic evidence is absent."}
+  ],
+  "findings": [
+    {"id": "finding_missing_oracle", "severity": "high", "category": "missing_required_evidence", "status": "open", "disposition": "evidence_blocking", "check_ids": ["check_force_oracle", "check_signed_force", "check_zero_force"], "forbidden_claim_ids": [], "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "statement": "No verified PA-2 completion proof is available.", "required_action": "Supply a verified trusted oracle action."}
+  ],
+  "unresolved_questions": []
+}

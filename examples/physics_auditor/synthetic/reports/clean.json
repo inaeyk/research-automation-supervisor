@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "pass",
+  "evidence_sufficiency": "sufficient",
+  "summary": "The public synthetic implementation satisfies the frozen sign and zero-force authorities.",
+  "human_gate_triggers": [],
+  "checks": [
+    {
+      "id": "check_force_oracle",
+      "target_kind": "oracle",
+      "target_id": "force_oracle",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}],
+      "rationale": "The verified oracle reports all declared cases passing."
+    },
+    {
+      "id": "check_signed_force",
+      "target_kind": "required_identity",
+      "target_id": "signed_force_identity",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [
+        {"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null},
+        {"kind": "test", "reference": "force_regression", "path": null, "line_start": null, "line_end": null},
+        {"kind": "source", "reference": null, "path": "implementation.py", "line_start": 1, "line_end": 6}
+      ],
+      "rationale": "The implementation, declared regression, and verified analytic oracle agree."
+    },
+    {
+      "id": "check_zero_force",
+      "target_kind": "limiting_case",
+      "target_id": "zero_force_limit",
+      "status": "passed",
+      "evidence_sufficiency": "sufficient",
+      "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}],
+      "rationale": "The verified zero-force oracle case passes."
+    }
+  ],
+  "findings": [],
+  "unresolved_questions": []
+}

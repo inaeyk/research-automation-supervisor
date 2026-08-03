@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "profile": "physics_implementation",
+  "verdict": "fail_repairable",
+  "evidence_sufficiency": "sufficient",
+  "summary": "The implementation reverses the frozen force convention.",
+  "human_gate_triggers": [],
+  "checks": [
+    {"id": "check_force_oracle", "target_kind": "oracle", "target_id": "force_oracle", "status": "failed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "The trusted cases fail."},
+    {"id": "check_signed_force", "target_kind": "required_identity", "target_id": "signed_force_identity", "status": "failed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}, {"kind": "test", "reference": "force_regression", "path": null, "line_start": null, "line_end": null}, {"kind": "source", "reference": null, "path": "implementation.py", "line_start": 1, "line_end": 6}], "rationale": "The returned acceleration has the opposite sign."},
+    {"id": "check_zero_force", "target_kind": "limiting_case", "target_id": "zero_force_limit", "status": "passed", "evidence_sufficiency": "sufficient", "evidence": [{"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "rationale": "Zero remains zero despite the sign defect."}
+  ],
+  "findings": [
+    {"id": "finding_sign", "severity": "high", "category": "sign_or_normalization_error", "status": "open", "disposition": "repairable", "check_ids": ["check_force_oracle", "check_signed_force"], "forbidden_claim_ids": [], "evidence": [{"kind": "source", "reference": null, "path": "implementation.py", "line_start": 1, "line_end": 6}, {"kind": "oracle", "reference": "force_oracle", "path": null, "line_start": null, "line_end": null}], "statement": "The implementation returns negative force.", "required_action": "Restore the frozen positive-force sign."}
+  ],
+  "unresolved_questions": []
+}

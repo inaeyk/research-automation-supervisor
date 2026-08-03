@@ -1,0 +1,16 @@
+schema_version: 1
+backend: codex_cli
+model: gpt-5.6-sol
+reasoning_effort: high
+timeout_seconds: 300
+max_stdout_bytes: 1048576
+max_stderr_bytes: 1048576
+sandbox_policy: read_only
+approval_policy: never
+network_policy: disabled_by_codex_policy_not_kernel_enforced
+output_schema_id: physics_audit_report_v1
+prompt_template_version: physics_auditor_prompt_v1
+session_policy: fresh_ephemeral
+structured_output_policy: strict
+trusted_executable: null
+environment_allowlist_profile: codex_cli_minimal_v1
