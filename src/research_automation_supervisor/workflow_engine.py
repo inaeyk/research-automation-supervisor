@@ -18,8 +18,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Literal, Protocol, cast
+from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast
 
+import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from research_automation_supervisor.codex_adapter import (
@@ -104,6 +105,9 @@ from research_automation_supervisor.workflow_prompts import (
     write_output_schemas,
 )
 
+if TYPE_CHECKING:
+    from research_automation_supervisor.physics_workflow import PhysicsWorkflowServices
+
 ZERO_HASH = "0" * 64
 STATE_FILE = "state.json"
 RESULT_FILE = "result.json"
@@ -129,10 +133,7 @@ def _build_journal_semantic_forms() -> frozenset[JournalSemanticForm]:
     forms: set[JournalSemanticForm] = set()
 
     def transition(previous: str | None, new: str, *reasons: str) -> None:
-        forms.update(
-            ("transition", previous, new, None, False, reason)
-            for reason in reasons
-        )
+        forms.update(("transition", previous, new, None, False, reason) for reason in reasons)
 
     transition(None, "initialized", "workflow_initialized")
     transition("initialized", "worker_running", "initial_worker_requested")
@@ -344,12 +345,8 @@ _EVIDENCE_UPDATE_FIELDS = {
             "summary",
         }
     ),
-    "worker_pause_evidence_saved": frozenset(
-        {"latest_git_evidence_path", "scope_compliant"}
-    ),
-    "git_scope_evidence_collected": frozenset(
-        {"latest_git_evidence_path", "scope_compliant"}
-    ),
+    "worker_pause_evidence_saved": frozenset({"latest_git_evidence_path", "scope_compliant"}),
+    "git_scope_evidence_collected": frozenset({"latest_git_evidence_path", "scope_compliant"}),
     "fixed_tests_finalized": frozenset({"latest_tests_path", "tests_passed"}),
     "auditor_result_validated": frozenset(
         {
@@ -485,6 +482,16 @@ def validate_substage(
     environ: Mapping[str, str] | None = None,
 ) -> PreparedSubstage:
     """Validate every frozen input and the clean Git baseline without writes."""
+    if _specification_schema_version(path) == 2:
+        from research_automation_supervisor.physics_workflow import (
+            load_physics_substage_specification,
+        )
+
+        _, _, sensitive_values = build_subprocess_environment(environ)
+        return cast(
+            PreparedSubstage,
+            load_physics_substage_specification(path, sensitive_values=sensitive_values),
+        )
     _, _, sensitive_values = build_subprocess_environment(environ)
     return load_substage_specification(path, sensitive_values=sensitive_values)
 
@@ -494,8 +501,24 @@ def run_substage(
     *,
     runs_dir: Path = Path("runs/workflows"),
     services: WorkflowServices = DEFAULT_WORKFLOW_SERVICES,
+    physics_services: PhysicsWorkflowServices | None = None,
 ) -> WorkflowResult:
     """Create one exclusive run and synchronously drive it to a pause or terminal state."""
+    if _specification_schema_version(path) == 2:
+        from research_automation_supervisor.physics_workflow import (
+            DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            run_physics_substage,
+        )
+
+        return cast(
+            WorkflowResult,
+            run_physics_substage(
+                path,
+                runs_dir=runs_dir,
+                software_services=services,
+                physics_services=physics_services or DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            ),
+        )
     _, _, sensitive_values = build_subprocess_environment(services.environ)
     prepared = load_substage_specification(path, sensitive_values=sensitive_values)
     baseline = record_git_baseline(prepared.workspace, environ=services.environ)
@@ -612,8 +635,23 @@ def resume_substage(
     run_directory: Path,
     *,
     services: WorkflowServices = DEFAULT_WORKFLOW_SERVICES,
+    physics_services: PhysicsWorkflowServices | None = None,
 ) -> WorkflowResult:
     """Resume a nonterminal interrupted run without repeating completed actions."""
+    if _run_state_schema_version(run_directory) == 2:
+        from research_automation_supervisor.physics_workflow import (
+            DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            resume_physics_substage,
+        )
+
+        return cast(
+            WorkflowResult,
+            resume_physics_substage(
+                run_directory,
+                software_services=services,
+                physics_services=physics_services or DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            ),
+        )
     resolved = _resolve_run_directory(run_directory)
     with _WorkflowLock(resolved, services.utc_now):
         state = _load_state(resolved)
@@ -664,9 +702,7 @@ def resume_substage(
             )
             return context.state.to_result()
         if context.state.continuation_path is not None and context.state.pending_action is None:
-            _, _, sensitive_values = build_subprocess_environment(
-                services.environ
-            )
+            _, _, sensitive_values = build_subprocess_environment(services.environ)
             instruction = load_continuation_instruction(
                 Path(context.state.continuation_path),
                 sensitive_values=sensitive_values,
@@ -674,9 +710,7 @@ def resume_substage(
                 protected_paths=context.prepared.specification.protected_paths,
             )
             if instruction.sha256 != context.state.continuation_sha256:
-                raise WorkflowStateError(
-                    "accepted continuation bytes changed before action launch"
-                )
+                raise WorkflowStateError("accepted continuation bytes changed before action launch")
             continuation_entry = next(
                 (
                     entry
@@ -686,9 +720,7 @@ def resume_substage(
                 None,
             )
             if continuation_entry is None:
-                raise WorkflowStateError(
-                    "accepted continuation boundary is unavailable"
-                )
+                raise WorkflowStateError("accepted continuation boundary is unavailable")
             context.continuation = instruction
             context.continuation_from_state = continuation_entry.previous_state
         context.state = _recover_pending_action(context)
@@ -702,8 +734,24 @@ def continue_substage(
     instruction_path: Path,
     *,
     services: WorkflowServices = DEFAULT_WORKFLOW_SERVICES,
+    physics_services: PhysicsWorkflowServices | None = None,
 ) -> WorkflowResult:
     """Resume the exact worker thread once with an exact human-written instruction."""
+    if _run_state_schema_version(run_directory) == 2:
+        from research_automation_supervisor.physics_workflow import (
+            DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            review_physics_substage,
+        )
+
+        return cast(
+            WorkflowResult,
+            review_physics_substage(
+                run_directory,
+                instruction_path,
+                software_services=services,
+                physics_services=physics_services or DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            ),
+        )
     resolved = _resolve_run_directory(run_directory)
     with _WorkflowLock(resolved, services.utc_now):
         state = _load_state(resolved)
@@ -779,8 +827,7 @@ def resume_prompt_source_substage(
                 for entry in reversed(entries)
                 if entry.event_type == "transition"
                 and entry.new_state == "human_paused"
-                and entry.reason
-                in {"prompt_source_human_pause", "prompt_source_invalid"}
+                and entry.reason in {"prompt_source_human_pause", "prompt_source_invalid"}
             ),
             None,
         )
@@ -810,8 +857,7 @@ def resume_prompt_source_substage(
                     pause_reason=None,
                     prompt_source_boundary=None,
                     summary=(
-                        "Durably validated audit resumed at its terminal "
-                        "supervisor decision."
+                        "Durably validated audit resumed at its terminal supervisor decision."
                     ),
                 )
             else:
@@ -826,8 +872,7 @@ def resume_prompt_source_substage(
                     pause_reason=None,
                     prompt_source_boundary=None,
                     summary=(
-                        "Durably validated repairable audit resumed at the "
-                        "repair-prompt decision."
+                        "Durably validated repairable audit resumed at the repair-prompt decision."
                     ),
                 )
             _snapshot_checkpoint("after_post_audit_prompt_source_recovery")
@@ -859,9 +904,7 @@ def prompt_source_pause_boundary(
     _validate_journal(resolved, state)
     context = _load_context(resolved, state, services)
     if not _frozen_inputs_match(context) or not _repository_matches(context):
-        raise WorkflowStateError(
-            "prompt-source recovery inputs or repository identity changed"
-        )
+        raise WorkflowStateError("prompt-source recovery inputs or repository identity changed")
     return _resolve_prompt_source_pause_boundary(
         context,
         _read_valid_journal(resolved),
@@ -884,14 +927,9 @@ def post_audit_prompt_source_boundary(
         return None
     context = _load_context(resolved, state, services)
     if not _frozen_inputs_match(context) or not _repository_matches(context):
-        raise WorkflowStateError(
-            "post-audit recovery inputs or repository identity changed"
-        )
+        raise WorkflowStateError("post-audit recovery inputs or repository identity changed")
     entries = _read_valid_journal(resolved)
-    if (
-        _resolve_prompt_source_pause_boundary(context, entries)
-        != "post_audit_terminal_decision"
-    ):
+    if _resolve_prompt_source_pause_boundary(context, entries) != "post_audit_terminal_decision":
         return None
     proof = _prove_post_audit_prompt_source_pause(context, entries)
     return cast(
@@ -906,6 +944,12 @@ def post_audit_prompt_source_boundary(
 
 def substage_status(run_directory: Path) -> WorkflowResult:
     """Read and integrity-check durable state without writes or launches."""
+    if _run_state_schema_version(run_directory) == 2:
+        from research_automation_supervisor.physics_workflow import (
+            physics_substage_status,
+        )
+
+        return cast(WorkflowResult, physics_substage_status(run_directory))
     resolved = _resolve_run_directory(run_directory)
     state = _load_state(resolved)
     _validate_journal(resolved, state)
@@ -942,9 +986,7 @@ def read_stage2_source_for_shadow(
         or entries[-1].entry_hash != state.journal_hash
         or entries[-1].timestamp != state.updated_at
     ):
-        raise WorkflowStateError(
-            "workflow state does not agree with the journal head"
-        )
+        raise WorkflowStateError("workflow state does not agree with the journal head")
     _validate_journal_semantics(resolved, entries, state)
     _validate_normalized_action_intents(
         resolved,
@@ -952,14 +994,10 @@ def read_stage2_source_for_shadow(
         entries=entries,
     )
     if not _raw_frozen_inputs_match(resolved, state):
-        raise WorkflowStateError(
-            "frozen workflow inputs no longer match durable state"
-        )
+        raise WorkflowStateError("frozen workflow inputs no longer match durable state")
     result = _load_result(resolved)
     if result != state.to_result():
-        raise WorkflowStateError(
-            "workflow state and result snapshots disagree"
-        )
+        raise WorkflowStateError("workflow state and result snapshots disagree")
     return result, state, entries
 
 
@@ -968,8 +1006,24 @@ def abort_substage(
     reason: str,
     *,
     services: WorkflowServices = DEFAULT_WORKFLOW_SERVICES,
+    physics_services: PhysicsWorkflowServices | None = None,
 ) -> WorkflowResult:
     """Atomically abort a paused or initialized workflow; active termination is not implemented."""
+    if _run_state_schema_version(run_directory) == 2:
+        from research_automation_supervisor.physics_workflow import (
+            DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            abort_physics_substage,
+        )
+
+        return cast(
+            WorkflowResult,
+            abort_physics_substage(
+                run_directory,
+                reason,
+                software_services=services,
+                physics_services=physics_services or DEFAULT_PHYSICS_WORKFLOW_SERVICES,
+            ),
+        )
     resolved = _resolve_run_directory(run_directory)
     with _WorkflowLock(resolved, services.utc_now):
         state = _load_state(resolved)
@@ -1009,7 +1063,7 @@ def abort_substage(
 
 def workflow_exit_code(status: str) -> int:
     """Map durable workflow states to the frozen Stage 2 CLI exit contract."""
-    return {
+    codes = {
         "completed": 0,
         "human_paused": 5,
         "repair_limit_paused": 6,
@@ -1022,7 +1076,14 @@ def workflow_exit_code(status: str) -> int:
         "tests_running": 4,
         "auditor_running": 4,
         "repair_pending": 4,
-    }[status]
+    }
+    if status in codes:
+        return codes[status]
+    from research_automation_supervisor.physics_workflow import (
+        physics_workflow_exit_code,
+    )
+
+    return physics_workflow_exit_code(status)
 
 
 def _drive(context: _WorkflowContext) -> WorkflowResult:
@@ -1105,9 +1166,7 @@ def _handle_worker(context: _WorkflowContext) -> None:
     if record is None:
         default_prompt = _worker_prompt(context)
         boundary: Literal["worker_prompt", "repair_prompt"] = (
-            "worker_prompt"
-            if context.state.repair_round == 0
-            else "repair_prompt"
+            "worker_prompt" if context.state.repair_round == 0 else "repair_prompt"
         )
         prompt = _source_prompt(context, boundary, default_prompt)
         if prompt is None:
@@ -1135,9 +1194,7 @@ def _handle_worker(context: _WorkflowContext) -> None:
                 environ=context.services.environ,
                 output_schema=context.worker_schema,
                 resume_thread_id=(
-                    context.state.worker_thread_id
-                    if context.state.repair_round > 0
-                    else None
+                    context.state.worker_thread_id if context.state.repair_round > 0 else None
                 ),
                 confidential_fragments=_confidential_fragments(context, prompt),
             )
@@ -1309,10 +1366,7 @@ def _handle_tests(context: _WorkflowContext) -> None:
     for index, prepared_test in enumerate(context.prepared.acceptance_tests):
         action_id = _test_action_id(context.state.repair_round, index, prepared_test)
         destination = (
-            context.run_directory
-            / "tests"
-            / f"round-{context.state.repair_round:03d}"
-            / action_id
+            context.run_directory / "tests" / f"round-{context.state.repair_round:03d}" / action_id
         )
         record = _read_action_record(context.run_directory, action_id)
         if failed:
@@ -1360,10 +1414,7 @@ def _handle_tests(context: _WorkflowContext) -> None:
             first_failure_action_id = action_id
     suite = TestSuiteResult(passed=not failed, results=tuple(results))
     suite_path = (
-        context.run_directory
-        / "tests"
-        / f"round-{context.state.repair_round:03d}"
-        / "suite.json"
+        context.run_directory / "tests" / f"round-{context.state.repair_round:03d}" / "suite.json"
     )
     _write_json(suite_path, suite.to_dict())
     context.state = _update_state(
@@ -1575,8 +1626,7 @@ def _validated_audit_recovery_proof(
         return None
     entries = _read_valid_journal(context.run_directory)
     if not any(
-        entry.event_type == "transition"
-        and entry.reason == "post_audit_finish_recovery"
+        entry.event_type == "transition" and entry.reason == "post_audit_finish_recovery"
         for entry in entries
     ):
         return None
@@ -1663,15 +1713,9 @@ def _prompt_source_request(
         repair_round=context.state.repair_round,
         repair_trigger=context.state.repair_trigger,
         worker_thread_id=context.state.worker_thread_id,
-        latest_worker_result_path=optional_path(
-            context.state.latest_worker_result_path
-        ),
-        latest_audit_result_path=optional_path(
-            context.state.latest_audit_result_path
-        ),
-        latest_git_evidence_path=optional_path(
-            context.state.latest_git_evidence_path
-        ),
+        latest_worker_result_path=optional_path(context.state.latest_worker_result_path),
+        latest_audit_result_path=optional_path(context.state.latest_audit_result_path),
+        latest_git_evidence_path=optional_path(context.state.latest_git_evidence_path),
         latest_tests_path=optional_path(context.state.latest_tests_path),
     )
 
@@ -1711,9 +1755,7 @@ def _call_prompt_source(
             "prompt_source_invalid",
             "The replay prompt source failed safely.",
             escalation_evidence={
-                "prompt_source_failure_category": (
-                    "unexpected_prompt_source_exception"
-                ),
+                "prompt_source_failure_category": ("unexpected_prompt_source_exception"),
                 "prompt_source_adapter_status": "not_available",
             },
             prompt_source_boundary=semantic_boundary,
@@ -1808,9 +1850,7 @@ def _engine_owned_source_prompt(
     human_note: bytes | None,
 ) -> bytes:
     """Wrap replay advisory prose without surrendering any Stage 2 authority."""
-    role: Literal["worker", "auditor"] = (
-        "auditor" if action == "auditor_prompt" else "worker"
-    )
+    role: Literal["worker", "auditor"] = "auditor" if action == "auditor_prompt" else "worker"
     policy = ROLE_POLICIES[role]
     schema_path = context.auditor_schema if role == "auditor" else context.worker_schema
     specification = context.prepared.specification
@@ -1987,9 +2027,11 @@ def _finalize_codex_action(
     structured_path: str | None = None
     structured_sha256: str | None = None
     if proof.structured_result is not None:
-        destination = context.run_directory / (
-            "worker" if pending.kind == "worker" else "audits"
-        ) / f"{pending.action_id}.structured.json"
+        destination = (
+            context.run_directory
+            / ("worker" if pending.kind == "worker" else "audits")
+            / f"{pending.action_id}.structured.json"
+        )
         _write_json(destination, proof.structured_result.model_dump(mode="json"))
         structured_path = str(destination)
         structured_sha256 = _sha256_path(destination)
@@ -2264,10 +2306,7 @@ def _verify_action_record(
         if pending.kind == "auditor" and proof.thread_started_ids:
             prior_auditor_ids: set[str] = set()
             for completed_id in context.state.completed_action_ids:
-                if (
-                    completed_id == pending.action_id
-                    or not completed_id.startswith("auditor-")
-                ):
+                if completed_id == pending.action_id or not completed_id.startswith("auditor-"):
                     continue
                 prior_value = _read_action_record(
                     context.run_directory,
@@ -2307,9 +2346,7 @@ def _intent_for_action(run_directory: Path, action_id: str) -> PendingAction:
         if entry.event_type != "action_intent" or entry.action_id != action_id:
             continue
         try:
-            matches.append(
-                PendingAction.model_validate(entry.state_updates.get("pending_action"))
-            )
+            matches.append(PendingAction.model_validate(entry.state_updates.get("pending_action")))
         except ValidationError as exc:
             raise WorkflowStateError("journal action intent is invalid") from exc
     if len(matches) != 1:
@@ -2440,9 +2477,7 @@ def _pause(
         action_id=None,
         action_kind=None,
         reason="escalation_package_written",
-        artifact_hashes={
-            str(path): _sha256_path(path) for path in escalation_paths
-        },
+        artifact_hashes={str(path): _sha256_path(path) for path in escalation_paths},
         updates={},
         utc_now=context.services.utc_now,
     )
@@ -2485,9 +2520,7 @@ def _journal_event(
     _entry, entry_hash = append_hashed_journal_entry(
         run_directory / JOURNAL_FILE,
         body,
-        validate=lambda value: _validate_journal_entry_semantic_form(
-            parse_journal_entry(value)
-        ),
+        validate=lambda value: _validate_journal_entry_semantic_form(parse_journal_entry(value)),
         error_factory=WorkflowStateError,
         error_message="workflow journal could not be appended",
         fsync_directory_callback=_fsync_directory,
@@ -2545,9 +2578,7 @@ def _read_valid_journal(
             raise WorkflowStateError("workflow journal hash chain is invalid")
         _verify_journal_hash_mapping(
             entry,
-            allow_missing_continuation_source=(
-                allow_missing_continuation_source
-            ),
+            allow_missing_continuation_source=(allow_missing_continuation_source),
         )
         previous_hash = computed
         entries.append(entry)
@@ -2561,9 +2592,7 @@ def _verify_journal_hash_mapping(
     allow_missing_continuation_source: bool,
 ) -> None:
     permitted = (
-        _missing_continuation_source_locator(entry)
-        if allow_missing_continuation_source
-        else None
+        _missing_continuation_source_locator(entry) if allow_missing_continuation_source else None
     )
     for locator, digest in entry.artifact_hashes.items():
         if permitted == locator:
@@ -2598,22 +2627,16 @@ def _missing_continuation_source_locator(
 
 def _validate_missing_continuation_parent(path: Path) -> None:
     if not path.is_absolute():
-        raise WorkflowStateError(
-            "continuation source locator is not absolute"
-        )
+        raise WorkflowStateError("continuation source locator is not absolute")
     current = Path(path.anchor)
     try:
         for component in path.parent.parts[1:]:
             current = current / component
             status = current.lstat()
-            if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(
-                status.st_mode
-            ):
+            if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
                 raise OSError
     except OSError as exc:
-        raise WorkflowStateError(
-            "missing continuation source has an invalid parent chain"
-        ) from exc
+        raise WorkflowStateError("missing continuation source has an invalid parent chain") from exc
 
 
 def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
@@ -2630,16 +2653,15 @@ def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
             "workflow journal event, state, action, and reason semantics are invalid"
         )
     if entry.event_type == "evidence" and (
-        set(entry.state_updates)
-        != _EVIDENCE_UPDATE_FIELDS.get(entry.reason, frozenset())
+        set(entry.state_updates) != _EVIDENCE_UPDATE_FIELDS.get(entry.reason, frozenset())
     ):
         raise WorkflowStateError(
             "workflow journal evidence reason contradicts its state update semantics"
         )
-    prompt_pause = (
-        entry.event_type == "transition"
-        and entry.reason in {"prompt_source_human_pause", "prompt_source_invalid"}
-    )
+    prompt_pause = entry.event_type == "transition" and entry.reason in {
+        "prompt_source_human_pause",
+        "prompt_source_invalid",
+    }
     recorded_boundary = entry.state_updates.get("prompt_source_boundary")
     if prompt_pause and recorded_boundary is not None:
         boundaries_by_state: dict[str, set[str]] = {
@@ -2658,16 +2680,9 @@ def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
             else boundaries_by_state.get(entry.previous_state, set())
         )
         if recorded_boundary not in allowed_boundaries:
-            raise WorkflowStateError(
-                "prompt-source pause boundary contradicts its workflow state"
-            )
-    elif (
-        "prompt_source_boundary" in entry.state_updates
-        and recorded_boundary is not None
-    ):
-        raise WorkflowStateError(
-            "non-prompt transition recorded a prompt-source boundary"
-        )
+            raise WorkflowStateError("prompt-source pause boundary contradicts its workflow state")
+    elif "prompt_source_boundary" in entry.state_updates and recorded_boundary is not None:
+        raise WorkflowStateError("non-prompt transition recorded a prompt-source boundary")
     if (
         entry.event_type == "transition"
         and entry.new_state
@@ -2675,9 +2690,7 @@ def _validate_journal_entry_semantic_form(entry: JournalEntry) -> None:
         and entry.reason != "human_abort"
         and entry.state_updates.get("pause_reason") != entry.reason
     ):
-        raise WorkflowStateError(
-            "workflow journal pause reason contradicts its transition reason"
-        )
+        raise WorkflowStateError("workflow journal pause reason contradicts its transition reason")
 
 
 def _validate_journal_semantics(
@@ -2775,18 +2788,13 @@ def _validate_journal_semantics(
                 raise WorkflowStateError("workflow transition status update is contradictory")
             transition_paths = _state_update_path_locators(entry.state_updates)
             if set(entry.artifact_hashes) != transition_paths:
-                raise WorkflowStateError(
-                    "workflow transition artifact mapping is invalid"
-                )
+                raise WorkflowStateError("workflow transition artifact mapping is invalid")
             next_round = entry.state_updates.get("repair_round", current_round)
             if (
                 type(next_round) is not int
                 or next_round < current_round
                 or next_round > current_round + 1
-                or (
-                    next_round != current_round
-                    and entry.new_state != "worker_running"
-                )
+                or (next_round != current_round and entry.new_state != "worker_running")
             ):
                 raise WorkflowStateError("workflow repair-round history is invalid")
             current_round = next_round
@@ -2815,14 +2823,8 @@ def _validate_journal_semantics(
                 or pending.kind != entry.action_kind
                 or pending.repair_round != current_round
                 or not _deterministic_action_id(pending)
-                or (
-                    pending.kind == "worker"
-                    and current_status != "worker_running"
-                )
-                or (
-                    pending.kind == "auditor"
-                    and current_status != "auditor_running"
-                )
+                or (pending.kind == "worker" and current_status != "worker_running")
+                or (pending.kind == "auditor" and current_status != "auditor_running")
                 or (pending.kind == "test" and current_status != "tests_running")
             ):
                 raise WorkflowStateError("journal action intent semantics are invalid")
@@ -2831,9 +2833,7 @@ def _validate_journal_semantics(
                 if not pending.action_id.startswith(
                     f"test-r{current_round:03d}-{expected_test_index:03d}-"
                 ):
-                    raise WorkflowStateError(
-                        "fixed-test actions are not in specification order"
-                    )
+                    raise WorkflowStateError("fixed-test actions are not in specification order")
                 test_counts[current_round] = expected_test_index + 1
             expected_intent_hashes: dict[str, str] = {}
             if pending.kind in {"worker", "auditor"}:
@@ -2878,9 +2878,7 @@ def _validate_journal_semantics(
             if entry.state_updates.get("completed_action_ids") != expected_completed:
                 raise WorkflowStateError("journal completed-action history is contradictory")
             action_path = run_directory / "actions" / f"{entry.action_id}.json"
-            if entry.artifact_hashes != {
-                str(action_path): sha256_regular_file(action_path)
-            }:
+            if entry.artifact_hashes != {str(action_path): sha256_regular_file(action_path)}:
                 raise WorkflowStateError("journal action completion locator is invalid")
             _verify_durable_action_record(run_directory, pending, state)
             completed_record = parse_action_record(_read_json(action_path))
@@ -2895,17 +2893,14 @@ def _validate_journal_semantics(
                 isinstance(completed_record, CodexActionRecord)
                 and completed_record.kind == "auditor"
             ):
-                if prior_auditor_thread_ids.intersection(
-                    completed_record.thread_started_ids
-                ):
+                if prior_auditor_thread_ids.intersection(completed_record.thread_started_ids):
                     raise WorkflowStateError("journal reuses a fresh auditor session")
                 prior_auditor_thread_ids.update(completed_record.thread_started_ids)
             completed.append(entry.action_id)
             completed_by_kind[pending.kind].append(entry.action_id)
             open_action_id = None
         if entry.event_type not in {"action_intent", "action_completion"} and (
-            "pending_action" in entry.state_updates
-            or "completed_action_ids" in entry.state_updates
+            "pending_action" in entry.state_updates or "completed_action_ids" in entry.state_updates
         ):
             raise WorkflowStateError("non-action journal entry mutates action lifecycle")
         latest_fields = {
@@ -2916,9 +2911,7 @@ def _validate_journal_semantics(
             if field not in entry.state_updates:
                 continue
             latest_for_kind = (
-                completed_by_kind[action_kind][-1]
-                if completed_by_kind[action_kind]
-                else None
+                completed_by_kind[action_kind][-1] if completed_by_kind[action_kind] else None
             )
             candidate = entry.state_updates[field]
             if candidate != latest_for_kind:
@@ -2932,9 +2925,7 @@ def _validate_journal_semantics(
         ("latest_audit_action_id", "auditor"),
     ):
         latest_for_kind = (
-            completed_by_kind[action_kind][-1]
-            if completed_by_kind[action_kind]
-            else None
+            completed_by_kind[action_kind][-1] if completed_by_kind[action_kind] else None
         )
         if replayed[field] != latest_for_kind:
             raise WorkflowStateError(
@@ -2951,9 +2942,7 @@ def _validate_journal_semantics(
         ):
             candidate = getattr(state, field)
             latest_for_kind = (
-                completed_by_kind[action_kind][-1]
-                if completed_by_kind[action_kind]
-                else None
+                completed_by_kind[action_kind][-1] if completed_by_kind[action_kind] else None
             )
             if candidate != latest_for_kind:
                 raise WorkflowStateError(
@@ -3021,8 +3010,7 @@ def _state_update_path_locators(updates: Mapping[str, object]) -> set[str]:
     return {
         item
         for name, value in updates.items()
-        if (name.endswith("_path") or name == "prior_audit_result_paths")
-        and value is not None
+        if (name.endswith("_path") or name == "prior_audit_result_paths") and value is not None
         for item in (value if isinstance(value, list) else [value])
         if isinstance(item, str)
     }
@@ -3057,13 +3045,11 @@ def _verify_git_evidence_artifact(path: Path) -> None:
             len(lines) != 2
             or lines[0] != "PATCH EVIDENCE TRUNCATED; AUDIT MUST NOT RUN"
             or not isinstance(marker, dict)
-            or set(marker)
-            != {"complete", "patch_byte_count", "patch_sha256", "reason"}
+            or set(marker) != {"complete", "patch_byte_count", "patch_sha256", "reason"}
             or marker.get("complete") is not False
             or marker.get("patch_byte_count") != evidence.patch_byte_count
             or marker.get("patch_sha256") != evidence.patch_sha256
-            or marker.get("reason")
-            != "patch evidence exceeds the 25 MiB workflow limit"
+            or marker.get("reason") != "patch evidence exceeds the 25 MiB workflow limit"
         ):
             raise WorkflowStateError("truncated Git patch marker contradicts evidence")
 
@@ -3096,9 +3082,7 @@ def _validate_supporting_state_artifacts(
     entries: Sequence[JournalEntry],
 ) -> None:
     _verify_initial_state_artifacts(run_directory, state)
-    recorded_paths = {
-        locator for entry in entries for locator in entry.artifact_hashes
-    }
+    recorded_paths = {locator for entry in entries for locator in entry.artifact_hashes}
     state_paths = [
         state.latest_worker_result_path,
         state.latest_audit_result_path,
@@ -3163,9 +3147,7 @@ def _verify_initial_state_artifacts(
     normalized = _read_json(run_directory / "spec.normalized.json")
     prompts = _read_json(run_directory / "prompts.sha256.json")
     try:
-        baseline = GitBaseline.model_validate(
-            _read_json(run_directory / "baseline.json")
-        )
+        baseline = GitBaseline.model_validate(_read_json(run_directory / "baseline.json"))
     except ValidationError as exc:
         raise WorkflowStateError("frozen Git baseline artifact is invalid") from exc
     if (
@@ -3196,8 +3178,7 @@ def _verify_initial_state_artifacts(
         ):
             raise WorkflowStateError("frozen prompt hash artifact contradicts state")
     if (
-        _read_json(run_directory / "handoffs/worker-output-schema.json")
-        != WORKER_OUTPUT_SCHEMA
+        _read_json(run_directory / "handoffs/worker-output-schema.json") != WORKER_OUTPUT_SCHEMA
         or _read_json(run_directory / "handoffs/auditor-output-schema.json")
         != AUDITOR_OUTPUT_SCHEMA
     ):
@@ -3214,9 +3195,7 @@ def _verify_durable_action_record(
     if isinstance(record, CodexActionRecord):
         proof = verify_codex_artifacts(
             pending,
-            known_worker_thread_id=(
-                state.worker_thread_id if state is not None else None
-            ),
+            known_worker_thread_id=(state.worker_thread_id if state is not None else None),
         )
         verify_codex_action_record(record, pending, proof)
     else:
@@ -3226,9 +3205,7 @@ def _verify_durable_action_record(
             predecessor = pending.skipped_after_action_id
             if predecessor is None:
                 raise WorkflowStateError("skipped fixed test has no recorded failure")
-            predecessor_value = _read_json(
-                run_directory / "actions" / f"{predecessor}.json"
-            )
+            predecessor_value = _read_json(run_directory / "actions" / f"{predecessor}.json")
             predecessor_record = parse_action_record(predecessor_value)
             if (
                 not isinstance(predecessor_record, TestActionRecord)
@@ -3332,8 +3309,7 @@ class _WorkflowLock:
                 existing = json.loads(existing_text)
                 if (
                     not isinstance(existing, dict)
-                    or set(existing)
-                    != {"schema_version", "pid", "host", "started_at"}
+                    or set(existing) != {"schema_version", "pid", "host", "started_at"}
                     or existing.get("schema_version") != 1
                 ):
                     raise ValueError
@@ -3442,21 +3418,15 @@ def _validate_context_action_intents(context: _WorkflowContext) -> None:
         if entry.event_type != "action_intent":
             continue
         try:
-            pending = PendingAction.model_validate(
-                entry.state_updates.get("pending_action")
-            )
+            pending = PendingAction.model_validate(entry.state_updates.get("pending_action"))
         except ValidationError as exc:
             raise WorkflowStateError("journal action intent is invalid") from exc
         if pending.workspace != str(context.prepared.workspace):
             raise WorkflowStateError("action intent workspace contradicts the frozen specification")
         if pending.kind in {"worker", "auditor"}:
-            handoff_path = (
-                context.run_directory / "handoffs" / f"{pending.action_id}.json"
-            )
+            handoff_path = context.run_directory / "handoffs" / f"{pending.action_id}.json"
             expected_schema = (
-                context.worker_schema
-                if pending.kind == "worker"
-                else context.auditor_schema
+                context.worker_schema if pending.kind == "worker" else context.auditor_schema
             )
             specification = context.prepared.specification
             expected_model = (
@@ -3474,9 +3444,11 @@ def _validate_context_action_intents(context: _WorkflowContext) -> None:
                 if pending.kind == "worker"
                 else specification.auditor_timeout_seconds
             )
-            expected_artifact = context.run_directory / (
-                "worker/codex" if pending.kind == "worker" else "audits/codex"
-            ) / pending.action_id
+            expected_artifact = (
+                context.run_directory
+                / ("worker/codex" if pending.kind == "worker" else "audits/codex")
+                / pending.action_id
+            )
             if (
                 pending.handoff_path != str(handoff_path)
                 or pending.output_schema_path != str(expected_schema)
@@ -3487,9 +3459,7 @@ def _validate_context_action_intents(context: _WorkflowContext) -> None:
                 or pending.timeout_seconds != expected_timeout
                 or pending.artifact_path != str(expected_artifact)
             ):
-                raise WorkflowStateError(
-                    "Codex action intent contradicts the frozen specification"
-                )
+                raise WorkflowStateError("Codex action intent contradicts the frozen specification")
             try:
                 handoff = PromptHandoff.model_validate(_read_json(handoff_path))
             except ValidationError as exc:
@@ -3499,21 +3469,18 @@ def _validate_context_action_intents(context: _WorkflowContext) -> None:
             if pending.kind == "auditor":
                 valid_source = (
                     handoff.kind == "auditor"
-                    and handoff.source_sha256
-                    == context.state.prompts_sha256["auditor"]
+                    and handoff.source_sha256 == context.state.prompts_sha256["auditor"]
                 )
             elif handoff.kind == "initial_worker":
                 valid_source = (
                     pending.repair_round == 0
-                    and handoff.source_sha256
-                    == context.state.prompts_sha256["worker_initial"]
+                    and handoff.source_sha256 == context.state.prompts_sha256["worker_initial"]
                 )
             elif handoff.kind == "human_continuation":
                 valid_source = handoff.source_sha256 in continuation_hashes
             else:
                 valid_source = (
-                    handoff.source_sha256
-                    == context.state.prompts_sha256["worker_repair"]
+                    handoff.source_sha256 == context.state.prompts_sha256["worker_repair"]
                 )
             if not valid_source:
                 raise WorkflowStateError("prompt handoff source is not a frozen human input")
@@ -3567,17 +3534,13 @@ def _validate_normalized_action_intents(
         raise WorkflowStateError("normalized specification tests are invalid")
     expected_workspace = normalized.get("workspace")
     journal_entries = (
-        tuple(entries)
-        if entries is not None
-        else tuple(_read_valid_journal(run_directory))
+        tuple(entries) if entries is not None else tuple(_read_valid_journal(run_directory))
     )
     for entry in journal_entries:
         if entry.event_type != "action_intent":
             continue
         try:
-            pending = PendingAction.model_validate(
-                entry.state_updates.get("pending_action")
-            )
+            pending = PendingAction.model_validate(entry.state_updates.get("pending_action"))
         except ValidationError as exc:
             raise WorkflowStateError("journal action intent is invalid") from exc
         if pending.workspace != expected_workspace or pending.workspace != state.workspace:
@@ -3588,9 +3551,8 @@ def _validate_normalized_action_intents(
                 normalized.get("worker_reasoning_effort"),
                 normalized.get("worker_timeout_seconds"),
             )
-            if (
-                pending.resume_thread_id
-                != (state.worker_thread_id if pending.repair_round > 0 else None)
+            if pending.resume_thread_id != (
+                state.worker_thread_id if pending.repair_round > 0 else None
             ):
                 raise WorkflowStateError("worker action did not use the frozen exact thread ID")
         elif pending.kind == "auditor":
@@ -3798,11 +3760,7 @@ def _pause_state_only(
         "worker_thread_id": paused.worker_thread_id,
         "updated_at": paused.updated_at,
     }
-    escalation_directory = (
-        run_directory
-        / "escalation"
-        / f"{paused.journal_sequence:06d}-{reason}"
-    )
+    escalation_directory = run_directory / "escalation" / f"{paused.journal_sequence:06d}-{reason}"
     package_path = escalation_directory / "package.json"
     readme_path = escalation_directory / "README.md"
     _write_json(package_path, package)
@@ -3836,8 +3794,7 @@ def _pause_state_only(
         action_kind=None,
         reason="escalation_package_written",
         artifact_hashes={
-            str(path): _sha256_path(path)
-            for path in (package_path, readme_path, *mirror_paths)
+            str(path): _sha256_path(path) for path in (package_path, readme_path, *mirror_paths)
         },
         updates={},
         utc_now=services.utc_now,
@@ -3926,21 +3883,16 @@ def _resolve_prompt_source_pause_boundary(
         "prompt_source_invalid",
     }:
         raise WorkflowStateError("workflow is not at a prompt-source pause")
-    transitions = [
-        entry for entry in entries if entry.event_type == "transition"
-    ]
+    transitions = [entry for entry in entries if entry.event_type == "transition"]
     if not transitions:
         raise WorkflowStateError("prompt-source pause transition is unavailable")
     pause = transitions[-1]
     if (
         pause.new_state != "human_paused"
         or pause.reason != state.pause_reason
-        or pause.reason
-        not in {"prompt_source_human_pause", "prompt_source_invalid"}
+        or pause.reason not in {"prompt_source_human_pause", "prompt_source_invalid"}
     ):
-        raise WorkflowStateError(
-            "prompt-source pause ordering or reason is ambiguous"
-        )
+        raise WorkflowStateError("prompt-source pause ordering or reason is ambiguous")
     later = entries[entries.index(pause) + 1 :]
     if any(
         entry.event_type != "evidence"
@@ -3948,19 +3900,13 @@ def _resolve_prompt_source_pause_boundary(
         or entry.state_updates
         for entry in later
     ):
-        raise WorkflowStateError(
-            "prompt-source pause contains ambiguous later evidence"
-        )
+        raise WorkflowStateError("prompt-source pause contains ambiguous later evidence")
     recorded = state.prompt_source_boundary
     journal_recorded = pause.state_updates.get("prompt_source_boundary")
     if (recorded is None) != (journal_recorded is None):
-        raise WorkflowStateError(
-            "prompt-source boundary state and journal evidence conflict"
-        )
+        raise WorkflowStateError("prompt-source boundary state and journal evidence conflict")
     if recorded is not None and journal_recorded != recorded:
-        raise WorkflowStateError(
-            "prompt-source boundary state and journal evidence conflict"
-        )
+        raise WorkflowStateError("prompt-source boundary state and journal evidence conflict")
     inferred = _infer_prompt_source_pause_boundary(context, entries, pause)
     if recorded is not None and recorded != inferred:
         raise WorkflowStateError(
@@ -3977,9 +3923,7 @@ def _infer_prompt_source_pause_boundary(
     """Infer only histories whose next model boundary has exactly one meaning."""
     state = context.state
     action_events = [
-        entry
-        for entry in entries
-        if entry.event_type in {"action_intent", "action_completion"}
+        entry for entry in entries if entry.event_type in {"action_intent", "action_completion"}
     ]
     current_worker = f"worker-r{state.repair_round:03d}"
     current_auditor = f"auditor-r{state.repair_round:03d}"
@@ -3988,15 +3932,12 @@ def _infer_prompt_source_pause_boundary(
         for entry in action_events
         if entry.action_id in {current_worker, current_auditor}
     }
-    transitions = [
-        entry for entry in entries if entry.event_type == "transition"
-    ]
+    transitions = [entry for entry in entries if entry.event_type == "transition"]
     prior_transition = transitions[-2] if len(transitions) >= 2 else None
     if (
         pause.previous_state == "worker_running"
         and prior_transition is not None
-        and prior_transition.reason
-        in {"initial_worker_requested", "prompt_source_human_resume"}
+        and prior_transition.reason in {"initial_worker_requested", "prompt_source_human_resume"}
         and state.repair_round == 0
         and not action_events
         and not state.completed_action_ids
@@ -4039,8 +3980,7 @@ def _infer_prompt_source_pause_boundary(
     if (
         pause.previous_state == "auditor_running"
         and prior_transition is not None
-        and prior_transition.reason
-        in {"fixed_tests_passed", "prompt_source_human_resume"}
+        and prior_transition.reason in {"fixed_tests_passed", "prompt_source_human_resume"}
         and current_auditor not in current_action_ids
         and state.pending_action is None
         and state.latest_worker_action_id == current_worker
@@ -4055,14 +3995,11 @@ def _infer_prompt_source_pause_boundary(
     if (
         pause.previous_state == "auditor_running"
         and prior_transition is not None
-        and prior_transition.reason
-        in {"fixed_tests_passed", "post_audit_finish_recovery"}
+        and prior_transition.reason in {"fixed_tests_passed", "post_audit_finish_recovery"}
     ):
         _prove_post_audit_prompt_source_pause(context, entries)
         return "post_audit_terminal_decision"
-    raise WorkflowStateError(
-        "prompt-source boundary cannot be inferred unambiguously"
-    )
+    raise WorkflowStateError("prompt-source boundary cannot be inferred unambiguously")
 
 
 def _workspace_matches_initial_baseline(context: _WorkflowContext) -> bool:
@@ -4089,13 +4026,10 @@ def _prove_post_audit_prompt_source_pause(
     """Prove that a prompt-source pause occurred after durable audit validation."""
     if (
         context.state.status != "human_paused"
-        or context.state.pause_reason
-        not in {"prompt_source_human_pause", "prompt_source_invalid"}
+        or context.state.pause_reason not in {"prompt_source_human_pause", "prompt_source_invalid"}
         or context.state.pending_action is not None
     ):
-        raise WorkflowStateError(
-            "workflow is not an unambiguous post-audit prompt-source pause"
-        )
+        raise WorkflowStateError("workflow is not an unambiguous post-audit prompt-source pause")
     proof = _prove_validated_audit_evidence(context, entries)
     validation_index = next(
         index
@@ -4113,17 +4047,11 @@ def _prove_post_audit_prompt_source_pause(
         and entry.reason == context.state.pause_reason
     ]
     latest_transition = next(
-        (
-            entry
-            for entry in reversed(entries)
-            if entry.event_type == "transition"
-        ),
+        (entry for entry in reversed(entries) if entry.event_type == "transition"),
         None,
     )
     if not pause_entries or pause_entries[-1] is not latest_transition:
-        raise WorkflowStateError(
-            "post-audit prompt-source pause ordering is ambiguous"
-        )
+        raise WorkflowStateError("post-audit prompt-source pause ordering is ambiguous")
     expected_reasons = {
         "pass": {
             "prompt_source_human_pause",
@@ -4145,52 +4073,34 @@ def _prove_post_audit_prompt_source_pause(
         },
     }[proof.audit.verdict]
     if any(entry.reason not in expected_reasons for entry in later):
-        raise WorkflowStateError(
-            "post-audit pause contains an unsupported later transition"
-        )
+        raise WorkflowStateError("post-audit pause contains an unsupported later transition")
     if proof.audit.verdict == "fail_repairable":
-        transition_reasons = [
-            entry.reason for entry in later if entry.event_type == "transition"
-        ]
+        transition_reasons = [entry.reason for entry in later if entry.event_type == "transition"]
         if transition_reasons != [
             "auditor_repairable_failure",
             "automatic_repair_worker_resume",
             context.state.pause_reason,
         ]:
-            raise WorkflowStateError(
-                "repairable post-audit pause ordering is invalid"
-            )
+            raise WorkflowStateError("repairable post-audit pause ordering is invalid")
         if (
             proof.audit_round >= context.state.max_repair_rounds
             or context.state.repair_round != proof.audit_round + 1
             or context.state.repair_trigger != "audit"
         ):
-            raise WorkflowStateError(
-                "repairable post-audit pause contradicts the repair limit"
-            )
+            raise WorkflowStateError("repairable post-audit pause contradicts the repair limit")
     else:
-        transition_reasons = [
-            entry.reason for entry in later if entry.event_type == "transition"
-        ]
+        transition_reasons = [entry.reason for entry in later if entry.event_type == "transition"]
         if (
             len(transition_reasons) % 2 != 1
+            or any(reason != "post_audit_finish_recovery" for reason in transition_reasons[1::2])
             or any(
-                reason != "post_audit_finish_recovery"
-                for reason in transition_reasons[1::2]
-            )
-            or any(
-                reason
-                not in {"prompt_source_human_pause", "prompt_source_invalid"}
+                reason not in {"prompt_source_human_pause", "prompt_source_invalid"}
                 for reason in transition_reasons[::2]
             )
         ):
-            raise WorkflowStateError(
-                "terminal post-audit pause ordering is invalid"
-            )
+            raise WorkflowStateError("terminal post-audit pause ordering is invalid")
         if context.state.repair_round != proof.audit_round:
-            raise WorkflowStateError(
-                "post-audit pause changed the validated audit round"
-            )
+            raise WorkflowStateError("post-audit pause changed the validated audit round")
     return proof
 
 
@@ -4213,9 +4123,7 @@ def _prove_validated_audit_evidence(
         or state.latest_git_evidence_path is None
         or state.latest_tests_path is None
     ):
-        raise WorkflowStateError(
-            "post-audit recovery lacks complete durable action evidence"
-        )
+        raise WorkflowStateError("post-audit recovery lacks complete durable action evidence")
     completion_indices = [
         index
         for index, entry in enumerate(entries)
@@ -4245,37 +4153,27 @@ def _prove_validated_audit_evidence(
     try:
         result_sha256 = sha256_regular_file(result_path)
     except WorkflowStateError as exc:
-        raise WorkflowStateError(
-            "validated auditor result is missing"
-        ) from exc
+        raise WorkflowStateError("validated auditor result is missing") from exc
     if validation.artifact_hashes.get(result_value) != result_sha256:
-        raise WorkflowStateError(
-            "validated auditor result hash is missing or mismatched"
-        )
+        raise WorkflowStateError("validated auditor result hash is missing or mismatched")
     record = _read_action_record(context.run_directory, action_id)
     if (
         record is None
         or record.get("structured_result_path") != result_value
         or _adapter_result_from_record(record).status != "succeeded"
     ):
-        raise WorkflowStateError(
-            "completed auditor record contradicts the validated result"
-        )
+        raise WorkflowStateError("completed auditor record contradicts the validated result")
     try:
         audit = AuditorModelResult.model_validate(_read_json(result_path))
     except ValidationError as exc:
-        raise WorkflowStateError(
-            "validated auditor result is invalid"
-        ) from exc
+        raise WorkflowStateError("validated auditor result is invalid") from exc
     if (
         state.contract_satisfied != audit.contract_satisfied
         or not state.prior_audit_result_paths
         or state.prior_audit_result_paths[-1] != result_value
         or state.prior_audit_result_paths.count(result_value) != 1
     ):
-        raise WorkflowStateError(
-            "validated auditor verdict contradicts durable workflow state"
-        )
+        raise WorkflowStateError("validated auditor verdict contradicts durable workflow state")
     frozen_fields = {
         "latest_worker_action_id",
         "latest_worker_result_path",
@@ -4285,8 +4183,7 @@ def _prove_validated_audit_evidence(
         "scope_compliant",
     }
     if any(
-        frozen_fields.intersection(entry.state_updates)
-        for entry in entries[validation_index + 1 :]
+        frozen_fields.intersection(entry.state_updates) for entry in entries[validation_index + 1 :]
     ):
         raise WorkflowStateError(
             "worker, Git-scope, or fixed-test evidence changed after audit validation"
@@ -4299,9 +4196,7 @@ def _prove_validated_audit_evidence(
         and entry.new_state in {"completed", "checkpoint_paused", "failed", "aborted"}
         for entry in entries[validation_index + 1 :]
     ):
-        raise WorkflowStateError(
-            "a later model, test, or terminal action follows audit validation"
-        )
+        raise WorkflowStateError("a later model, test, or terminal action follows audit validation")
     evidence_paths = {
         state.latest_worker_result_path,
         state.latest_git_evidence_path,
@@ -4309,14 +4204,10 @@ def _prove_validated_audit_evidence(
         result_value,
     }
     recorded_before_validation = {
-        locator
-        for entry in entries[: validation_index + 1]
-        for locator in entry.artifact_hashes
+        locator for entry in entries[: validation_index + 1] for locator in entry.artifact_hashes
     }
     if not evidence_paths.issubset(recorded_before_validation):
-        raise WorkflowStateError(
-            "supporting post-audit evidence was not durably hash-recorded"
-        )
+        raise WorkflowStateError("supporting post-audit evidence was not durably hash-recorded")
     worker_completion = next(
         (
             index
@@ -4328,9 +4219,7 @@ def _prove_validated_audit_evidence(
         None,
     )
     if worker_completion is None or worker_completion >= completion_indices[0]:
-        raise WorkflowStateError(
-            "latest worker action is not ordered before the completed audit"
-        )
+        raise WorkflowStateError("latest worker action is not ordered before the completed audit")
     git_evidence = _latest_git(context)
     tests = _latest_tests(context)
     if (
@@ -4339,16 +4228,12 @@ def _prove_validated_audit_evidence(
         or (
             audit.verdict == "pass"
             and (
-                not state.tests_passed
-                or not state.scope_compliant
-                or not state.contract_satisfied
+                not state.tests_passed or not state.scope_compliant or not state.contract_satisfied
             )
         )
         or not _workspace_matches_git_evidence(context, git_evidence)
     ):
-        raise WorkflowStateError(
-            "workspace, Git-scope, tests, or verdict changed after the audit"
-        )
+        raise WorkflowStateError("workspace, Git-scope, tests, or verdict changed after the audit")
     intent = _intent_for_action(context.run_directory, action_id)
     if intent.kind != "auditor":
         raise WorkflowStateError("validated audit action intent kind is invalid")
@@ -4368,9 +4253,7 @@ def _workspace_matches_git_evidence(
     """Compare current worktree evidence without writing into the workflow run."""
     _, _, sensitive_values = build_subprocess_environment(context.services.environ)
     try:
-        with tempfile.TemporaryDirectory(
-            prefix="stage2-post-audit-evidence-"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix="stage2-post-audit-evidence-") as temporary:
             observed = collect_git_evidence(
                 context.prepared.workspace,
                 context.baseline,
@@ -4492,21 +4375,17 @@ def _write_escalation(
     readme_path = directory / "README.md"
     _write_json(package_path, package)
     markdown_lines = [
-            "# Workflow escalation",
-            "",
-            f"- Status: `{context.state.status}`",
-            f"- Reason: `{reason}`",
-            f"- Repair round: `{context.state.repair_round}`",
-            f"- Summary: {summary}",
+        "# Workflow escalation",
+        "",
+        f"- Status: `{context.state.status}`",
+        f"- Reason: `{reason}`",
+        f"- Repair round: `{context.state.repair_round}`",
+        f"- Summary: {summary}",
     ]
     error_category = transport_evidence.get("transport_error_category")
     stderr_tail = transport_evidence.get("transport_stderr_tail")
-    prompt_failure = safe_prompt_source_evidence.get(
-        "prompt_source_failure_category"
-    )
-    prompt_adapter = safe_prompt_source_evidence.get(
-        "prompt_source_adapter_status"
-    )
+    prompt_failure = safe_prompt_source_evidence.get("prompt_source_failure_category")
+    prompt_adapter = safe_prompt_source_evidence.get("prompt_source_adapter_status")
     if isinstance(error_category, str):
         markdown_lines.append(f"- Transport error category: `{error_category}`")
     if isinstance(stderr_tail, str) and stderr_tail:
@@ -4521,13 +4400,9 @@ def _write_escalation(
             )
         )
     if isinstance(prompt_failure, str):
-        markdown_lines.append(
-            f"- Prompt-source failure category: `{prompt_failure}`"
-        )
+        markdown_lines.append(f"- Prompt-source failure category: `{prompt_failure}`")
     if isinstance(prompt_adapter, str):
-        markdown_lines.append(
-            f"- Prompt-source adapter status: `{prompt_adapter}`"
-        )
+        markdown_lines.append(f"- Prompt-source adapter status: `{prompt_adapter}`")
     markdown_lines.append("")
     markdown = "\n".join(markdown_lines)
     _write_text(readme_path, markdown)
@@ -4583,10 +4458,7 @@ def _frozen_artifact_hashes(
         "handoffs/worker-output-schema.json",
         "handoffs/auditor-output-schema.json",
     )
-    return {
-        str(run_directory / name): _sha256_path(run_directory / name)
-        for name in names
-    }
+    return {str(run_directory / name): _sha256_path(run_directory / name) for name in names}
 
 
 def _artifact_hashes_from_updates(updates: Mapping[str, object]) -> dict[str, str]:
@@ -4677,6 +4549,31 @@ def _resolve_run_directory(path: Path) -> Path:
     if not resolved.is_dir():
         raise WorkflowInputError("workflow run path is not a directory")
     return resolved
+
+
+def _specification_schema_version(path: Path) -> int:
+    """Peek only for dispatch; the selected strict loader remains authoritative."""
+    try:
+        raw = path.read_bytes()
+        if len(raw) > 2 * 1024 * 1024:
+            return 1
+        value = yaml.safe_load(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return 1
+    if isinstance(value, dict) and value.get("schema_version") == 2:
+        return 2
+    return 1
+
+
+def _run_state_schema_version(run_directory: Path) -> int:
+    """Peek a run-state discriminator without parsing it through a legacy model."""
+    try:
+        value = json.loads((run_directory / STATE_FILE).read_text(encoding="ascii"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return 1
+    if isinstance(value, dict) and value.get("schema_version") == 2:
+        return 2
+    return 1
 
 
 def _resolve_codex_executable(value: str | None) -> str:

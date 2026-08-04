@@ -7,6 +7,11 @@ instruction, and every acceptance-test argument vector. The engine transports
 those bytes, assembles deterministic local evidence, and applies fixed state
 rules. No model writes, selects, rewrites, or summarizes another model's prompt.
 
+This document describes the frozen schema-version-1 workflow. Explicit
+schema-version-2 physics substages dispatch to the separate
+[PA-4 physics workflow](physics_workflow_integration.md), which wraps an unchanged
+version-1 software phase and uses disjoint state/result/journal models.
+
 ## Specification
 
 `research-supervisor validate-substage PATH` validates without writing or
@@ -188,7 +193,8 @@ workflow.
 ## Commands and non-goals
 
 The Stage 2 commands are `validate-substage`, `run-substage`, `resume-substage`,
-`continue-substage`, `substage-status`, and `abort-substage`. All execution is
+`continue-substage`, `substage-status`, and `abort-substage`. PA-4 also provides
+`review-physics-substage` for exact hash-bound scientific decisions. All execution is
 synchronous and covers exactly one substage. Stage 2 has no intelligent
 supervisor, model-written prompts, contract mutation, multi-substage advance,
 Git publishing or worktrees, notifications, background services, package

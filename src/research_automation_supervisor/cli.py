@@ -554,8 +554,7 @@ def validate_codex_request(
         typer.echo(_stable_json(result))
     else:
         typer.echo(
-            f"Valid Codex request {prepared.request.run_id} "
-            f"({prepared.request.role}): {path}"
+            f"Valid Codex request {prepared.request.run_id} ({prepared.request.role}): {path}"
         )
 
 
@@ -621,10 +620,18 @@ def validate_substage_command(
         "path": str(path),
         "substage_id": prepared.specification.substage_id,
         "workspace": str(prepared.workspace),
-        "acceptance_test_ids": [
-            test.specification.id for test in prepared.acceptance_tests
-        ],
+        "acceptance_test_ids": [test.specification.id for test in prepared.acceptance_tests],
     }
+    if getattr(prepared.specification, "schema_version", 1) == 2:
+        result["physics"] = {
+            "enabled": True,
+            "required": True,
+            "required_oracle_ids": [
+                item.id
+                for item in prepared.physics_contract.oracles  # type: ignore[attr-defined]
+                if item.required
+            ],
+        }
     if as_json:
         typer.echo(_stable_json(result))
     else:
@@ -698,6 +705,36 @@ def continue_substage_command(
     """Append one exact human instruction to the persistent worker session."""
     try:
         result = continue_workflow(run_directory, instruction)
+    except WorkflowDependencyError as exc:
+        _render_workflow_error(str(exc), as_json, 3)
+    except WorkflowInputError as exc:
+        _render_workflow_error(str(exc), as_json, 2)
+    except (WorkflowLockError, WorkflowStateError) as exc:
+        _render_workflow_error(str(exc), as_json, 4)
+    except Exception:
+        _render_workflow_internal_error(as_json)
+    _render_workflow_result_and_exit(result, as_json)
+
+
+@app.command("review-physics-substage")
+def review_physics_substage_command(
+    run_directory: Annotated[
+        Path, typer.Argument(help="Paused schema-version-2 physics workflow directory.")
+    ],
+    decision: Annotated[
+        Path,
+        typer.Option(
+            "--decision",
+            help="Exact PhysicsReviewDecisionV1 YAML/JSON file.",
+        ),
+    ],
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Apply one hash-bound human scientific decision to a physics pause."""
+    try:
+        result = continue_workflow(run_directory, decision)
     except WorkflowDependencyError as exc:
         _render_workflow_error(str(exc), as_json, 3)
     except WorkflowInputError as exc:
@@ -901,9 +938,7 @@ def run_shadow_calibration_command(
 
 @app.command("resume-shadow-calibration")
 def resume_shadow_calibration_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Existing shadow-calibration run.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Existing shadow-calibration run.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -924,9 +959,7 @@ def resume_shadow_calibration_command(
 
 @app.command("shadow-calibration-status")
 def shadow_calibration_status_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Shadow-calibration run to inspect.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Shadow-calibration run to inspect.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -946,22 +979,14 @@ def shadow_calibration_status_command(
         value = result.to_dict()
         _emit_shadow_payload(value, _stable_json(value), as_json)
     else:
-        _emit_shadow_payload(
-            result.to_dict(), _format_shadow_result(result), as_json
-        )
+        _emit_shadow_payload(result.to_dict(), _format_shadow_result(result), as_json)
 
 
 @app.command("record-shadow-review")
 def record_shadow_review_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Shadow-calibration run.")
-    ],
-    proposal_id: Annotated[
-        str, typer.Argument(help="Exact proposal ID to review.")
-    ],
-    review_path: Annotated[
-        Path, typer.Argument(help="Strict human-review YAML file.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Shadow-calibration run.")],
+    proposal_id: Annotated[str, typer.Argument(help="Exact proposal ID to review.")],
+    review_path: Annotated[Path, typer.Argument(help="Strict human-review YAML file.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -982,9 +1007,7 @@ def record_shadow_review_command(
 
 @app.command("shadow-calibration-report")
 def shadow_calibration_report_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Shadow-calibration run to report.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Shadow-calibration run to report.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1017,12 +1040,8 @@ def shadow_calibration_report_command(
 
 @app.command("abort-shadow-calibration")
 def abort_shadow_calibration_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Shadow-calibration run to abort.")
-    ],
-    reason: Annotated[
-        str, typer.Option("--reason", help="Human abort reason.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Shadow-calibration run to abort.")],
+    reason: Annotated[str, typer.Option("--reason", help="Human abort reason.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1043,9 +1062,7 @@ def abort_shadow_calibration_command(
 
 @app.command("validate-live-shadow-spec")
 def validate_live_shadow_spec_command(
-    path: Annotated[
-        Path, typer.Argument(help="YAML live-shadow specification.")
-    ],
+    path: Annotated[Path, typer.Argument(help="YAML live-shadow specification.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1068,11 +1085,15 @@ def validate_live_shadow_spec_command(
         "stage2_specification": str(prepared.stage2.specification_path),
         "substage_id": prepared.stage2.specification.substage_id,
     }
-    rendered = _stable_json(value) if as_json else "\n".join(
-        (
-            f"Valid live shadow {prepared.specification.live_shadow_id}: {path}",
-            f"Stage 2 specification: {prepared.stage2.specification_path}",
-            f"Substage: {prepared.stage2.specification.substage_id}",
+    rendered = (
+        _stable_json(value)
+        if as_json
+        else "\n".join(
+            (
+                f"Valid live shadow {prepared.specification.live_shadow_id}: {path}",
+                f"Stage 2 specification: {prepared.stage2.specification_path}",
+                f"Substage: {prepared.stage2.specification.substage_id}",
+            )
         )
     )
     _emit_live_shadow_payload(value, rendered, as_json)
@@ -1080,9 +1101,7 @@ def validate_live_shadow_spec_command(
 
 @app.command("run-live-shadow")
 def run_live_shadow_command(
-    path: Annotated[
-        Path, typer.Argument(help="YAML live-shadow specification.")
-    ],
+    path: Annotated[Path, typer.Argument(help="YAML live-shadow specification.")],
     runs_dir: Annotated[
         Path,
         typer.Option(
@@ -1121,9 +1140,7 @@ def run_live_shadow_command(
 
 @app.command("resume-live-shadow")
 def resume_live_shadow_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Existing live-shadow run.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Existing live-shadow run.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1144,9 +1161,7 @@ def resume_live_shadow_command(
 
 @app.command("live-shadow-status")
 def live_shadow_status_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Live-shadow run to inspect.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Live-shadow run to inspect.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1172,15 +1187,9 @@ def live_shadow_status_command(
 
 @app.command("record-live-shadow-review")
 def record_live_shadow_review_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Live-shadow run.")
-    ],
-    proposal_id: Annotated[
-        str, typer.Argument(help="Exact proposal ID to review.")
-    ],
-    review_path: Annotated[
-        Path, typer.Argument(help="Strict human-review YAML file.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Live-shadow run.")],
+    proposal_id: Annotated[str, typer.Argument(help="Exact proposal ID to review.")],
+    review_path: Annotated[Path, typer.Argument(help="Strict human-review YAML file.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1205,9 +1214,7 @@ def record_live_shadow_review_command(
 
 @app.command("live-shadow-report")
 def live_shadow_report_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Live-shadow run to report.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Live-shadow run to report.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1244,12 +1251,8 @@ def live_shadow_report_command(
 
 @app.command("abort-live-shadow")
 def abort_live_shadow_command(
-    run_directory: Annotated[
-        Path, typer.Argument(help="Live-shadow run to abort.")
-    ],
-    reason: Annotated[
-        str, typer.Option("--reason", help="Human abort reason.")
-    ],
+    run_directory: Annotated[Path, typer.Argument(help="Live-shadow run to abort.")],
+    reason: Annotated[str, typer.Option("--reason", help="Human abort reason.")],
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -1282,15 +1285,9 @@ def _render_workflow_result_and_exit(result: WorkflowResult, as_json: bool) -> N
         raise typer.Exit(code=exit_code)
 
 
-def _render_shadow_result_and_exit(
-    result: ShadowResult, as_json: bool
-) -> None:
+def _render_shadow_result_and_exit(result: ShadowResult, as_json: bool) -> None:
     value = result.to_dict()
-    rendered = (
-        _stable_json(value)
-        if as_json
-        else _format_shadow_result(result)
-    )
+    rendered = _stable_json(value) if as_json else _format_shadow_result(result)
     _emit_shadow_payload(value, rendered, as_json)
     exit_code = shadow_calibration_exit_code(result.status)
     if exit_code:
@@ -1302,11 +1299,7 @@ def _render_live_shadow_result_and_exit(
     as_json: bool,
 ) -> None:
     value = result.to_dict()
-    rendered = (
-        _stable_json(result.to_dict())
-        if as_json
-        else _format_live_shadow_result(result)
-    )
+    rendered = _stable_json(result.to_dict()) if as_json else _format_live_shadow_result(result)
     _emit_live_shadow_payload(value, rendered, as_json)
     exit_code = live_shadow_exit_code(result.status)
     if exit_code:
@@ -1413,8 +1406,7 @@ def _format_shadow_result(result: ShadowResult) -> str:
             f"Calibration: {result.calibration_id}",
             f"Status: {result.status}",
             f"Summary: {result.summary}",
-            f"Supervisor session: "
-            f"{result.supervisor_session_id or 'not available'}",
+            f"Supervisor session: {result.supervisor_session_id or 'not available'}",
             f"Proposals: {result.proposal_count}",
             f"Comparisons: {result.comparison_count}",
             f"Reviews: {result.review_count}",
@@ -1472,6 +1464,28 @@ def _render_shadow_internal_error(as_json: bool) -> Never:
 
 
 def _format_workflow_result(result: WorkflowResult) -> str:
+    if getattr(result, "schema_version", 1) == 2:
+        return "\n".join(
+            (
+                f"Substage: {result.substage_id}",
+                f"Status: {result.status}",
+                f"Summary: {result.summary}",
+                f"Repair round: {result.repair_round}/{result.max_repair_rounds}",
+                f"Worker thread: {result.worker_thread_id or 'not available'}",
+                f"Fixed tests passed: {'yes' if result.tests_passed else 'no'}",
+                "Code Auditor passed: "
+                f"{'yes' if getattr(result, 'code_auditor_passed', False) else 'no'}",
+                "Required oracle proofs: "
+                + (
+                    "verified"
+                    if getattr(result, "required_oracle_proofs_verified", False)
+                    else "not verified"
+                ),
+                f"Physics route: {getattr(result, 'physics_route', None) or 'not available'}",
+                f"Pause reason: {result.pause_reason or 'none'}",
+                f"Artifacts: {result.artifact_directory}",
+            )
+        )
     return "\n".join(
         (
             f"Substage: {result.substage_id}",
@@ -1525,11 +1539,7 @@ def _render_physics_error(error: str, as_json: bool) -> Never:
     _, _, sensitive_values = build_subprocess_environment()
     sanitized = redact_text(error, sensitive_values)
     if as_json:
-        typer.echo(
-            _stable_json(
-                {"error": sanitized, "error_kind": "input", "ok": False}
-            )
-        )
+        typer.echo(_stable_json({"error": sanitized, "error_kind": "input", "ok": False}))
     else:
         typer.echo(f"Physics validation error: {sanitized}", err=True)
     raise typer.Exit(code=2)
@@ -1538,11 +1548,7 @@ def _render_physics_error(error: str, as_json: bool) -> Never:
 def _render_physics_internal_error(as_json: bool) -> Never:
     message = "Unexpected internal physics validation failure."
     if as_json:
-        typer.echo(
-            _stable_json(
-                {"error": message, "error_kind": "internal", "ok": False}
-            )
-        )
+        typer.echo(_stable_json({"error": message, "error_kind": "internal", "ok": False}))
     else:
         typer.echo(message, err=True)
     raise typer.Exit(code=1)
@@ -1620,10 +1626,8 @@ def _render_replay_result_and_exit(
                     f"Status: {result.status}",
                     f"Current task index: {result.current_task_index}",
                     f"Completed tasks: {len(result.completed_task_ids)}",
-                    f"Supervisor session: "
-                    f"{result.supervisor_session_id or 'not available'}",
-                    f"Human assisted tasks: "
-                    f"{', '.join(result.human_assisted_task_ids) or 'none'}",
+                    f"Supervisor session: {result.supervisor_session_id or 'not available'}",
+                    f"Human assisted tasks: {', '.join(result.human_assisted_task_ids) or 'none'}",
                     f"Pause reason: {result.pause_reason or 'none'}",
                 )
             )
@@ -1711,8 +1715,7 @@ def _format_codex_result(result: CodexRunResult) -> str:
             f"Status: {result.status}",
             f"Summary: {result.summary}",
             f"Exit code: {result.exit_code if result.exit_code is not None else 'not available'}",
-            f"Events: {result.event_count} valid, "
-            f"{result.malformed_event_count} malformed",
+            f"Events: {result.event_count} valid, {result.malformed_event_count} malformed",
             f"Final message: {'present' if result.final_message_present else 'missing'}",
             f"Artifacts: {result.artifact_directory}",
         ]

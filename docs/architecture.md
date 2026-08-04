@@ -128,6 +128,7 @@ The preserved stage contracts document how the system grew:
 - Stage 0: strict contracts and read-only diagnostics;
 - Stage 1: exact-prompt deterministic Codex transport;
 - Stage 2: durable single-substage Worker/Auditor workflow;
+- Stage 2P: opt-in schema-version-2 PA-4 physics workflow around unchanged Stage 2;
 - Stage 3: retrospective blind informational calibration;
 - Stage 4: live, observation-only supervisor shadowing;
 - Stage 5A: visible multi-task campaign and immutable candidate export;
@@ -135,4 +136,6 @@ The preserved stage contracts document how the system grew:
 
 Stage 3/4 readiness remains informational (`automation_enabled: false`). The current
 supported execution path is the Stage 2 workflow plus visible campaign composition;
-historical evaluation remains outside it.
+historical evaluation remains outside it. Physics-enabled substages use the separate
+[PA-4 state and journal](physics_workflow_integration.md); they do not extend or
+reinterpret Stage-2 version-1 records.

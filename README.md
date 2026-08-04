@@ -49,14 +49,15 @@ and [campaigns](docs/campaigns.md).
 
 Future work is documented separately in the [0.3–0.6 upgrade roadmap](docs/roadmap/README.md).
 The package also contains [model-free Physics Auditor PA-1 schema and routing
-foundations](docs/physics_auditor_foundations.md) and the isolated [PA-2 trusted Physics
-Oracle execution substrate](docs/physics_oracle_execution.md). PA-2 runs only fixed,
-operator-owned, hash-pinned Python intents through Bubblewrap with actual disabled
-networking, a read-only Git workspace, scratch-only output, canonical completion
-proofs, and conservative recovery. No Physics Auditor model execution or
-normal-workflow integration is available yet. Provider-neutral adapters, explicit
-parallel DAG campaigns, and later physics research profiles are also unavailable in
-version 0.2.0.
+foundations](docs/physics_auditor_foundations.md), the isolated [PA-2 trusted Physics
+Oracle execution substrate](docs/physics_oracle_execution.md), the fresh projected
+[PA-3 Physics Auditor action](docs/physics_auditor_execution.md), and versioned
+[PA-4 physics workflow integration](docs/physics_workflow_integration.md). PA-4 is
+available only to explicit schema-version-2 physics substages; ordinary 0.2.0
+schema-version-1 workflows are unchanged. Provider-neutral adapters, explicit parallel
+DAG campaigns, and later physics research profiles remain unavailable.
+The qualification evidence is recorded in the [PA-4 validation
+report](docs/validation/physics_auditor_pa4.md).
 
 ## Current status
 
@@ -87,9 +88,10 @@ evaluator portable across arbitrary toolchains.
 - Codex CLI 0.144.0 or newer for real Worker, Auditor, or Supervisor actions.
 - Project-specific compilers, libraries, or test tools required by your frozen
   acceptance commands.
-- Docker is not required. Bubblewrap is required only for PA-2 Physics Oracle
-  execution and the experimental packaged evaluator. PA-2 fails closed without it;
-  ordinary workflows do not acquire a Bubblewrap dependency.
+- Docker is not required. Bubblewrap is required for PA-2 Physics Oracle execution,
+  PA-3/PA-4 Physics Auditor projection, and the experimental packaged evaluator. The
+  physics paths fail closed without it; ordinary workflows do not acquire a Bubblewrap
+  dependency.
 
 The bundled synthetic quick start uses a local test double and never contacts a model
 service.

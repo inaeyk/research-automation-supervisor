@@ -5,11 +5,10 @@ serialization, read-only validation CLI, and model-free deterministic routing ar
 implemented and qualified. PA-2 fixed trusted intents, isolated model-free oracle
 execution, completion proofs, Git integrity, and separate crash recovery are also
 implemented and qualified while the package remains `0.2.0`. PA-3 adds a qualified
-standalone Codex Physics Auditor over an exact read-only Bubblewrap projection. It is
-not integrated into workflow state and performs no repair or scientific release.
-Workflow integration/state, repair, and scientific review remain proposed for later
-stages targeted at `0.3.0`. Names still marked **Proposed** do not exist in the current
-package.
+standalone Codex Physics Auditor over an exact read-only Bubblewrap projection. PA-4
+adds opt-in schema-version-2 workflow integration, bounded repair, and scientific-review
+pauses while leaving ordinary schema-version-1 execution unchanged. Names still marked
+**Proposed** do not exist in the current package.
 
 ## Goal
 
@@ -736,11 +735,11 @@ unavailable, and Stage D does not claim the complete `0.3.0` acceptance gates.
 
 ### Stage E: state routing and human gate
 
-- [ ] Add version-2-only statuses and exact journal semantic forms.
-- [ ] Connect Code Auditor pass to physics evidence; connect repair to the same Worker
+- [x] Add version-2-only statuses and exact journal semantic forms.
+- [x] Connect Code Auditor pass to physics evidence; connect repair to the same Worker
   and same bound.
-- [ ] Add immutable scientific review packet and strict human decision handling.
-- [ ] Prove no path from a model report leads directly to `completed`.
+- [x] Add immutable scientific review packet and strict human decision handling.
+- [x] Prove no path from a model report alone leads directly to `completed`.
 
 ### Stage F: qualification and docs
 

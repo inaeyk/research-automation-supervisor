@@ -73,5 +73,13 @@ closed without launching the oracle. See [trusted Physics Oracle
 execution](physics_oracle_execution.md). This does not change the ordinary Stage 2
 acceptance-test limitation above.
 
+PA-3 and PA-4 add a separate Physics Auditor boundary. Every audit uses a fresh,
+ephemeral, approval-never Codex session inside an exact read-only Bubblewrap projection.
+The original worktree, Git metadata, PA-2 oracle programs, PA-2 evidence root, protected
+paths, credentials, and other model sessions are absent. Only declared candidate and
+derivation objects plus engine-owned bounded evidence are projected. PA-4 verifies the
+standalone PA-3 action proof and refuses reused provider thread IDs or any workspace
+identity drift. See [physics workflow integration](physics_workflow_integration.md).
+
 See the official [Codex approval and security guide](https://learn.chatgpt.com/docs/agent-approvals-security.md)
 for current CLI sandbox and approval behavior.
