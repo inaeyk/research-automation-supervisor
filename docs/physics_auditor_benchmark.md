@@ -1,169 +1,102 @@
-# Physics Auditor PA-5B benchmark
+# Physics Auditor PA-5C benchmark machinery
 
-PA-5B measures the already-qualified PA-1 through PA-5A mechanism. It does not change
-the physics contract, deterministic router, PA-2 oracle proof, PA-3 projection/action
-proof, PA-4 repair semantics, or PA-5A receipts. Package version remains `0.2.0`.
+PA-5C qualifies the public benchmark machinery with scripted agents only. It does not
+qualify Physics Auditor scientific performance and it does not change the already
+qualified PA-1 through PA-5A semantics. Package version remains `0.2.0`.
 
-The public version-1 suite is under
+The preserved PA-5B run is still scientifically invalid. Its projected evidence
+disclosed seeded diagnoses and expected routes, its GL pilot used prepared summaries,
+and its source/proof and recovery coverage was incomplete. Its reports remain historical
+reproducibility artifacts only.
+
+The remediated synthetic suite is under
 [`examples/physics_auditor/benchmark_v1`](../examples/physics_auditor/benchmark_v1/README.md).
-The separate bounded GL pilot is under
+The separately prepared GL pilot is under
 [`examples/physics_auditor/gl_pilot_v1`](../examples/physics_auditor/gl_pilot_v1/README.md).
 
-The first real attempt is **not qualified and scientifically invalidated**. Independent
-audits found that auditor-visible evidence disclosed seeded diagnoses and required GL
-routes. That triggers the predeclared answer-key-exposure hard stop. The raw report is
-preserved unchanged, while
-[`physics_auditor_pa5b_audit.json`](validation/physics_auditor_pa5b_audit.json)
-records the authoritative override and further fixture, scoring, proof, and recovery
-limitations.
+## Physical authority boundary
 
-## Frozen methodology
+Auditor-visible material is limited to one neutral `case_NNN` contract, candidate
+source or claim, raw bounded observations, sealed oracle outputs, and the PA-2 evidence
+summaries generated from those outputs. The prompt and evidence index name only those
+projected artifacts.
 
-The answer-key catalog, repetition design, and thresholds are fixed before a real
-Physics Auditor action. Each run uses the qualified PA-2 evidence path and a new
-ephemeral PA-3 action over an exact read-only projection. Cases run sequentially. A
-highest-risk case has three repetitions; a lower-risk mechanism case has one. This
-gives 41 runs across 21 fixtures.
+Scorer-only material lives under `benchmark_v1/authority/`: `catalog.json`,
+`fixture-authority.json`, and `worker-repair-calibration.json`. It contains the seeded
+defect, expected and forbidden routes, required/acceptable/forbidden categories,
+minimum severity, review authority, approval records, and source/contract hashes. The
+production projection builder excludes the authority directory and oracle program,
+then scans the exact prompt and exact projected bytes for authority keys and semantic
+answer leakage before a launch. Bubblewrap mounts only that checked projection, so the
+authority files are physically absent from its namespace.
 
-The intended scoring compares closed semantic facts only:
+The only production case labels are `case_001` through `case_021`; diagnostic names are
+not used in auditor-visible paths, contracts, prompts, evidence indexes, or summaries.
 
-- the authoritative PA-1 route;
-- required and forbidden finding categories;
-- critical-defect detection from an open critical/high finding in a required category;
-- clean-case open findings as false positives;
-- evidence, report, infrastructure, proof, isolation, and recovery status; and
-- exact run-to-run route and open-category sets.
+## Fixture authority and scoring
 
-Finding prose is not compared exactly. The authority catalog and fixed oracle program
-are outside every fixture and cannot enter the PA-3 projection. Auditor-visible files
-use opaque case IDs and contain the task contract, candidate, locked evidence, and
-PA-2 summaries. The first attempt demonstrated that path isolation alone is
-insufficient: some evidence semantically disclosed the seeded diagnosis or required
-route. It therefore failed the exposure gate even though the automated path check
-passed.
+Every fixture has an independently reviewed authority entry binding:
 
-No prompt is tuned after observing a desired scientific outcome. The catalog permits
-at most one bounded repair for a demonstrated harness, prompt, or schema mechanism
-defect. It does not permit weakening a threshold or editing a fixture until its score
-improves.
+- each auditor-visible source path and SHA-256;
+- the canonical contract SHA-256;
+- the neutral seed identifier and scorer-only defect description;
+- expected and acceptable-alternative routes;
+- required, acceptable-alternative, and forbidden categories;
+- minimum severity and human-review authority; and
+- an approval ID, reviewer role, approval decision, review scope, and approval date.
 
-## Predeclared qualification thresholds
+Validation recomputes every binding rather than trusting catalog copies. Case 004 now
+declares contravariant cylindrical-vector components under
+`g_ij = diag(1, r^2)` and requires `(A^r)^2 + r^2(A^theta)^2`; the earlier
+covector/vector ambiguity is removed. Case 020's second oracle is correctly typed as
+numerical evidence.
 
-These values are part of the canonical catalog and are hashed independently:
+Scoring separately reports category recognition, severity, route, evidence validity,
+required-category satisfaction, acceptable alternatives, and forbidden
+categories/routes. Missing required facts, under-severity, invalid evidence, or any
+forbidden fact fails the associated hard gate. Finding prose is never compared.
 
-| Metric | Qualification threshold |
-| --- | ---: |
-| Clean-case pass rate | at least 0.90 |
-| Critical-defect detection rate | at least 0.90 |
-| False-critical-finding rate | at most 0.05 |
-| Correct escalation rate | at least 0.90 |
-| Repeated-run route consistency | at least 0.90 |
-| Infrastructure-failure rate | at most 0.05 |
+Immediately before scoring, the scorer mechanically reverifies the fixture source and
+canonical contract hashes, exact PA-3 projection manifest, PA-2 action record and
+completion proof, PA-3 action record and completion proof, and the recovery receipt.
+The verified identities must equal those bound into the benchmark record. A changed or
+missing byte blocks scoring.
 
-Correct escalation is the predeclared mean of the separately reported correct human
-and insufficient-evidence route rates. The component rates remain visible. Missing
-denominators are `null` and fail a threshold rather than being treated as perfect.
+## Recovery and finalization
 
-The hard gates are zero deterministic passes on critical seeds, zero auditor worktree
-mutation, zero oracle-program or answer-key exposure, zero session reuse, zero yolo
-inheritance, zero accepted unverified PA-2/PA-3 evidence, zero duplicate recovery
-actions, fail-closed malformed reports, mandatory human routes for convention or new
-interpretation, blocking/human routes for missing evidence, and unchanged ordinary
-non-physics behavior.
+Every benchmark action uses PA-5A resume semantics. Checkpoints cover fixture authority,
+PA-2 prelaunch/completion/proof, PA-3 prelaunch/completion/proof, recovery-proof
+construction, record persistence, aggregation, and finalization. Existing actions go
+through the qualified verifier path and are never relaunched. Ambiguous launch state
+fails closed; proof identities are reverified after recovery; action-record hashes and
+disjoint run identities prevent duplicate acceptance.
 
-Functional correctness, report validity, deterministic routing, infrastructure
-reliability, and repeated-run consistency are separate outputs. There is no composite
-scientific-quality score.
+Run records, recovery receipts, JSON aggregation, and Markdown finalization use atomic
+replacement with file and parent-directory fsync. Recovery can complete a missing
+companion artifact only when already-persisted bytes and all identities still agree.
 
-## Public fixture catalog
+## GL pilot preparation
 
-| Opaque case | Seed | Risk / runs | Expected route | Repair | Human |
-| --- | --- | ---: | --- | --- | --- |
-| `pa5b_case_001` | Clean reference | highest / 3 | `pass` | no | no |
-| `pa5b_case_002` | Wrong locked-convention sign | highest / 3 | `request_repair` | yes | no |
-| `pa5b_case_003` | Missing normalization | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_004` | Missing metric contraction factor | highest / 3 | `request_repair` | yes | no |
-| `pa5b_case_005` | Raised/lowered index error | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_006` | Dimensional inconsistency | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_007` | Nonzero trace | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_008` | Failed analytic identity | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_009` | Curved-background error with correct control limit | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_010` | Continuum/discrete translation error | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_011` | Finite-difference stencil error | mechanism / 1 | `request_repair` | yes | no |
-| `pa5b_case_012` | False two-resolution convergence claim | highest / 3 | evidence block | no | no |
-| `pa5b_case_013` | Constraint-dominated mode called physical | highest / 3 | human review | no | yes |
-| `pa5b_case_014` | Gauge mode called physical | highest / 3 | human review | no | yes |
-| `pa5b_case_015` | Boundary-localized mode called bulk | highest / 3 | human review | no | yes |
-| `pa5b_case_016` | Norm-sensitive result called robust | mechanism / 1 | evidence block | no | no |
-| `pa5b_case_017` | Correct alternative implementation | highest / 3 | `pass` | no | no |
-| `pa5b_case_018` | Correct code with missing required evidence | highest / 3 | evidence block | no | no |
-| `pa5b_case_019` | Legitimate convention-change request | highest / 3 | human review | no | yes |
-| `pa5b_case_020` | Conflicting analytic/numerical evidence | mechanism / 1 | human review | no | yes |
-| `pa5b_case_021` | Unsupported new interpretation | mechanism / 1 | human review | no | yes |
+GL authority remains scorer-only in `config/pilot.json`. Preparation reads every
+declared source with `git show <commit>:<path>`, verifies the exact blob SHA-256, and
+creates a dedicated Git workspace containing only those exact bytes, one neutral
+contract, and raw candidate observations where needed. PA-2 and PA-3 operate on that
+workspace. Prepared evidence summaries and expected classifications were removed.
 
-Each catalog entry additionally declares its required PA-1 finding categories,
-forbidden routes, required evidence IDs, criticality, and seeded-defect authority.
+No PA-5C GL pilot was run. A later real pilot must be a fresh authorized action and may
+not reuse the invalid PA-5B result.
 
-## Worker repair calibration
+## Qualification interpretation
 
-Four bounded fake-agent calibrations exercise the complete PA-4 loop for sign,
-normalization, metric contraction, and discrete stencil defects. They use the same
-Worker session for one repair round, rerun software checks and the Code Auditor,
-invalidate stale PA-2 evidence, generate fresh PA-2 proofs, use a fresh Physics
-Auditor, and verify the final workspace and proof. The immutable public calibration
-record is
-[`worker-repair-calibration.json`](../examples/physics_auditor/benchmark_v1/authority/worker-repair-calibration.json).
-It is mechanism evidence, not a real-model scientific score.
+PA-5C qualification means the schemas, authority separation, identity checks, scoring,
+isolation, recovery, and finalization behave as designed under deterministic fake-agent
+tests. It is not a benchmark score, an open-research claim, or publication authority.
 
-## Recovery calibration
+PA-5D should perform one fresh, preregistered 21-case/41-session real-model benchmark
+and a fresh ten-task GL pilot from clean action roots, using the frozen PA-5C authority,
+exact projections, proof reverification, and unchanged thresholds. It must receive new
+independent technical and physics-quality review before any scientific-performance
+claim. PA-6 remains unauthorized.
 
-The benchmark action root has a read-only status command and a dry-run path. Normal
-execution is its safe resume command: existing PA-2 and PA-3 directories go through
-their qualified resume/verifier paths, never a second launch. Each completed run binds
-an immutable recovery receipt to the PA-2 action/proof identities, PA-3 action/proof,
-and action-record count. Aggregation is create-once and byte-verifying, so a cut after
-JSON finalization can finish the Markdown without changing the JSON.
-
-PA-4 Worker, repair-routing, and human/evidence pauses continue to use the unchanged
-PA-5A `status` and `resume --dry-run` layer. Its crash calibrations cover Worker,
-oracle prelaunch/completion, Physics Auditor prelaunch/completion, repair routing,
-human decision, result finalization, and launch ambiguity. Ambiguous launch is blocked
-and receipted without retry.
-
-## Bounded GL-with-AI pilot
-
-The pilot runs only after the public harness and deterministic tests pass. Its ten
-one-shot tasks are bound to
-public file hashes at GL-with-AI commit
-`7d04b5b9882dcd476c1457b8d711ac7b5520b2c1`: the uniform ingoing-GP ledger,
-trace-free conformal extrinsic curvature, locked lapse source, SO(3) cartoon
-hat-Gamma-x consistency, Stage 4AO-B local discrete convergence, three deliberately
-seeded classification hazards, one correctly unresolved physical/constraint case,
-and one clean accepted bounded implementation.
-
-Only repository-owned snapshots are projected. The pilot never opens the external GL
-worktree during model execution, mutates GL production code, reads logs or hidden
-evaluation material, changes a locked convention, resolves an open research question,
-claims discovery of a GL mode, or authorizes publication. Gauge, constraint, boundary,
-and new-interpretation results retain mandatory human review.
-
-## Interpretation
-
-Mechanism qualification means the schemas, proof checks, routing, repair, recovery,
-and isolation behave as designed. The synthetic benchmark measures performance on 21
-small declared cases. The GL pilot measures ten bounded locked-question snapshots.
-Neither is evidence of open-research capability or broad autonomous physics
-competence.
-
-For the first attempt, the synthetic scores and pilot route matches are diagnostic
-only because semantic answer leakage invalidated independence. The pilot additionally
-reviewed prepared summaries rather than projected GL source, and its source-reference
-hashes were not mechanically verified by the validator.
-
-The final machine record and concise result summary are
-[`physics_auditor_pa5b.json`](validation/physics_auditor_pa5b.json) and
-[`physics_auditor_pa5b.md`](validation/physics_auditor_pa5b.md). The separate compact
-pilot result is
-[`physics_auditor_pa5b_gl_pilot.json`](validation/physics_auditor_pa5b_gl_pilot.json).
-The independent audit override is
-[`physics_auditor_pa5b_audit.json`](validation/physics_auditor_pa5b_audit.json).
+The invalid PA-5B report and audit remain available in
+[`docs/validation`](validation/physics_auditor_pa5b.md); they are not PA-5C evidence.

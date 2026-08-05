@@ -82,12 +82,14 @@ from research_automation_supervisor.physics_auditor_execution import (
 )
 from research_automation_supervisor.physics_benchmark import (
     finalize_physics_benchmark_report,
+    load_validated_fixture_authority,
     score_physics_benchmark,
     validate_benchmark_authority_separation,
 )
 from research_automation_supervisor.physics_benchmark_execution import (
     physics_benchmark_status,
     run_public_physics_benchmark,
+    verify_physics_benchmark_scoring_identities,
 )
 from research_automation_supervisor.physics_benchmark_models import (
     load_physics_benchmark_catalog,
@@ -555,7 +557,7 @@ def audit_physics_command(
 def validate_physics_benchmark_command(
     catalog_path: Annotated[
         Path,
-        typer.Option("--catalog", help="Public PA-5B answer-key catalog."),
+        typer.Option("--catalog", help="Public scorer-only benchmark authority catalog."),
     ],
     workspace: Annotated[
         Path,
@@ -565,7 +567,7 @@ def validate_physics_benchmark_command(
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
 ) -> None:
-    """Validate PA-5B schemas, fixtures, thresholds, and answer-key separation."""
+    """Validate benchmark schemas, fixtures, thresholds, and authority separation."""
     try:
         catalog = load_physics_benchmark_catalog(catalog_path)
         fixture_hashes = validate_benchmark_authority_separation(
@@ -592,7 +594,7 @@ def validate_physics_benchmark_command(
         typer.echo(
             "\n".join(
                 (
-                    "Physics Auditor PA-5B benchmark inputs are valid.",
+                    "Physics Auditor benchmark inputs are valid.",
                     f"Cases: {payload['case_count']}",
                     f"Predeclared repetitions: {payload['repetition_count']}",
                     f"Catalog SHA-256: {payload['catalog_sha256']}",
@@ -607,7 +609,7 @@ def validate_physics_benchmark_command(
 def run_physics_benchmark_command(
     catalog_path: Annotated[
         Path,
-        typer.Option("--catalog", help="Validated public PA-5B authority catalog."),
+        typer.Option("--catalog", help="Validated public scorer-only authority catalog."),
     ],
     execution_config_path: Annotated[
         Path,
@@ -651,9 +653,7 @@ def run_physics_benchmark_command(
         catalog = load_physics_benchmark_catalog(catalog_path)
         repair_results = None
         if repair_calibration_path is not None:
-            repair_calibration = load_physics_benchmark_repair_calibration(
-                repair_calibration_path
-            )
+            repair_calibration = load_physics_benchmark_repair_calibration(repair_calibration_path)
             if repair_calibration.benchmark_id != catalog.benchmark_id:
                 raise PhysicsBenchmarkError(
                     "repair calibration benchmark identity does not match the catalog"
@@ -707,8 +707,7 @@ def run_physics_benchmark_command(
             "\n".join(
                 (
                     "Physics benchmark dry run completed without a launch.",
-                    f"Completed: {payload['completed_run_count']}/"
-                    f"{payload['expected_run_count']}",
+                    f"Completed: {payload['completed_run_count']}/{payload['expected_run_count']}",
                     f"Next: {payload['next_case_id'] or 'none'}"
                     + (
                         f" repetition {payload['next_repetition']}"
@@ -735,7 +734,7 @@ def run_physics_benchmark_command(
 def physics_benchmark_status_command(
     catalog_path: Annotated[
         Path,
-        typer.Option("--catalog", help="The predeclared PA-5B authority catalog."),
+        typer.Option("--catalog", help="The predeclared scorer-only authority catalog."),
     ],
     records_root: Annotated[
         Path,
@@ -767,8 +766,7 @@ def physics_benchmark_status_command(
             "\n".join(
                 (
                     f"Physics benchmark: {payload['benchmark_id']}",
-                    f"Completed: {payload['completed_run_count']}/"
-                    f"{payload['expected_run_count']}",
+                    f"Completed: {payload['completed_run_count']}/{payload['expected_run_count']}",
                     f"Partial actions: {payload['partial_action_count']}",
                     f"Next: {payload['next_case_id'] or 'none'}",
                     "Safe resume: yes",
@@ -782,7 +780,7 @@ def physics_benchmark_status_command(
 def score_physics_benchmark_command(
     catalog_path: Annotated[
         Path,
-        typer.Option("--catalog", help="The predeclared PA-5B authority catalog."),
+        typer.Option("--catalog", help="The predeclared scorer-only authority catalog."),
     ],
     records_root: Annotated[
         Path,
@@ -792,6 +790,17 @@ def score_physics_benchmark_command(
         Path,
         typer.Option("--output", help="New or recoverable aggregate output directory."),
     ],
+    execution_config_path: Annotated[
+        Path,
+        typer.Option(
+            "--execution-config",
+            help="Qualified PA-3 configuration used to reverify every action proof.",
+        ),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Repository used for source/proof reverification."),
+    ] = Path("."),
     ordinary_nonphysics_unchanged: Annotated[
         bool,
         typer.Option(
@@ -803,7 +812,7 @@ def score_physics_benchmark_command(
         bool,
         typer.Option(
             "--validation-layout",
-            help="Use the versioned docs/validation PA-5B artifact names.",
+            help="Use the frozen docs/validation PA-5B compatibility artifact names.",
         ),
     ] = False,
     as_json: Annotated[
@@ -815,9 +824,23 @@ def score_physics_benchmark_command(
         catalog = load_physics_benchmark_catalog(catalog_path)
         paths = sorted(records_root.glob("*/actions/repetition-*/benchmark-record.json"))
         records = tuple(load_physics_benchmark_run_record(path) for path in paths)
+        fixture_authority = load_validated_fixture_authority(
+            catalog,
+            repository_root=workspace,
+        )
+        identities = verify_physics_benchmark_scoring_identities(
+            catalog=catalog,
+            catalog_path=catalog_path,
+            execution_config_path=execution_config_path,
+            repository_root=workspace,
+            output_directory=records_root,
+            records=records,
+        )
         report = score_physics_benchmark(
             catalog,
             records,
+            fixture_authority=fixture_authority,
+            identity_verifications=identities,
             ordinary_nonphysics_unchanged=ordinary_nonphysics_unchanged,
             limitations=(
                 "Public synthetic fixtures are deliberately small and bounded.",
@@ -869,6 +892,13 @@ def validate_gl_pilot_command(
         Path,
         typer.Option("--workspace", help="Repository containing pilot snapshots."),
     ] = Path("."),
+    source_workspace: Annotated[
+        Path,
+        typer.Option(
+            "--source-workspace",
+            help="GL source repository containing the exact declared commit blobs.",
+        ),
+    ] = Path("../GL-with-AI"),
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -880,6 +910,7 @@ def validate_gl_pilot_command(
             config,
             repository_root=workspace,
             config_path=config_path,
+            source_repository_root=source_workspace,
         )
         payload = {
             "schema_version": 1,
@@ -919,9 +950,7 @@ def run_gl_pilot_command(
     ],
     execution_config_path: Annotated[
         Path,
-        typer.Option(
-            "--execution-config", help="Qualified fresh read-only PA-3 configuration."
-        ),
+        typer.Option("--execution-config", help="Qualified fresh read-only PA-3 configuration."),
     ],
     output: Annotated[
         Path,
@@ -931,6 +960,13 @@ def run_gl_pilot_command(
         Path,
         typer.Option("--workspace", help="Clean repository containing pilot snapshots."),
     ] = Path("."),
+    source_workspace: Annotated[
+        Path,
+        typer.Option(
+            "--source-workspace",
+            help="GL source repository used only for exact commit-blob projection.",
+        ),
+    ] = Path("../GL-with-AI"),
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
     ] = False,
@@ -943,6 +979,7 @@ def run_gl_pilot_command(
             config_path=config_path,
             execution_config_path=execution_config_path,
             repository_root=workspace,
+            source_repository_root=source_workspace,
             output_directory=output,
         )
         payload = {
@@ -2268,9 +2305,7 @@ def _render_physics_benchmark_error(
     sanitized = redact_text(error, sensitive_values)
     kind = "input" if exit_code == 2 else "integrity"
     if as_json:
-        typer.echo(
-            _stable_json({"error": sanitized, "error_kind": kind, "ok": False})
-        )
+        typer.echo(_stable_json({"error": sanitized, "error_kind": kind, "ok": False}))
     else:
         typer.echo(f"Physics benchmark error: {sanitized}", err=True)
     raise typer.Exit(code=exit_code)

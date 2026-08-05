@@ -2,14 +2,14 @@ schema_version: 1
 profile: physics_implementation
 conventions:
   - id: locked_convention
-    value: Cylindrical metric contraction
+    value: Cylindrical vector contraction with contravariant components
     authority: task_locked
 assumptions:
   - id: synthetic_scope
     statement: This case is a bounded public synthetic question; no research claim is authorized.
 required_identities:
   - id: primary_identity
-    statement: For metric diag(1,r^2), A_i A^i = A_r^2 + r^2 A_theta^2.
+    statement: For metric diag(1,r^2) and vector components (A^r,A^theta), A_i A^i = (A^r)^2 + r^2 (A^theta)^2.
     required_evidence_kinds: [document, oracle]
     oracle_ids: [case_oracle]
 limiting_cases:
@@ -51,4 +51,3 @@ audit_policy:
   low_severity: allow_pass
   informational_severity: allow_pass
 auditor_role_ref: physics_auditor
-

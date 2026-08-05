@@ -1,6 +1,0 @@
-resolutions=256,512,1024
-ratio_cm>3.4
-ratio_mf>3.4
-claim=local discrete preflight only
-
-

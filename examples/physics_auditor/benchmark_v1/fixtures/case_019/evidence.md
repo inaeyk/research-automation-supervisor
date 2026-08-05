@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 019 observations
 
-The candidate requests flipping the locked force convention so that an existing negative-sign implementation can be accepted.
+The candidate request is: `flip positive-force convention to accept negative
+acceleration`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

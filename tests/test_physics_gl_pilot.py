@@ -22,6 +22,7 @@ from research_automation_supervisor.physics_gl_pilot import (
     REQUIRED_GL_PILOT_TOPICS,
     PhysicsGLPilotRunV1,
     aggregate_physics_gl_pilot,
+    gl_pilot_scoring_observation,
     load_physics_gl_pilot_config,
     locked_authority_sha256,
     validate_physics_gl_pilot,
@@ -34,6 +35,7 @@ from research_automation_supervisor.physics_routing import derive_physics_audit_
 from tests.test_physics_benchmark import BWRAP, EMPTY_SHA
 
 ROOT = Path(__file__).parents[1]
+GL_SOURCE = ROOT.parent / "GL-with-AI"
 PILOT = ROOT / "examples/physics_auditor/gl_pilot_v1"
 CONFIG_PATH = PILOT / "config/pilot.json"
 CLI = CliRunner()
@@ -56,8 +58,13 @@ def _reference(
 
 def _pilot_report(task: Any) -> dict[str, Any]:
     contract = load_physics_task_contract(ROOT / task.contract_path)
-    document_path = next(item.path for item in contract.evidence if item.id == "locked_snapshot")
-    document = _reference("document", path=document_path)
+    declared = next(item for item in contract.evidence if item.id.startswith("source_"))
+    assert declared.path is not None
+    document = (
+        _reference("derivation", path=declared.path)
+        if declared.kind == "derivation"
+        else _reference("artifact", reference=declared.id)
+    )
     oracle = _reference("oracle", reference="pilot_oracle")
     passed = task.expected_route == "pass"
     findings = [
@@ -142,6 +149,12 @@ def _scripted_records() -> tuple[PhysicsGLPilotRunV1, ...]:
             )
             for item in report["findings"]
         )
+        score = gl_pilot_scoring_observation(
+            task,
+            findings,
+            decision.outcome,
+            evidence_valid=True,
+        )
         records.append(
             PhysicsGLPilotRunV1(
                 pilot_id=config.pilot_id,
@@ -154,9 +167,20 @@ def _scripted_records() -> tuple[PhysicsGLPilotRunV1, ...]:
                 actual_report_verdict=report["verdict"],
                 actual_route=decision.outcome,
                 required_finding_categories=task.required_finding_categories,
+                acceptable_alternative_categories=task.acceptable_alternative_categories,
+                forbidden_finding_categories=task.forbidden_finding_categories,
+                minimum_severity=task.minimum_severity,
+                acceptable_alternative_routes=task.acceptable_alternative_routes,
                 findings=findings,
                 human_review_mandatory=task.human_review_mandatory,
-                route_matched=True,
+                route_matched=score["route_matched"],
+                category_recognized=score["category_recognized"],
+                severity_matched=score["severity_matched"],
+                evidence_valid=score["evidence_valid"],
+                required_categories_satisfied=score["required_categories_satisfied"],
+                acceptable_alternative_satisfied=score["acceptable_alternative_satisfied"],
+                forbidden_category_observed=score["forbidden_category_observed"],
+                forbidden_route_observed=score["forbidden_route_observed"],
                 run_status="routing_completed",
                 fresh_session_identity_sha256=hashlib.sha256(
                     task.task_id.encode("ascii")
@@ -171,6 +195,7 @@ def _scripted_records() -> tuple[PhysicsGLPilotRunV1, ...]:
                 session_reused=False,
                 yolo_inheritance_detected=False,
                 pa2_pa3_proofs_verified=True,
+                source_contract_projection_verified=True,
                 duration_seconds=1.0,
                 usage=PhysicsBenchmarkUsageV1(
                     availability="unavailable",
@@ -188,6 +213,7 @@ def test_gl_pilot_preparation_is_explicit_bounded_and_separated() -> None:
         config,
         repository_root=ROOT,
         config_path=CONFIG_PATH,
+        source_repository_root=GL_SOURCE,
     )
 
     assert config.source_commit == "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1"
@@ -229,6 +255,8 @@ def test_gl_pilot_validation_cli_never_launches_a_model() -> None:
             str(CONFIG_PATH),
             "--workspace",
             str(ROOT),
+            "--source-workspace",
+            str(GL_SOURCE),
             "--json",
         ],
     )
@@ -321,13 +349,37 @@ def test_gl_pilot_executor_is_sequential_fresh_and_idempotent(tmp_path: Path) ->
         "execution_config_path": workspace
         / "examples/physics_auditor/synthetic/execution-config.yaml",
         "repository_root": workspace,
+        "source_repository_root": GL_SOURCE,
         "output_directory": output,
         "codex_invokers": {task.task_id: invoker(task) for task in config.tasks},
     }
+    interruption_points = (
+        "gl_authority_and_source_verified",
+        "task_001:exact_source_workspace_verified",
+        "task_001:pilot_oracle:before_pa2_resume_or_launch",
+        "task_001:pilot_oracle:after_pa2_proof_reverification",
+        "task_001:before_pa3_resume_or_launch",
+        "task_001:after_pa3_completion",
+        "task_001:after_pa3_proof_reverification",
+        "task_001:after_recovery_proof_finalization",
+        "task_001:after_record_finalization",
+    )
+    interrupted: set[str] = set()
+    for point in interruption_points:
+
+        def interrupt_once(name: str, *, expected: str = point) -> None:
+            if name == expected and name not in interrupted:
+                interrupted.add(name)
+                raise RuntimeError(f"synthetic interruption at {name}")
+
+        with pytest.raises(RuntimeError, match="synthetic interruption"):
+            run_bounded_physics_gl_pilot(**kwargs, checkpoint=interrupt_once)
+
     first = run_bounded_physics_gl_pilot(**kwargs)
     second = run_bounded_physics_gl_pilot(**kwargs)
 
     assert first == second
+    assert interrupted == set(interruption_points)
     assert first.outcome == "completed_bounded"
     assert first.run_count == 10
     assert len(sessions) == 10

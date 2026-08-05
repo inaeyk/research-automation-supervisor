@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 012 observations
 
-Only two resolutions are supplied. Errors 0.10 and 0.06 give ratio 1.67, yet the candidate calls the result second-order convergent.
+The supplied resolution/error pairs are `(64, 0.10)` and `(128, 0.06)`. The candidate
+claim is `second-order convergent`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

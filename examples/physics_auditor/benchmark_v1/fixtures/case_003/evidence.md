@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 003 observations
 
-Locked authority: rho(x)=exp(-x^2/(2 sigma^2))/(sqrt(2 pi) sigma). The implementation omits the full normalization prefactor.
+At `x = 0`, `sigma = 1`, the candidate returns `1`. Its integral over the real line
+is `sqrt(2*pi)*sigma`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

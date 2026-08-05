@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 010 observations
 
-The implementation translates the continuum integral to a raw sum and omits dx.
+For values `(1, 1, 1, 1)` and `dx = 0.25`, the candidate returns `4`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

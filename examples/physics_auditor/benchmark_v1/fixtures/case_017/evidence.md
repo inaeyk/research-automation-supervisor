@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 017 observations
 
-The implementation uses 0.5*(right-left)/h. It is structurally different from the reference spelling but algebraically equivalent.
+For `(left, right, h) = (1, 5, 2)`, the candidate returns `1`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

@@ -1,0 +1,957 @@
+{
+  "benchmark_id": "physics_auditor_pa5c_public_v1",
+  "manifests": [
+    {
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_001",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_001",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_001/contract.yaml",
+      "contract_sha256": "ad5aac0f4349900643493bce2790d0c2dac762734b1ab4d016b48129d0560e49",
+      "expected_route": "pass",
+      "fixture_sha256": "de3ace9a13fe37026c5aeb84796f3aa5247df07de62e9b5e64171183863eca19",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": null,
+      "required_finding_categories": [],
+      "schema_version": 1,
+      "seeded_defect": "The reference implementation satisfies every locked identity and limiting case.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_001/evidence.md",
+          "role": "evidence",
+          "sha256": "2624fb228c553fddbb5fbf89936f79735b37f7ce1b90956cd8835b0502224707"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_001/implementation.py",
+          "role": "candidate",
+          "sha256": "0ea3642a79ae0066292a4cd1067cbc2753c1fe24038c3f1509374b809d26dc8c"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "convention_mismatch"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_002",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_002",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_002/contract.yaml",
+      "contract_sha256": "2ea34f2e433b8eabb9d0e03dac861affe869cf9b3445a152ed0ad6ea7d330c7c",
+      "expected_route": "request_repair",
+      "fixture_sha256": "30240fb53d65a19518d8a9099ce4002d1e2fbe816a86a489c141153c6b6ab354",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "sign_or_normalization_error"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate reverses the locked force sign and requires an unambiguous implementation repair.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_002/evidence.md",
+          "role": "evidence",
+          "sha256": "43744a02cf95c83f227cbd341b027486fd06540e47eefe8e7a7deeba0390b4bb"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_002/implementation.py",
+          "role": "candidate",
+          "sha256": "8019cd066b11c50d1f57adc55cc999bf950c3b3b65debbcfdaa728c6c64b080d"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "violated_identity"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_003",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_003",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_003/contract.yaml",
+      "contract_sha256": "aba7a5405a051175c63209f72ea47e87874c532b45cf4aaf82fa895e92dd5fac",
+      "expected_route": "request_repair",
+      "fixture_sha256": "2fc9d2bbdcbc7b6a899a8b63283da1631718507f6f8ed8f54f4ee15a1493895a",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "sign_or_normalization_error"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate omits the Gaussian normalization prefactor.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_003/evidence.md",
+          "role": "evidence",
+          "sha256": "0097ba4bff273047bd1add2ea38e4762f72eca404dccb9a5870db06ec879ae7f"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_003/implementation.py",
+          "role": "candidate",
+          "sha256": "87f52455132e3cdb07e3769c86b2524a224b4ef4f57ff1f39022e9b45c36bc6c"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "violated_identity"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_004",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_004",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_004/contract.yaml",
+      "contract_sha256": "96884623cfe4b8ed8ae11f530feeaf977ee8facd3f5c5c890c71ac9925807dcd",
+      "expected_route": "request_repair",
+      "fixture_sha256": "1c4a157915ed9ef9885d6a9dcb4448acf277d96dbcde6d5a46521aeffdb920bf",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "tensor_or_index_error"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate omits the cylindrical r-squared metric factor in a contraction.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_004/evidence.md",
+          "role": "evidence",
+          "sha256": "895630ef4879ed478c5f3ac9c400d996d9816fb01c4ed5476c0fe64318c02d53"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_004/implementation.py",
+          "role": "candidate",
+          "sha256": "3decc6c105c8888e3c1896009c0872d353f9386afbdb095cc834e3c9b9df0bf8"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "sign_or_normalization_error"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_005",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_005",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_005/contract.yaml",
+      "contract_sha256": "ee3888a0ae56a1293d686cefcd9c8435dc4833f620fd0f902ddb1364017d1ba7",
+      "expected_route": "request_repair",
+      "fixture_sha256": "44f47b830aac4e374af48de2e30a1b000d7cfdcce0cf9b12e7c70259ee1e7fa7",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "tensor_or_index_error"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate copies a timelike contravariant component without the lowering sign.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_005/evidence.md",
+          "role": "evidence",
+          "sha256": "04244579bd15830adbb9271d683305e66c5c5eec74d0bc33699477d54c52697a"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_005/implementation.py",
+          "role": "candidate",
+          "sha256": "e4d1d532b8821f8433ddda7830959298f77e7f99945ede2db2079c9625f23603"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "continuum_discrete_mismatch"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_006",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_006",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_006/contract.yaml",
+      "contract_sha256": "e0d238dbb4de4fa3b3018fe8d09cffa5c09c21a99694305b82b9fa1e43246365",
+      "expected_route": "request_repair",
+      "fixture_sha256": "ca504055a4e8e1705d071adb992e119636b7c140d9f454ee177baf08b677f7b2",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "dimensional_inconsistency"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The position update omits dt and adds unlike dimensions.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_006/evidence.md",
+          "role": "evidence",
+          "sha256": "0b8afd6964aad49a4cd536ad910edefc304f9f4efc78bf2bd7c32f89c5575237"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_006/implementation.py",
+          "role": "candidate",
+          "sha256": "6441cf8a2a7592c1959c8009a53c9e4bca71674d0c99448d0557c535cd6ff4f8"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "tensor_or_index_error"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_007",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_007",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_007/contract.yaml",
+      "contract_sha256": "5da425d3377d1348d61ef315c8e2a2453fd909e7cb191369debf6c9e3b1380f8",
+      "expected_route": "request_repair",
+      "fixture_sha256": "f963bd0892b8c948a11003a957f62c41c285f9c406fdc3a0da49fc6e1f1bf245",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "violated_identity"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The tensor advertised as trace-free has trace one.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_007/evidence.md",
+          "role": "evidence",
+          "sha256": "effd365e1461e65299991ca4d7cae86981244f1a8307caf13c9c020ad19c0bdf"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_007/implementation.py",
+          "role": "candidate",
+          "sha256": "d21b2505e330a95cfe5d9a3e806fe9329d73ed9552f1c8aecadd5d7be95ec39a"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "failed_limiting_case"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_008",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_008",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_008/contract.yaml",
+      "contract_sha256": "e981afb8b80f2cea493b20287c17908060bbab75bd919782669081f2a72fa0ae",
+      "expected_route": "request_repair",
+      "fixture_sha256": "b9111f9c9d2a853103e81930d09f36101b9f91413ab9a9779e367aafc5714743",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "violated_identity"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The polynomial derivative uses coefficient two instead of three.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_008/evidence.md",
+          "role": "evidence",
+          "sha256": "cdf9661e1c128ad8444ba16815a2a825e9e6d5131ebbd6b1da2fa5e3952fb8f7"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_008/implementation.py",
+          "role": "candidate",
+          "sha256": "288f3bdd31400396dbef00372d189d4142e006828588718f392ee1841f479a78"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "violated_identity"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_009",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_009",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_009/contract.yaml",
+      "contract_sha256": "e02e8d4f82eb828af3759c1936bdc2e0c80f69601954bb3fe3ec3333552b1592",
+      "expected_route": "request_repair",
+      "fixture_sha256": "da7b1911bec1d3c871a0761a37359a38adb85d374e621462c8c9f59a1215d00e",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "failed_limiting_case"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The radial operator passes a constant flat limit but omits the curved two-over-r term.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_009/evidence.md",
+          "role": "evidence",
+          "sha256": "43a39fa02ef001738124139da6c164b0eda05db3ab59c96e09d059bdc8de733f"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_009/implementation.py",
+          "role": "candidate",
+          "sha256": "4571e95fbc46a34bd76d7da31a5dc107e16ee5f223bfddb4b4ea1103ea76ed66"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "dimensional_inconsistency"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_010",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_010",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_010/contract.yaml",
+      "contract_sha256": "9fa84409d62cfd5a955e39b51721342523de972442123a2455cc03f6f4ae6041",
+      "expected_route": "request_repair",
+      "fixture_sha256": "dc68b2088e4942f2bd92fd3905d4a7a764ef1327e69d7101cbab321c02f1dcd3",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "continuum_discrete_mismatch"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The continuum integral is translated to a sum without cell width.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_010/evidence.md",
+          "role": "evidence",
+          "sha256": "91c08e9e8b6b05e86426e5edeb1f129dcde1823811d21729aaa3d05d62ffc20f"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_010/implementation.py",
+          "role": "candidate",
+          "sha256": "f27f89982955abd028e32a6ec464f847076f1e583f305a18fe6619e730cea039"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "violated_identity"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_011",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_011",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_011/contract.yaml",
+      "contract_sha256": "2727cba1408178af87e93c40da85125ff056c9ab63c532d754116cf727636603",
+      "expected_route": "request_repair",
+      "fixture_sha256": "fcd3ee9beedbef1ed1588148d732ee86d738b5cc95205dd2ce6242eb5bba5510",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "continuum_discrete_mismatch"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The centered derivative omits the factor two in its denominator.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_011/evidence.md",
+          "role": "evidence",
+          "sha256": "bdfaec660aa662e23c06c52d10d94aabc5f93754a55b41f893839ffb7c7f5468"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_011/implementation.py",
+          "role": "candidate",
+          "sha256": "76ebbb5e9dd9098a728456e965ff524778167e2c4350455eca821cfd291e6c12"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "missing_required_evidence"
+      ],
+      "acceptable_alternative_routes": [
+        "require_human_review"
+      ],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_012",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_012",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_012/contract.yaml",
+      "contract_sha256": "6c726c1d89ca96496a2c0a34de5e921541e88c9d4abb38b767b5407ea151d7ca",
+      "expected_route": "block_insufficient_evidence",
+      "fixture_sha256": "235dd937668bca61b6f252f31a543e636041f0b1ac975ca0824a8b7831d24c3a",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "insufficient_numerical_evidence"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "Two non-asymptotic resolutions with ratio 1.67 do not support the claimed second-order convergence.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_012/evidence.md",
+          "role": "evidence",
+          "sha256": "2c0ed96d7b9845f490ebaa5faa52782e7cb51dbe876c5961c4bc3845d0f906aa"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_012/implementation.py",
+          "role": "candidate",
+          "sha256": "fd6edb8d0eecc6926b2983fe57b595731549663e6e2a7ae0b6112d339a697155"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_013",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_013",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_013/contract.yaml",
+      "contract_sha256": "a2db679d8997e4b21907524303b2b6a88ee568590ab71dc155cffa003daba6de",
+      "expected_route": "require_human_review",
+      "fixture_sha256": "4d90cab920c6422fa4ca117e346e3b69ddc15959aa257309974351310437791f",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate is constraint dominated; physical classification requires human review.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_013/evidence.md",
+          "role": "evidence",
+          "sha256": "f7148213c5b35af6269ddc453e82a4bf1a5f07fcdaaef32ad5b5a231682a2f02"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_013/implementation.py",
+          "role": "candidate",
+          "sha256": "798d8d4c3a323716333f58efddc853f2e2757ccc9e2bae1e1598c28efb70e1e3"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_014",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_014",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_014/contract.yaml",
+      "contract_sha256": "e622a0d6e01aee724bd28c53e8be895d74b47af74256e9721cd3a569966eb0a2",
+      "expected_route": "require_human_review",
+      "fixture_sha256": "7b7c4093537d3c220306ad0494e9cbbc384f57ec0ffdd97dffe710f00b8a59dc",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate matches a pure gauge generator; physical classification requires human review.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_014/evidence.md",
+          "role": "evidence",
+          "sha256": "21f195766ac6e41c996ffeeae2e23be0e470f913096a4d87b19d40bb41cf5747"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_014/implementation.py",
+          "role": "candidate",
+          "sha256": "dfb8e6a601b364bb1e4381dbb97bf48d077cb9e357274187ee06a3af6c2314a4"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_015",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_015",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_015/contract.yaml",
+      "contract_sha256": "7a84f38ef7ecd8b16bc963df4d3b56dd745637cf9b09a2e5ed595fbc8dce96e6",
+      "expected_route": "require_human_review",
+      "fixture_sha256": "f1764ee8db0b342103e50c63981d91445c1b1dc46f8b38417524d7c1eeebcf93",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "new_physical_interpretation",
+        "unsupported_physical_claim"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate is boundary localized and cannot be promoted to a bulk instability automatically.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_015/evidence.md",
+          "role": "evidence",
+          "sha256": "6f4402e889cc97c2994c16ce23c5c1d8055ba2546e6f0c1dd88e5d197fcc876e"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_015/implementation.py",
+          "role": "candidate",
+          "sha256": "3beae1fdcc3665135e071e6926d4bd23f331d64cdf5233ed3c3c7a5c5c1d20c9"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "unsupported_physical_claim"
+      ],
+      "acceptable_alternative_routes": [
+        "require_human_review"
+      ],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_016",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_016",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_016/contract.yaml",
+      "contract_sha256": "a1f9a315e0b42b418afeb1e4dea09e10535d6edaa77b21e7e316ee151143cfd5",
+      "expected_route": "block_insufficient_evidence",
+      "fixture_sha256": "d7c0eff9637ae27faeb9aa096381497b28c0a41f80918c0148595f1c67a38147",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "insufficient_numerical_evidence"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The L2 and Linf diagnostics disagree, so robustness to norm choice is unsupported.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_016/evidence.md",
+          "role": "evidence",
+          "sha256": "7b4e8c083ead644adecb4652b725cbb518dfca72150063135b110d38d9792546"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_016/implementation.py",
+          "role": "candidate",
+          "sha256": "2e493442e3563597ae1132dd9db89aa697c7ddcf4f80cd0b4e098d69dfe52200"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_017",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_017",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_017/contract.yaml",
+      "contract_sha256": "aa0b15e12cf9bfe6da515dd379064a3b246de0808dedd551c4006bc24e9a105c",
+      "expected_route": "pass",
+      "fixture_sha256": "7cd76ecf9aca90ce20e72eb05013a84ddff875dcfda6b824ffdde0a2f773ca1b",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": null,
+      "required_finding_categories": [],
+      "schema_version": 1,
+      "seeded_defect": "The alternative stencil is algebraically equivalent to the locked implementation.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_017/evidence.md",
+          "role": "evidence",
+          "sha256": "fbe4b03e8809d964a35d73d0c8216452db1546ce22d61ec2f46072e5aa4ff378"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_017/implementation.py",
+          "role": "candidate",
+          "sha256": "49b282a597456bc4b89e1c79d5d987fb71dd107d47ddcf158f4907d72eee5c3c"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "oracle_failure"
+      ],
+      "acceptable_alternative_routes": [
+        "require_human_review"
+      ],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_018",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_018",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_018/contract.yaml",
+      "contract_sha256": "2f8ffd537cecc3ddfae18d4990485c8082916e677bdbe2575bf38c326113df91",
+      "expected_route": "block_insufficient_evidence",
+      "fixture_sha256": "7e373fdd223ff7674999a604181512fa940ea1266f475394ed2ba5b95dd2d89a",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": false,
+      "minimum_severity": "medium",
+      "required_finding_categories": [
+        "missing_required_evidence"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The visible implementation is correct but the required independent oracle evidence is deliberately absent.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_018/evidence.md",
+          "role": "evidence",
+          "sha256": "81af90c0cd0108d5470bf2cbc7ccf56b2c7e1e4a10f7dd7205a037d726ebba9b"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_018/implementation.py",
+          "role": "candidate",
+          "sha256": "0ea3642a79ae0066292a4cd1067cbc2753c1fe24038c3f1509374b809d26dc8c"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "convention_mismatch"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_019",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_019",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_019/contract.yaml",
+      "contract_sha256": "02876588346b655d90f7ac0d1762221e0463625d452e32ee0d9e85092b47c156",
+      "expected_route": "require_human_review",
+      "fixture_sha256": "6e039aa03a9b080bc2e59764b24690040746d44fae2b1b41bd2debd99341de35",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "minimum_severity": "medium",
+      "required_finding_categories": [
+        "convention_change_requested"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate asks to change a locked convention and must route to human review.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_019/evidence.md",
+          "role": "evidence",
+          "sha256": "6251e0b82c432394c53bf01aa64575ac702ab5ac5c8aefdd543949c1af71538c"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_019/implementation.py",
+          "role": "candidate",
+          "sha256": "28b301ee3bff80aa80145e118f73649a166ce8a3b4190ad98a348d8a2a887fbe"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [
+        "missing_required_evidence"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_020",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_020",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_020/contract.yaml",
+      "contract_sha256": "350197358691da2df8b61d9b2e433867e21cd41106f83a9352ceb9d9d5783f86",
+      "expected_route": "require_human_review",
+      "fixture_sha256": "c7c06e12b3ba5050a1f20ce9144a620e0159f011fa6a25e37b7cf387d67a05c9",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "minimum_severity": "medium",
+      "required_finding_categories": [
+        "oracle_failure"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "Valid analytic and numerical evidence conflict; the model cannot select an authority.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_020/evidence.md",
+          "role": "evidence",
+          "sha256": "d87f32da903e606ed0d0008d7cc56f383febbd6068f425fee8063157177703e5"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_020/implementation.py",
+          "role": "candidate",
+          "sha256": "95005ed953039b1afaea1206403becf0af1845cdbdf49db4631c038c127f8536"
+        }
+      ]
+    },
+    {
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_fixture_review_021",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "case_id": "case_021",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_021/contract.yaml",
+      "contract_sha256": "7aee15b44e895fe9052514682832657c241a3c427ff29eaca634d1cc9fa07ced",
+      "expected_route": "require_human_review",
+      "fixture_sha256": "a360197d196e033d0e366949bb0b08a6736917bb153bd516cef907f4a761fdc2",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "minimum_severity": "high",
+      "required_finding_categories": [
+        "new_physical_interpretation",
+        "unsupported_physical_claim"
+      ],
+      "schema_version": 1,
+      "seeded_defect": "The candidate introduces a new unsupported physical interpretation requiring human review.",
+      "sources": [
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_021/evidence.md",
+          "role": "evidence",
+          "sha256": "42f24678781b0b8aae8abc1e42db34c47cc496d4346dce5071ea130bb0b3aa78"
+        },
+        {
+          "path": "examples/physics_auditor/benchmark_v1/fixtures/case_021/implementation.py",
+          "role": "candidate",
+          "sha256": "b5a36321fa8ef6679ba9e869c871a92f6ec0d27a2cb99cde8b3cb2d52e3681de"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1
+}

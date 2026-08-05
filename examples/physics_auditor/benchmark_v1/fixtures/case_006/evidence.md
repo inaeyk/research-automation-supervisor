@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 006 observations
 
-Locked authority requires multiplication by the time step. The implementation adds velocity directly to position.
+For `(x, velocity, dt) = (1, 3, 0.25)`, the candidate returns `4`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

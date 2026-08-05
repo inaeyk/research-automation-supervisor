@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from research_automation_supervisor.durable_state import render_json_bytes
+from research_automation_supervisor.durable_state import atomic_write_bytes, render_json_bytes
 from research_automation_supervisor.errors import (
     PhysicsBenchmarkInputError,
     PhysicsBenchmarkIntegrityError,
@@ -18,6 +18,7 @@ from research_automation_supervisor.errors import (
 )
 from research_automation_supervisor.physics_auditor_execution import (
     CONTROL_DIRECTORY,
+    PROMPT_FILE,
     PROOF_FILE,
     PROVIDER_OBSERVATION_FILE,
     REPORT_FILE,
@@ -32,12 +33,16 @@ from research_automation_supervisor.physics_auditor_models import (
     PhysicsAuditorProviderObservationV1,
 )
 from research_automation_supervisor.physics_auditor_projection import (
+    PROJECTION_DIRECTORY,
     PROJECTION_MANIFEST_FILE,
 )
 from research_automation_supervisor.physics_benchmark import (
+    benchmark_scoring_observation,
+    load_validated_fixture_authority,
     seeded_authority_sha256,
     validate_benchmark_authority_separation,
     validate_physics_benchmark_records,
+    verify_auditor_visible_blindness,
     verify_projection_excludes_benchmark_authority,
 )
 from research_automation_supervisor.physics_benchmark_models import (
@@ -46,6 +51,7 @@ from research_automation_supervisor.physics_benchmark_models import (
     PhysicsBenchmarkFindingObservationV1,
     PhysicsBenchmarkRecoveryProofV1,
     PhysicsBenchmarkRunRecordV1,
+    PhysicsBenchmarkScoringIdentityV1,
     PhysicsBenchmarkStatusV1,
     PhysicsBenchmarkUsageV1,
     PhysicsBenchmarkWorkerRepairV1,
@@ -73,6 +79,7 @@ CodexInvokerFactory = Callable[
     [PhysicsBenchmarkCaseAuthorityV1, int], PhysicsAuditorCodexInvoker | None
 ]
 RepairResults = Mapping[str, PhysicsBenchmarkWorkerRepairV1]
+BenchmarkCheckpoint = Callable[[str], None]
 
 
 def physics_benchmark_status(
@@ -84,9 +91,7 @@ def physics_benchmark_status(
     """Inspect the next safe sequential action without writes or process launches."""
     selected = _selected_cases(catalog, case_ids)
     expected = tuple(
-        (case, repetition)
-        for case in selected
-        for repetition in range(1, case.repetitions + 1)
+        (case, repetition) for case in selected for repetition in range(1, case.repetitions + 1)
     )
     expected_record_paths = {
         output_directory
@@ -110,12 +115,7 @@ def physics_benchmark_status(
     partial = 0
     next_action: tuple[PhysicsBenchmarkCaseAuthorityV1, int] | None = None
     for case, repetition in expected:
-        action_output = (
-            output_directory
-            / case.case_id
-            / "actions"
-            / f"repetition-{repetition:03d}"
-        )
+        action_output = output_directory / case.case_id / "actions" / f"repetition-{repetition:03d}"
         record_path = action_output / "benchmark-record.json"
         if record_path.is_file():
             record = load_physics_benchmark_run_record(record_path)
@@ -159,6 +159,7 @@ def run_public_physics_benchmark(
     case_ids: Sequence[str] = (),
     codex_invoker_factory: CodexInvokerFactory | None = None,
     repair_results: RepairResults | None = None,
+    checkpoint: BenchmarkCheckpoint | None = None,
 ) -> tuple[PhysicsBenchmarkRunRecordV1, ...]:
     """Execute or safely resume the fixed sequential public benchmark design."""
     root = repository_root.resolve(strict=True)
@@ -167,6 +168,7 @@ def run_public_physics_benchmark(
         repository_root=root,
         catalog_path=catalog_path,
     )
+    _checkpoint(checkpoint, "authority_verified")
     selected = _selected_cases(catalog, case_ids)
     repairs = _validated_repair_results(catalog, repair_results or {})
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -180,6 +182,7 @@ def run_public_physics_benchmark(
             contract_path=contract_path,
             repository_root=root,
             case_output=case_output,
+            checkpoint=checkpoint,
         )
         for repetition in range(1, case.repetitions + 1):
             action_output = case_output / "actions" / f"repetition-{repetition:03d}"
@@ -202,8 +205,20 @@ def run_public_physics_benchmark(
             }
             if invoker is not None:
                 kwargs["codex_invoker"] = invoker
+            _checkpoint(
+                checkpoint,
+                f"{case.case_id}:repetition-{repetition:03d}:before_pa3_resume_or_launch",
+            )
             operation(**kwargs)
+            _checkpoint(
+                checkpoint,
+                f"{case.case_id}:repetition-{repetition:03d}:after_pa3_completion",
+            )
             result = verify_physics_auditor_action(**kwargs_without_invoker(kwargs))
+            _checkpoint(
+                checkpoint,
+                f"{case.case_id}:repetition-{repetition:03d}:after_pa3_proof_reverification",
+            )
             record = _record_from_action(
                 catalog=catalog,
                 catalog_path=catalog_path,
@@ -218,11 +233,16 @@ def run_public_physics_benchmark(
                 resumed=resumed,
                 known_session_hashes=session_hashes,
                 worker_repair=_repair_observation(case, repetition, repairs),
+                checkpoint=checkpoint,
             )
             _write_once_or_verify(
                 action_output / "benchmark-record.json",
                 render_json_bytes(record.model_dump(mode="json")),
                 "benchmark run record",
+            )
+            _checkpoint(
+                checkpoint,
+                f"{case.case_id}:repetition-{repetition:03d}:after_record_finalization",
             )
             records.append(record)
             if case.critical_seeded_defect and record.actual_route == "pass":
@@ -253,11 +273,7 @@ def _validated_repair_results(
             raise PhysicsBenchmarkInputError(
                 "repair calibration names an unknown benchmark case"
             ) from exc
-        if (
-            not case.worker_repair_appropriate
-            or not result.applicable
-            or not result.attempted
-        ):
+        if not case.worker_repair_appropriate or not result.applicable or not result.attempted:
             raise PhysicsBenchmarkInputError(
                 "repair calibration contradicts benchmark repair authority"
             )
@@ -311,6 +327,7 @@ def _prepare_oracle_evidence(
     contract_path: Path,
     repository_root: Path,
     case_output: Path,
+    checkpoint: BenchmarkCheckpoint | None,
 ) -> tuple[Path, tuple[Any, ...]]:
     evidence_root = case_output / "oracle-evidence"
     evidence_root.mkdir(parents=True, exist_ok=True)
@@ -330,6 +347,7 @@ def _prepare_oracle_evidence(
         if not oracle.required:
             continue
         output = evidence_root / oracle.id
+        _checkpoint(checkpoint, f"{case.case_id}:{oracle.id}:before_pa2_resume_or_launch")
         if output.exists():
             result = resume_physics_oracle(
                 catalog_path=catalog_path,
@@ -350,6 +368,7 @@ def _prepare_oracle_evidence(
         if result != verified:
             raise PhysicsBenchmarkIntegrityError("PA-2 result changed during verification")
         results.append(verified)
+        _checkpoint(checkpoint, f"{case.case_id}:{oracle.id}:after_pa2_proof_reverification")
     return evidence_root, tuple(results)
 
 
@@ -434,6 +453,7 @@ def _record_from_action(
     resumed: bool,
     known_session_hashes: set[str],
     worker_repair: PhysicsBenchmarkWorkerRepairV1 | None,
+    checkpoint: BenchmarkCheckpoint | None,
 ) -> PhysicsBenchmarkRunRecordV1:
     proof = _load_model(action_output / PROOF_FILE, PhysicsAuditorActionProofV1)
     projection = _load_model(
@@ -441,9 +461,7 @@ def _record_from_action(
         PhysicsAuditorProjectionManifestV1,
     )
     try:
-        catalog_relative = catalog_path.resolve(strict=True).relative_to(
-            repository_root
-        ).as_posix()
+        catalog_relative = catalog_path.resolve(strict=True).relative_to(repository_root).as_posix()
     except ValueError as exc:
         raise PhysicsBenchmarkIntegrityError(
             "benchmark answer-key authority escaped the repository"
@@ -452,7 +470,36 @@ def _record_from_action(
         (item.path for item in projection.objects),
         case=case,
         catalog_relative_path=catalog_relative,
+        fixture_authority_relative_path=catalog.fixture_authority_path,
     )
+    fixture_authority = load_validated_fixture_authority(
+        catalog,
+        repository_root=repository_root,
+    )
+    if fixture_authority is None:
+        manifest_sha256 = None
+        manifest = None
+    else:
+        try:
+            manifest = fixture_authority.manifest(case.case_id)
+            manifest_sha256 = manifest.canonical_sha256()
+        except KeyError as exc:
+            raise PhysicsBenchmarkIntegrityError(
+                "benchmark fixture authority was substituted"
+            ) from exc
+    if manifest is not None:
+        visible_root = action_output / PROJECTION_DIRECTORY
+        visible_files = {
+            item.path: (visible_root / item.path).read_bytes()
+            for item in projection.objects
+            if item.kind == "regular"
+        }
+        verify_auditor_visible_blindness(
+            visible_files,
+            prompt=(action_output / CONTROL_DIRECTORY / PROMPT_FILE).read_bytes(),
+            case=case,
+            fixture_authority=manifest,
+        )
     provider_path = action_output / PROVIDER_OBSERVATION_FILE
     provider = (
         _load_model(provider_path, PhysicsAuditorProviderObservationV1)
@@ -461,20 +508,22 @@ def _record_from_action(
     )
     report_path = action_output / REPORT_FILE
     report = _load_model(report_path, PhysicsAuditReportV1) if report_path.exists() else None
-    findings = tuple(
-        PhysicsBenchmarkFindingObservationV1(
-            finding_id=item.id,
-            category=item.category,
-            severity=item.severity,
-            status=item.status,
+    findings = (
+        tuple(
+            PhysicsBenchmarkFindingObservationV1(
+                finding_id=item.id,
+                category=item.category,
+                severity=item.severity,
+                status=item.status,
+            )
+            for item in report.findings
         )
-        for item in report.findings
-    ) if report is not None else ()
+        if report is not None
+        else ()
+    )
     actual_route = result.routing_decision.outcome if result.routing_decision is not None else None
     actual_verdict = report.verdict if report is not None else None
-    status: Literal[
-        "routing_completed", "malformed_report", "infrastructure_failure"
-    ] = (
+    status: Literal["routing_completed", "malformed_report", "infrastructure_failure"] = (
         "routing_completed"
         if result.status == "routing_completed"
         else "malformed_report"
@@ -496,16 +545,32 @@ def _record_from_action(
         for item in findings
         if (
             (case.clean_case and item.status == "open")
-            or (not case.clean_case and item.category not in case.required_finding_categories)
+            or (
+                not case.clean_case
+                and item.category
+                not in {
+                    *case.required_finding_categories,
+                    *case.acceptable_alternative_categories,
+                }
+            )
         )
     )
-    critical_detected = case.critical_seeded_defect and actual_route != "pass" and any(
-        item.status == "open"
-        and item.category in case.required_finding_categories
-        and item.severity in {"critical", "high"}
-        for item in findings
+    critical_detected = (
+        case.critical_seeded_defect
+        and actual_route != "pass"
+        and any(
+            item.status == "open"
+            and item.category
+            in {
+                *case.required_finding_categories,
+                *case.acceptable_alternative_categories,
+            }
+            and item.severity in {"critical", "high"}
+            for item in findings
+        )
     )
-    records = tuple((action_output / "action-records").glob("*.json"))
+    records = tuple(sorted((action_output / "action-records").glob("*.json")))
+    record_hashes = tuple(sorted(_sha256_file(path) for path in records))
     recovery_path = action_output / "benchmark-recovery-proof.json"
     if recovery_path.exists():
         recovery = _load_model(recovery_path, PhysicsBenchmarkRecoveryProofV1)
@@ -513,12 +578,14 @@ def _record_from_action(
             recovery.benchmark_id != catalog.benchmark_id
             or recovery.case_id != case.case_id
             or recovery.repetition != repetition
-            or set(recovery.pa2_action_ids)
-            != {item.request.action_id for item in oracle_results}
+            or set(recovery.pa2_action_ids) != {item.request.action_id for item in oracle_results}
             or set(recovery.pa2_completion_proof_sha256s)
             != {item.completion_proof_sha256 for item in oracle_results}
             or recovery.pa3_action_id != result.request.action_id
             or recovery.pa3_action_proof_sha256 != result.action_proof_sha256
+            or recovery.pa3_record_count != len(records)
+            or recovery.pa3_action_record_sha256s != record_hashes
+            or not recovery.proofs_reverified
         ):
             raise PhysicsBenchmarkIntegrityError(
                 "persisted benchmark recovery proof was substituted"
@@ -535,6 +602,7 @@ def _record_from_action(
             pa3_action_id=result.request.action_id,
             pa3_action_proof_sha256=result.action_proof_sha256,
             pa3_record_count=len(records),
+            pa3_action_record_sha256s=record_hashes,
             resumed_existing_action=resumed,
             duplicate_action_detected=False,
         )
@@ -543,48 +611,163 @@ def _record_from_action(
             render_json_bytes(recovery.model_dump(mode="json")),
             "benchmark recovery proof",
         )
+    _checkpoint(
+        checkpoint,
+        f"{case.case_id}:repetition-{repetition:03d}:after_recovery_proof_finalization",
+    )
     usage = _provider_usage(provider)
-    return PhysicsBenchmarkRunRecordV1(
-        benchmark_id=catalog.benchmark_id,
-        case_id=case.case_id,
-        category=case.category,
-        repetition=repetition,
-        fixture_sha256=fixture_hash,
-        contract_sha256=load_physics_task_contract(contract_path).canonical_sha256(),
-        seeded_defect_authority_sha256=seeded_authority_sha256(case),
-        expected_route=case.expected_route,
-        actual_report_verdict=actual_verdict,
-        actual_route=actual_route,
-        required_finding_categories=case.required_finding_categories,
-        findings=findings,
-        critical_defect_detected=critical_detected,
-        false_positive_finding_ids=false_positive,
-        run_status=status,
-        malformed_report=status == "malformed_report",
-        infrastructure_failure=status == "infrastructure_failure",
-        infrastructure_reason=(
+    values: dict[str, Any] = {
+        "benchmark_id": catalog.benchmark_id,
+        "case_id": case.case_id,
+        "category": case.category,
+        "repetition": repetition,
+        "fixture_sha256": fixture_hash,
+        "fixture_authority_sha256": manifest_sha256,
+        "contract_sha256": load_physics_task_contract(contract_path).canonical_sha256(),
+        "seeded_defect_authority_sha256": seeded_authority_sha256(case),
+        "expected_route": case.expected_route,
+        "acceptable_alternative_routes": case.acceptable_alternative_routes,
+        "actual_report_verdict": actual_verdict,
+        "actual_route": actual_route,
+        "required_finding_categories": case.required_finding_categories,
+        "acceptable_alternative_categories": case.acceptable_alternative_categories,
+        "forbidden_finding_categories": case.forbidden_finding_categories,
+        "minimum_severity": case.minimum_severity,
+        "findings": findings,
+        "critical_defect_detected": critical_detected,
+        "false_positive_finding_ids": false_positive,
+        "category_recognized": False,
+        "severity_matched": False,
+        "route_matched": False,
+        "evidence_valid": report is not None,
+        "required_categories_satisfied": False,
+        "acceptable_alternative_satisfied": False,
+        "forbidden_category_observed": False,
+        "forbidden_route_observed": False,
+        "run_status": status,
+        "malformed_report": status == "malformed_report",
+        "infrastructure_failure": status == "infrastructure_failure",
+        "infrastructure_reason": (
             result.failure_reason if status == "infrastructure_failure" else None
         ),
-        worker_repair=worker_repair,
-        fresh_session_identity_sha256=session,
-        session_reused=reused,
-        prompt_template_sha256=proof.prompt_template_sha256,
-        prompt_sha256=proof.canonical_prompt_sha256,
-        projection_sha256=proof.projection_manifest_sha256,
-        oracle_proof_manifest_sha256=proof.oracle_completion_proof_manifest_sha256,
-        action_proof_sha256=result.action_proof_sha256,
-        recovery_proof_sha256=recovery.canonical_sha256(),
-        duplicate_recovery_action_detected=False,
-        workspace_integrity=result.integrity_verdict,
-        projection_integrity=result.projected_workspace_integrity,
-        oracle_program_access_detected=result.oracle_execution_detected,
-        answer_key_exposure_detected=False,
-        yolo_inheritance_detected=False,
-        pa2_proofs_verified=True,
-        pa3_proof_verified=True,
-        duration_seconds=(provider.adapter_result.duration_seconds if provider else 0.0),
-        usage=usage,
+        "worker_repair": worker_repair,
+        "fresh_session_identity_sha256": session,
+        "session_reused": reused,
+        "prompt_template_sha256": proof.prompt_template_sha256,
+        "prompt_sha256": proof.canonical_prompt_sha256,
+        "projection_sha256": proof.projection_manifest_sha256,
+        "oracle_proof_manifest_sha256": proof.oracle_completion_proof_manifest_sha256,
+        "action_proof_sha256": result.action_proof_sha256,
+        "recovery_proof_sha256": recovery.canonical_sha256(),
+        "duplicate_recovery_action_detected": False,
+        "workspace_integrity": result.integrity_verdict,
+        "projection_integrity": result.projected_workspace_integrity,
+        "oracle_program_access_detected": result.oracle_execution_detected,
+        "answer_key_exposure_detected": False,
+        "yolo_inheritance_detected": False,
+        "pa2_proofs_verified": True,
+        "pa3_proof_verified": True,
+        "source_identities_verified": True,
+        "contract_identity_verified": True,
+        "projection_identity_verified": True,
+        "duration_seconds": (provider.adapter_result.duration_seconds if provider else 0.0),
+        "usage": usage,
+    }
+    provisional = PhysicsBenchmarkRunRecordV1(**values)
+    values.update(benchmark_scoring_observation(case, provisional))
+    return PhysicsBenchmarkRunRecordV1(**values)
+
+
+def verify_physics_benchmark_scoring_identities(
+    *,
+    catalog: PhysicsBenchmarkCatalogV1,
+    catalog_path: Path,
+    execution_config_path: Path,
+    repository_root: Path,
+    output_directory: Path,
+    records: Sequence[PhysicsBenchmarkRunRecordV1],
+) -> tuple[PhysicsBenchmarkScoringIdentityV1, ...]:
+    """Reverify source, contract, projection, PA-2, and PA-3 before scoring."""
+    root = repository_root.resolve(strict=True)
+    validate_benchmark_authority_separation(
+        catalog,
+        repository_root=root,
+        catalog_path=catalog_path,
     )
+    authority = load_validated_fixture_authority(catalog, repository_root=root)
+    if authority is None:
+        raise PhysicsBenchmarkIntegrityError(
+            "mechanical scoring verification requires fixture authority"
+        )
+    verified: list[PhysicsBenchmarkScoringIdentityV1] = []
+    for record in records:
+        case = catalog.case(record.case_id)
+        action_output = (
+            output_directory / case.case_id / "actions" / f"repetition-{record.repetition:03d}"
+        )
+        oracle_root = output_directory / case.case_id / "oracle-evidence"
+        oracle_results = (
+            tuple(
+                verify_physics_oracle_completion(path)
+                for path in sorted(oracle_root.iterdir())
+                if path.is_dir()
+            )
+            if oracle_root.exists()
+            else ()
+        )
+        result = verify_physics_auditor_action(
+            contract_path=root / case.contract_path,
+            execution_config_path=execution_config_path,
+            task_id=case.case_id,
+            workspace=root,
+            oracle_evidence_root=oracle_root,
+            output_directory=action_output,
+            attempt_number=record.repetition,
+        )
+        proof = _load_model(action_output / PROOF_FILE, PhysicsAuditorActionProofV1)
+        projection = _load_model(
+            action_output / CONTROL_DIRECTORY / PROJECTION_MANIFEST_FILE,
+            PhysicsAuditorProjectionManifestV1,
+        )
+        recovery = _load_model(
+            action_output / "benchmark-recovery-proof.json",
+            PhysicsBenchmarkRecoveryProofV1,
+        )
+        manifest = authority.manifest(case.case_id)
+        pa2_hashes = tuple(item.completion_proof_sha256 for item in oracle_results)
+        if (
+            record.fixture_authority_sha256 != manifest.canonical_sha256()
+            or record.fixture_sha256 != manifest.fixture_sha256
+            or record.contract_sha256 != manifest.contract_sha256
+            or record.projection_sha256 != projection.canonical_sha256()
+            or proof.projection_manifest_sha256 != projection.canonical_sha256()
+            or record.action_proof_sha256 != result.action_proof_sha256
+            or proof.canonical_sha256() != result.action_proof_sha256
+            or set(pa2_hashes) != set(recovery.pa2_completion_proof_sha256s)
+            or record.recovery_proof_sha256 != recovery.canonical_sha256()
+        ):
+            raise PhysicsBenchmarkIntegrityError(
+                "source or proof identity changed before benchmark scoring"
+            )
+        verified.append(
+            PhysicsBenchmarkScoringIdentityV1(
+                case_id=case.case_id,
+                repetition=record.repetition,
+                fixture_authority_sha256=manifest.canonical_sha256(),
+                fixture_sha256=manifest.fixture_sha256,
+                contract_sha256=manifest.contract_sha256,
+                projection_sha256=projection.canonical_sha256(),
+                pa2_completion_proof_sha256s=pa2_hashes,
+                pa3_action_proof_sha256=result.action_proof_sha256,
+                recovery_proof_sha256=recovery.canonical_sha256(),
+                source_identities_verified=True,
+                contract_identity_verified=True,
+                projection_identity_verified=True,
+                pa2_proofs_verified=True,
+                pa3_proof_verified=True,
+            )
+        )
+    return tuple(verified)
 
 
 def _provider_usage(
@@ -619,9 +802,11 @@ def _provider_usage(
 def _collect_usage(value: object, totals: dict[str, int]) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in {"input_tokens", "output_tokens", "cached_input_tokens"} and isinstance(
-                item, int
-            ) and item >= 0:
+            if (
+                key in {"input_tokens", "output_tokens", "cached_input_tokens"}
+                and isinstance(item, int)
+                and item >= 0
+            ):
                 totals[key] = max(totals.get(key, 0), item)
             else:
                 _collect_usage(item, totals)
@@ -647,11 +832,12 @@ def _write_once_or_verify(path: Path, value: bytes, label: str) -> None:
         if current != value:
             raise PhysicsBenchmarkStateError(f"existing {label} contradicts recovery")
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_bytes(value)
-    except OSError as exc:
-        raise PhysicsBenchmarkStateError(f"could not persist {label}") from exc
+    atomic_write_bytes(
+        path,
+        value,
+        error_factory=PhysicsBenchmarkStateError,
+        error_message=f"could not persist {label}",
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -663,3 +849,8 @@ def _sha256_file(path: Path) -> str:
 
 def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is forbidden: {value}")
+
+
+def _checkpoint(checkpoint: BenchmarkCheckpoint | None, name: str) -> None:
+    if checkpoint is not None:
+        checkpoint(name)

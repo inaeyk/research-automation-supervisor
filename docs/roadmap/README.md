@@ -3,12 +3,12 @@
 These documents describe both qualified foundations and later implementation plans.
 Version 0.2.0 remains sequential and Codex-backed. Physics Auditor PA-1 strict schemas
 and model-free routing, PA-2 trusted oracle execution, standalone PA-3, PA-4 workflow
-integration, and PA-5A recovery are qualified. The public PA-5B quality harness is
-implemented, but answer-key exposure found by independent audits invalidated the first
-fixed real benchmark and bounded GL pilot. See the
-[PA-5B methodology and results](../physics_auditor_benchmark.md). PA-6 is not
-authorized. Provider-neutral adapters, parallel DAG campaigns, and broader physics
-research profiles follow only after their stated release gates pass.
+integration, and PA-5A recovery are qualified. Answer-key exposure invalidated the
+first PA-5B real benchmark and bounded GL pilot. PA-5C qualifies the remediated
+benchmark machinery with scripted agents only; no replacement scientific score exists.
+See the [PA-5C machinery methodology](../physics_auditor_benchmark.md). A fresh real run
+is PA-5D. PA-6 is not authorized. Provider-neutral adapters, parallel DAG campaigns,
+and broader physics research profiles follow only after their stated release gates pass.
 
 - [0.3–0.6 upgrade program](upgrade_program_0.3_to_0.6.md)
 - [Physics Auditor v1](physics_auditor_v1.md)

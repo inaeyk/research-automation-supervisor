@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import statistics
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
-from research_automation_supervisor.durable_state import render_json_bytes
+from research_automation_supervisor.durable_state import atomic_write_bytes, render_json_bytes
 from research_automation_supervisor.errors import (
     PhysicsBenchmarkInputError,
     PhysicsBenchmarkIntegrityError,
@@ -19,11 +19,14 @@ from research_automation_supervisor.physics_benchmark_models import (
     PhysicsBenchmarkCaseAuthorityV1,
     PhysicsBenchmarkCatalogV1,
     PhysicsBenchmarkCategoryMetricsV1,
+    PhysicsBenchmarkFixtureAuthoritySetV1,
     PhysicsBenchmarkHardGatesV1,
     PhysicsBenchmarkMetricSetV1,
     PhysicsBenchmarkReportV1,
     PhysicsBenchmarkRunRecordV1,
+    PhysicsBenchmarkScoringIdentityV1,
     PhysicsBenchmarkThresholdOutcomeV1,
+    load_physics_benchmark_fixture_authority,
 )
 from research_automation_supervisor.physics_models import load_physics_task_contract
 
@@ -35,6 +38,12 @@ _ANSWER_KEY_FIELD_NAMES = frozenset(
         "required_finding_categories",
         "seeded_defect_authority",
         "worker_repair_appropriate",
+        "acceptable_alternative_categories",
+        "acceptable_alternative_routes",
+        "forbidden_finding_categories",
+        "human_review_mandatory",
+        "minimum_severity",
+        "seed_kind",
     }
 )
 _HUMAN_SEED_KINDS = frozenset(
@@ -55,10 +64,14 @@ def seeded_authority_sha256(case: PhysicsBenchmarkCaseAuthorityV1) -> str:
         "case_id": case.case_id,
         "critical_seeded_defect": case.critical_seeded_defect,
         "expected_route": case.expected_route,
+        "acceptable_alternative_categories": list(case.acceptable_alternative_categories),
+        "acceptable_alternative_routes": list(case.acceptable_alternative_routes),
+        "forbidden_finding_categories": list(case.forbidden_finding_categories),
         "forbidden_routes": list(case.forbidden_routes),
         "human_review_mandatory": case.human_review_mandatory,
         "required_evidence_ids": list(case.required_evidence_ids),
         "required_finding_categories": list(case.required_finding_categories),
+        "minimum_severity": case.minimum_severity,
         "seed_kind": case.seed_kind,
         "seeded_defect_authority": case.seeded_defect_authority,
         "worker_repair_appropriate": case.worker_repair_appropriate,
@@ -66,6 +79,32 @@ def seeded_authority_sha256(case: PhysicsBenchmarkCaseAuthorityV1) -> str:
     from research_automation_supervisor.durable_state import canonical_json
 
     return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def load_validated_fixture_authority(
+    catalog: PhysicsBenchmarkCatalogV1,
+    *,
+    repository_root: Path,
+) -> PhysicsBenchmarkFixtureAuthoritySetV1 | None:
+    """Load and bind the PA-5C scorer-only authority without exposing it to PA-3."""
+    if catalog.fixture_authority_path is None:
+        return None
+    authority_path = _inside(
+        repository_root.resolve(strict=True),
+        repository_root / catalog.fixture_authority_path,
+        "fixture authority",
+    )
+    authority = load_physics_benchmark_fixture_authority(authority_path)
+    if (
+        authority.benchmark_id != catalog.benchmark_id
+        or authority.canonical_sha256() != catalog.fixture_authority_sha256
+        or {item.case_id for item in authority.manifests}
+        != {item.case_id for item in catalog.cases}
+    ):
+        raise PhysicsBenchmarkIntegrityError(
+            "fixture authority identity contradicts the benchmark catalog"
+        )
+    return authority
 
 
 def fixture_sha256(root: Path) -> str:
@@ -116,11 +155,20 @@ def validate_benchmark_authority_separation(
             "public benchmark authority must be repository-bound"
         ) from exc
 
+    fixture_authority = load_validated_fixture_authority(
+        catalog,
+        repository_root=root,
+    )
+    authority_paths = {authority}
+    if catalog.fixture_authority_path is not None:
+        authority_paths.add(
+            _inside(root, root / catalog.fixture_authority_path, "fixture authority")
+        )
     fixture_hashes: dict[str, str] = {}
     for case in catalog.cases:
         fixture = _inside(root, root / case.fixture_root, "fixture root")
         contract_path = _inside(root, root / case.contract_path, "contract")
-        if authority == fixture or fixture in authority.parents:
+        if any(item == fixture or fixture in item.parents for item in authority_paths):
             raise PhysicsBenchmarkIntegrityError("answer-key authority overlaps a fixture root")
         if fixture not in contract_path.parents:
             raise PhysicsBenchmarkIntegrityError("case contract must be inside its fixture root")
@@ -140,7 +188,7 @@ def validate_benchmark_authority_separation(
                 raise PhysicsBenchmarkIntegrityError(
                     "auditor-visible evidence escapes its opaque fixture root"
                 )
-            if evidence == authority:
+            if evidence in authority_paths:
                 raise PhysicsBenchmarkIntegrityError("answer-key authority is declared evidence")
         for relative in case.oracle_program_paths:
             program = _inside(root, root / relative, "oracle program")
@@ -150,8 +198,65 @@ def validate_benchmark_authority_separation(
                 raise PhysicsBenchmarkIntegrityError(
                     "oracle executable is declared as Physics Auditor evidence"
                 )
-        fixture_hashes[case.case_id] = fixture_sha256(fixture)
+        fixture_hash = fixture_sha256(fixture)
+        fixture_hashes[case.case_id] = fixture_hash
+        if fixture_authority is not None:
+            try:
+                manifest = fixture_authority.manifest(case.case_id)
+            except KeyError as exc:
+                raise PhysicsBenchmarkIntegrityError(
+                    "fixture authority omits a catalog case"
+                ) from exc
+            _verify_fixture_manifest(
+                root=root,
+                case=case,
+                manifest=manifest,
+                fixture_hash=fixture_hash,
+                contract_sha256=contract.canonical_sha256(),
+            )
     return fixture_hashes
+
+
+def _verify_fixture_manifest(
+    *,
+    root: Path,
+    case: PhysicsBenchmarkCaseAuthorityV1,
+    manifest: object,
+    fixture_hash: str,
+    contract_sha256: str,
+) -> None:
+    from research_automation_supervisor.physics_benchmark_models import (
+        PhysicsBenchmarkFixtureAuthorityV1,
+    )
+
+    if not isinstance(manifest, PhysicsBenchmarkFixtureAuthorityV1):
+        raise PhysicsBenchmarkIntegrityError("fixture authority manifest type is invalid")
+    expected = {
+        "case_id": case.case_id,
+        "fixture_sha256": fixture_hash,
+        "contract_path": case.contract_path,
+        "contract_sha256": contract_sha256,
+        "seeded_defect": case.seeded_defect_authority,
+        "expected_route": case.expected_route,
+        "acceptable_alternative_routes": case.acceptable_alternative_routes,
+        "forbidden_routes": case.forbidden_routes,
+        "required_finding_categories": case.required_finding_categories,
+        "acceptable_alternative_categories": case.acceptable_alternative_categories,
+        "forbidden_finding_categories": case.forbidden_finding_categories,
+        "minimum_severity": case.minimum_severity,
+        "human_review_mandatory": case.human_review_mandatory,
+    }
+    observed = {key: getattr(manifest, key) for key in expected}
+    if observed != expected:
+        raise PhysicsBenchmarkIntegrityError(
+            "fixture authority manifest contradicts catalog or visible source identity"
+        )
+    for source in manifest.sources:
+        path = _inside(root, root / source.path, "fixture authority source")
+        if not path.is_file() or path.is_symlink():
+            raise PhysicsBenchmarkInputError("fixture authority source is not regular")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != source.sha256:
+            raise PhysicsBenchmarkIntegrityError("fixture authority source hash changed")
 
 
 def verify_projection_excludes_benchmark_authority(
@@ -159,10 +264,13 @@ def verify_projection_excludes_benchmark_authority(
     *,
     case: PhysicsBenchmarkCaseAuthorityV1,
     catalog_relative_path: str,
+    fixture_authority_relative_path: str | None = None,
 ) -> None:
     """Fail closed if a finalized PA-3 projection names an answer key or oracle program."""
     visible = frozenset(projected_paths)
     forbidden = {catalog_relative_path, *case.oracle_program_paths}
+    if fixture_authority_relative_path is not None:
+        forbidden.add(fixture_authority_relative_path)
     overlap = sorted(visible & forbidden)
     if overlap:
         raise PhysicsBenchmarkIntegrityError(
@@ -171,15 +279,57 @@ def verify_projection_excludes_benchmark_authority(
         )
 
 
+def verify_auditor_visible_blindness(
+    visible_files: Mapping[str, bytes],
+    *,
+    prompt: bytes,
+    case: PhysicsBenchmarkCaseAuthorityV1,
+    fixture_authority: object,
+) -> None:
+    """Reject authority keys, diagnoses, labels, and approvals in exact PA-3 input."""
+    from research_automation_supervisor.physics_benchmark_models import (
+        PhysicsBenchmarkFixtureAuthorityV1,
+    )
+
+    if not isinstance(fixture_authority, PhysicsBenchmarkFixtureAuthorityV1):
+        raise PhysicsBenchmarkIntegrityError("fixture authority manifest type is invalid")
+    combined = b"\n".join((prompt, *[visible_files[key] for key in sorted(visible_files)]))
+    forbidden_tokens = {
+        *(item.encode("utf-8") for item in _ANSWER_KEY_FIELD_NAMES),
+        case.seed_kind.encode("utf-8"),
+        case.seeded_defect_authority.encode("utf-8"),
+        case.category.encode("utf-8"),
+        fixture_authority.approval.review_id.encode("utf-8"),
+        fixture_authority.approval.reviewer_role.encode("utf-8"),
+        b"acceptable_alternative_routes",
+        b"forbidden_finding_categories",
+        b"fixture_authority_sha256",
+    }
+    exposed = sorted(
+        token.decode("utf-8") for token in forbidden_tokens if token and token in combined
+    )
+    if exposed:
+        raise PhysicsBenchmarkIntegrityError(
+            "Physics Auditor input exposes scorer-only fixture authority: " + ", ".join(exposed)
+        )
+
+
 def score_physics_benchmark(
     catalog: PhysicsBenchmarkCatalogV1,
     records: Sequence[PhysicsBenchmarkRunRecordV1],
     *,
+    fixture_authority: PhysicsBenchmarkFixtureAuthoritySetV1 | None = None,
+    identity_verifications: Sequence[PhysicsBenchmarkScoringIdentityV1] = (),
     ordinary_nonphysics_unchanged: bool,
     limitations: Sequence[str],
 ) -> PhysicsBenchmarkReportV1:
     """Score semantic outcomes without comparing model prose."""
-    validated = _validate_records(catalog, records)
+    validated = _validate_records(
+        catalog,
+        records,
+        fixture_authority=fixture_authority,
+        identity_verifications=identity_verifications,
+    )
     expected_count = sum(case.repetitions for case in catalog.cases)
     complete = len(validated) == expected_count
     aggregate = _metrics(catalog, validated)
@@ -196,8 +346,8 @@ def score_physics_benchmark(
         ordinary_nonphysics_unchanged=ordinary_nonphysics_unchanged,
     )
     threshold_outcomes = _threshold_outcomes(catalog, aggregate)
-    qualified = complete and hard_gates.passed() and all(
-        outcome.passed for outcome in threshold_outcomes
+    qualified = (
+        complete and hard_gates.passed() and all(outcome.passed for outcome in threshold_outcomes)
     )
     return PhysicsBenchmarkReportV1(
         benchmark_id=catalog.benchmark_id,
@@ -221,14 +371,25 @@ def validate_physics_benchmark_records(
     records: Sequence[PhysicsBenchmarkRunRecordV1],
 ) -> tuple[PhysicsBenchmarkRunRecordV1, ...]:
     """Validate run-record identity and semantic scoring fields without aggregating."""
-    return _validate_records(catalog, records)
+    return _validate_records(
+        catalog,
+        records,
+        fixture_authority=None,
+        identity_verifications=(),
+        require_scoring_verification=False,
+    )
 
 
 def render_physics_benchmark_markdown(report: PhysicsBenchmarkReportV1) -> str:
     """Render a concise deterministic companion to the complete JSON result."""
     metric = report.aggregate
+    stage = (
+        "PA-5C"
+        if report.methodology_version == "physics_auditor_pa5c_remediation_v1"
+        else "PA-5B"
+    )
     lines = [
-        "# Physics Auditor PA-5B benchmark summary",
+        f"# Physics Auditor {stage} benchmark summary",
         "",
         f"Qualification verdict: **{report.qualification_verdict.replace('_', ' ')}**",
         "",
@@ -310,9 +471,7 @@ def finalize_physics_benchmark_report(
     """Create or verify immutable JSON/Markdown aggregates; safe after interruption."""
     output_directory.mkdir(parents=True, exist_ok=True)
     json_name = "physics_auditor_pa5b.json" if validation_layout else "benchmark-report.json"
-    markdown_name = (
-        "physics_auditor_pa5b.md" if validation_layout else "benchmark-summary.md"
-    )
+    markdown_name = "physics_auditor_pa5b.md" if validation_layout else "benchmark-summary.md"
     json_path = output_directory / json_name
     markdown_path = output_directory / markdown_name
     _write_once_or_verify(
@@ -331,12 +490,28 @@ def finalize_physics_benchmark_report(
 def _validate_records(
     catalog: PhysicsBenchmarkCatalogV1,
     records: Sequence[PhysicsBenchmarkRunRecordV1],
+    *,
+    fixture_authority: PhysicsBenchmarkFixtureAuthoritySetV1 | None,
+    identity_verifications: Sequence[PhysicsBenchmarkScoringIdentityV1],
+    require_scoring_verification: bool = True,
 ) -> tuple[PhysicsBenchmarkRunRecordV1, ...]:
     if len(records) > sum(case.repetitions for case in catalog.cases):
         raise PhysicsBenchmarkInputError("benchmark contains more runs than predeclared")
     seen: set[tuple[str, int]] = set()
     validated: list[PhysicsBenchmarkRunRecordV1] = []
     session_hashes: set[str] = set()
+    identities = {(item.case_id, item.repetition): item for item in identity_verifications}
+    if len(identities) != len(identity_verifications):
+        raise PhysicsBenchmarkInputError("scoring identity keys must be unique")
+    if catalog.methodology_version == "physics_auditor_pa5c_remediation_v1":
+        if fixture_authority is None and require_scoring_verification:
+            raise PhysicsBenchmarkIntegrityError(
+                "PA-5C scoring requires the separated fixture authority"
+            )
+        if require_scoring_verification and len(identities) != len(records):
+            raise PhysicsBenchmarkIntegrityError(
+                "PA-5C scoring requires mechanical identity verification for every record"
+            )
     for record in records:
         key = (record.case_id, record.repetition)
         if key in seen:
@@ -353,13 +528,33 @@ def _validate_records(
             or record.category != case.category
             or record.expected_route != case.expected_route
             or record.required_finding_categories != case.required_finding_categories
+            or record.acceptable_alternative_categories != case.acceptable_alternative_categories
+            or record.forbidden_finding_categories != case.forbidden_finding_categories
+            or record.minimum_severity != case.minimum_severity
+            or record.acceptable_alternative_routes != case.acceptable_alternative_routes
             or record.seeded_defect_authority_sha256 != seeded_authority_sha256(case)
         ):
             raise PhysicsBenchmarkIntegrityError("run record disagrees with benchmark authority")
+        manifest = None
+        if fixture_authority is not None:
+            try:
+                manifest = fixture_authority.manifest(case.case_id)
+            except KeyError as exc:
+                raise PhysicsBenchmarkIntegrityError(
+                    "run record fixture authority is missing"
+                ) from exc
+            if record.fixture_authority_sha256 != manifest.canonical_sha256():
+                raise PhysicsBenchmarkIntegrityError(
+                    "run record does not bind its fixture authority manifest"
+                )
+        recognized_categories = {
+            *case.required_finding_categories,
+            *case.acceptable_alternative_categories,
+        }
         finding_ids = {
             item.finding_id
             for item in record.findings
-            if item.category not in case.required_finding_categories
+            if item.category not in recognized_categories
         }
         if case.clean_case:
             finding_ids = {item.finding_id for item in record.findings if item.status == "open"}
@@ -369,12 +564,37 @@ def _validate_records(
         if case.critical_seeded_defect and record.actual_route != "pass":
             expected_detected = any(
                 item.status == "open"
-                and item.category in case.required_finding_categories
+                and item.category in recognized_categories
                 and item.severity in {"critical", "high"}
                 for item in record.findings
             )
         if record.critical_defect_detected != expected_detected:
             raise PhysicsBenchmarkIntegrityError("critical-defect detection was scored incorrectly")
+        observation = benchmark_scoring_observation(case, record)
+        for field, expected_value in observation.items():
+            if getattr(record, field) != expected_value:
+                raise PhysicsBenchmarkIntegrityError(
+                    f"benchmark {field.replace('_', '-')} was scored incorrectly"
+                )
+        identity = identities.get(key)
+        if identity is not None:
+            manifest_sha = manifest.canonical_sha256() if manifest is not None else None
+            if (
+                identity.fixture_authority_sha256 != manifest_sha
+                or identity.fixture_sha256 != record.fixture_sha256
+                or identity.contract_sha256 != record.contract_sha256
+                or identity.projection_sha256 != record.projection_sha256
+                or identity.pa3_action_proof_sha256 != record.action_proof_sha256
+                or identity.recovery_proof_sha256 != record.recovery_proof_sha256
+                or not record.source_identities_verified
+                or not record.contract_identity_verified
+                or not record.projection_identity_verified
+                or not record.pa2_proofs_verified
+                or not record.pa3_proof_verified
+            ):
+                raise PhysicsBenchmarkIntegrityError(
+                    "run record contradicts mechanical scoring identity verification"
+                )
         session = record.fresh_session_identity_sha256
         if session is not None:
             reused = session in session_hashes
@@ -390,6 +610,49 @@ def _validate_records(
     return tuple(sorted(validated, key=lambda item: (item.case_id, item.repetition)))
 
 
+_SEVERITY_RANK = {
+    "informational": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+
+def benchmark_scoring_observation(
+    case: PhysicsBenchmarkCaseAuthorityV1,
+    record: PhysicsBenchmarkRunRecordV1,
+) -> dict[str, bool]:
+    open_findings = tuple(item for item in record.findings if item.status == "open")
+    categories = {item.category for item in open_findings}
+    required = set(case.required_finding_categories)
+    alternatives = set(case.acceptable_alternative_categories)
+    required_satisfied = required.issubset(categories)
+    alternative_satisfied = bool(alternatives & categories) and not required_satisfied
+    recognized = (
+        required_satisfied or alternative_satisfied if required or alternatives else not categories
+    )
+    severity_matched = not (required or alternatives)
+    if case.minimum_severity is not None:
+        accepted_categories = required | alternatives
+        severity_matched = any(
+            item.category in accepted_categories
+            and _SEVERITY_RANK[item.severity] >= _SEVERITY_RANK[case.minimum_severity]
+            for item in open_findings
+        )
+    return {
+        "category_recognized": recognized,
+        "severity_matched": severity_matched,
+        "route_matched": record.actual_route
+        in {case.expected_route, *case.acceptable_alternative_routes},
+        "evidence_valid": record.evidence_valid,
+        "required_categories_satisfied": required_satisfied,
+        "acceptable_alternative_satisfied": alternative_satisfied,
+        "forbidden_category_observed": bool(categories & set(case.forbidden_finding_categories)),
+        "forbidden_route_observed": record.actual_route in case.forbidden_routes,
+    }
+
+
 def _metrics(
     catalog: PhysicsBenchmarkCatalogV1,
     records: Sequence[PhysicsBenchmarkRunRecordV1],
@@ -397,9 +660,7 @@ def _metrics(
     critical = [item for item in records if catalog.case(item.case_id).critical_seeded_defect]
     clean = [item for item in records if catalog.case(item.case_id).clean_case]
     repair = [
-        item
-        for item in records
-        if catalog.case(item.case_id).expected_route == "request_repair"
+        item for item in records if catalog.case(item.case_id).expected_route == "request_repair"
     ]
     human = [
         item
@@ -418,14 +679,10 @@ def _metrics(
     ]
     duration = [item.duration_seconds for item in records]
     input_usage = [
-        item.usage.input_tokens
-        for item in records
-        if item.usage.input_tokens is not None
+        item.usage.input_tokens for item in records if item.usage.input_tokens is not None
     ]
     output_usage = [
-        item.usage.output_tokens
-        for item in records
-        if item.usage.output_tokens is not None
+        item.usage.output_tokens for item in records if item.usage.output_tokens is not None
     ]
     route_consistency, finding_consistency = _consistency(records)
     return PhysicsBenchmarkMetricSetV1(
@@ -433,17 +690,12 @@ def _metrics(
         critical_defect_detection_rate=_rate(
             sum(item.critical_defect_detected for item in critical), len(critical)
         ),
-        false_pass_rate=_rate(
-            sum(item.actual_route == "pass" for item in critical), len(critical)
-        ),
-        clean_case_pass_rate=_rate(
-            sum(item.actual_route == "pass" for item in clean), len(clean)
-        ),
+        false_pass_rate=_rate(sum(item.actual_route == "pass" for item in critical), len(critical)),
+        clean_case_pass_rate=_rate(sum(item.actual_route == "pass" for item in clean), len(clean)),
         false_critical_finding_rate=_rate(
             sum(
                 any(
-                    finding.status == "open"
-                    and finding.severity in {"critical", "high"}
+                    finding.status == "open" and finding.severity in {"critical", "high"}
                     for finding in item.findings
                 )
                 for item in clean
@@ -452,12 +704,8 @@ def _metrics(
         ),
         correct_repair_routing_rate=_route_rate(repair, "request_repair"),
         correct_human_escalation_rate=_route_rate(human, "require_human_review"),
-        correct_insufficient_evidence_rate=_route_rate(
-            insufficient, "block_insufficient_evidence"
-        ),
-        malformed_report_rate=_rate(
-            sum(item.malformed_report for item in records), len(records)
-        ),
+        correct_insufficient_evidence_rate=_route_rate(insufficient, "block_insufficient_evidence"),
+        malformed_report_rate=_rate(sum(item.malformed_report for item in records), len(records)),
         infrastructure_failure_rate=_rate(
             sum(item.infrastructure_failure for item in records), len(records)
         ),
@@ -466,6 +714,37 @@ def _metrics(
         ),
         repeated_run_route_consistency=route_consistency,
         finding_category_consistency=finding_consistency,
+        category_recognition_rate=_rate(
+            sum(item.category_recognized for item in records), len(records)
+        ),
+        severity_match_rate=_rate(sum(item.severity_matched for item in records), len(records)),
+        route_match_rate=_rate(sum(item.route_matched for item in records), len(records)),
+        evidence_validity_rate=_rate(sum(item.evidence_valid for item in records), len(records)),
+        required_categories_satisfaction_rate=_rate(
+            sum(
+                item.required_categories_satisfied
+                for item in records
+                if catalog.case(item.case_id).required_finding_categories
+            ),
+            sum(bool(catalog.case(item.case_id).required_finding_categories) for item in records),
+        ),
+        acceptable_alternative_satisfaction_rate=_rate(
+            sum(
+                item.required_categories_satisfied or item.acceptable_alternative_satisfied
+                for item in records
+                if catalog.case(item.case_id).acceptable_alternative_categories
+            ),
+            sum(
+                bool(catalog.case(item.case_id).acceptable_alternative_categories)
+                for item in records
+            ),
+        ),
+        forbidden_category_rate=_rate(
+            sum(item.forbidden_category_observed for item in records), len(records)
+        ),
+        forbidden_route_rate=_rate(
+            sum(item.forbidden_route_observed for item in records), len(records)
+        ),
         median_duration_seconds=_median(duration),
         median_input_tokens=_median(input_usage),
         median_output_tokens=_median(output_usage),
@@ -488,13 +767,7 @@ def _consistency(
         routes = [item.actual_route or item.run_status for item in items]
         category_sets = [
             tuple(
-                sorted(
-                    {
-                        finding.category
-                        for finding in item.findings
-                        if finding.status == "open"
-                    }
-                )
+                sorted({finding.category for finding in item.findings if finding.status == "open"})
             )
             for item in items
         ]
@@ -515,7 +788,8 @@ def _hard_gates(
     missing = [
         item
         for item in records
-        if catalog.case(item.case_id).seed_kind in {
+        if catalog.case(item.case_id).seed_kind
+        in {
             "insufficient_evidence",
             "false_convergence_claim",
             "norm_sensitivity_claim",
@@ -537,6 +811,19 @@ def _hard_gates(
         ),
         zero_duplicate_recovery_actions=not any(
             item.duplicate_recovery_action_detected for item in records
+        ),
+        zero_forbidden_categories=not any(item.forbidden_category_observed for item in records),
+        zero_forbidden_routes=not any(item.forbidden_route_observed for item in records),
+        all_evidence_references_valid=all(item.evidence_valid for item in records),
+        all_categories_recognized=all(item.category_recognized for item in records),
+        all_required_severities_matched=all(item.severity_matched for item in records),
+        all_source_contract_projection_proofs_verified=all(
+            item.source_identities_verified
+            and item.contract_identity_verified
+            and item.projection_identity_verified
+            and item.pa2_proofs_verified
+            and item.pa3_proof_verified
+            for item in records
         ),
         all_malformed_reports_failed_closed=all(
             item.actual_route is None for item in records if item.malformed_report
@@ -603,11 +890,7 @@ def _threshold_outcomes(
             observed=observed,
             passed=(
                 observed is not None
-                and (
-                    observed >= threshold
-                    if comparator == "at_least"
-                    else observed <= threshold
-                )
+                and (observed >= threshold if comparator == "at_least" else observed <= threshold)
             ),
         )
         for name, comparator, threshold, observed in values
@@ -635,9 +918,7 @@ def _group_by_category(
     return groups
 
 
-def _route_rate(
-    records: Sequence[PhysicsBenchmarkRunRecordV1], expected: str
-) -> float | None:
+def _route_rate(records: Sequence[PhysicsBenchmarkRunRecordV1], expected: str) -> float | None:
     return _rate(sum(item.actual_route == expected for item in records), len(records))
 
 
@@ -679,10 +960,12 @@ def _write_once_or_verify(path: Path, value: bytes, label: str) -> None:
         if current != value:
             raise PhysicsBenchmarkStateError(f"existing {label} contradicts recovered result")
         return
-    try:
-        path.write_bytes(value)
-    except OSError as exc:
-        raise PhysicsBenchmarkStateError(f"could not finalize {label}") from exc
+    atomic_write_bytes(
+        path,
+        value,
+        error_factory=PhysicsBenchmarkStateError,
+        error_message=f"could not finalize {label}",
+    )
 
 
 def _format_metric(value: float | None) -> str:
@@ -705,6 +988,20 @@ def _display_metrics(
         ("Repair success rate", metric.repair_success_rate),
         ("Repeated-run route consistency", metric.repeated_run_route_consistency),
         ("Finding-category consistency", metric.finding_category_consistency),
+        ("Category-recognition rate", metric.category_recognition_rate),
+        ("Severity-match rate", metric.severity_match_rate),
+        ("Route-match rate", metric.route_match_rate),
+        ("Evidence-validity rate", metric.evidence_validity_rate),
+        (
+            "Required-category satisfaction rate",
+            metric.required_categories_satisfaction_rate,
+        ),
+        (
+            "Acceptable-alternative satisfaction rate",
+            metric.acceptable_alternative_satisfaction_rate,
+        ),
+        ("Forbidden-category rate", metric.forbidden_category_rate),
+        ("Forbidden-route rate", metric.forbidden_route_rate),
         ("Median duration (seconds)", metric.median_duration_seconds),
         ("Median input tokens", metric.median_input_tokens),
         ("Median output tokens", metric.median_output_tokens),

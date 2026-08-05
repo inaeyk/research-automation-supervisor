@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 007 observations
 
-The candidate diagonal is (2,-1,0), whose Euclidean trace is 1, although the implementation labels it trace-free.
+The candidate diagonal components are `(2, -1, 0)` and its `trace()` function returns
+their sum.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

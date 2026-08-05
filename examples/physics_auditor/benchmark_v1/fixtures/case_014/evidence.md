@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 014 observations
 
-The candidate matches the declared pure-gauge generator to numerical tolerance but is labeled a physical mode.
+The measured overlap with the declared gauge generator is `0.999`. The candidate
+classification is `physical`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

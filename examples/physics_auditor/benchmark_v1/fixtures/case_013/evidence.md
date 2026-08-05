@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 013 observations
 
-The locked projection diagnostic assigns 92 percent of the candidate energy to the constraint subspace. The candidate labels it physical.
+The declared projection diagnostic gives a constraint-subspace energy fraction of
+`0.92`. The candidate classification is `physical`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

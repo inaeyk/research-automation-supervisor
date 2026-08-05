@@ -73,6 +73,7 @@ PhysicsBenchmarkRunStatus: TypeAlias = Literal[
 ]
 UsageAvailability: TypeAlias = Literal["provider_reported", "unavailable"]
 QualificationVerdict: TypeAlias = Literal["qualified", "not_qualified"]
+PhysicsBenchmarkSeverity: TypeAlias = Literal["critical", "high", "medium", "low", "informational"]
 
 REQUIRED_SEED_KINDS = frozenset(
     {
@@ -154,6 +155,12 @@ CanonicalRoutes = Annotated[
     AfterValidator(_canonical_unique),
     Field(min_length=1, max_length=5),
 ]
+OptionalCanonicalRoutes = Annotated[
+    tuple[PhysicsRoutingOutcome, ...],
+    BeforeValidator(_freeze_sequence),
+    AfterValidator(_canonical_unique),
+    Field(max_length=5),
+]
 
 
 class BenchmarkCanonicalModel(BaseModel):
@@ -185,6 +192,115 @@ class PhysicsBenchmarkThresholdsV1(BenchmarkCanonicalModel):
     infrastructure_failure_rate_max: NonnegativeRate
 
 
+class PhysicsBenchmarkFixtureSourceV1(BenchmarkCanonicalModel):
+    """One auditor-visible source object reviewed independently of its answer key."""
+
+    path: str
+    sha256: Sha256
+    role: Literal["candidate", "evidence", "source", "test", "derivation"]
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _relative_path(value)
+
+
+class PhysicsBenchmarkFixtureApprovalV1(BenchmarkCanonicalModel):
+    """Create-once review record for scientific fixture authority."""
+
+    review_id: Identifier
+    reviewer_role: Literal["independent_physics_authority_reviewer"]
+    reviewed_on: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]
+    decision: Literal["approved"]
+    independent_from_fixture_author: Literal[True]
+    scope: Literal["source_contract_and_scoring_authority"]
+
+
+class PhysicsBenchmarkFixtureAuthorityV1(BenchmarkCanonicalModel):
+    """Scorer-only authority physically separated from auditor-visible evidence."""
+
+    schema_version: Literal[1] = 1
+    case_id: Identifier
+    fixture_sha256: Sha256
+    contract_path: str
+    contract_sha256: Sha256
+    sources: Annotated[
+        tuple[PhysicsBenchmarkFixtureSourceV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=1, max_length=50),
+    ]
+    seeded_defect: BoundedText
+    expected_route: PhysicsRoutingOutcome
+    acceptable_alternative_routes: OptionalCanonicalRoutes = ()
+    forbidden_routes: CanonicalRoutes
+    required_finding_categories: CanonicalCategories
+    acceptable_alternative_categories: CanonicalCategories = ()
+    forbidden_finding_categories: CanonicalCategories = ()
+    minimum_severity: PhysicsBenchmarkSeverity | None
+    human_review_mandatory: bool
+    approval: PhysicsBenchmarkFixtureApprovalV1
+
+    @field_validator("contract_path")
+    @classmethod
+    def validate_contract_path(cls, value: str) -> str:
+        return _relative_path(value)
+
+    @field_validator("sources")
+    @classmethod
+    def canonicalize_sources(
+        cls, value: tuple[PhysicsBenchmarkFixtureSourceV1, ...]
+    ) -> tuple[PhysicsBenchmarkFixtureSourceV1, ...]:
+        items = tuple(sorted(value, key=lambda item: item.path))
+        if len({item.path for item in items}) != len(items):
+            raise ValueError("fixture authority source paths must be unique")
+        return items
+
+    @model_validator(mode="after")
+    def validate_scoring_authority(self) -> PhysicsBenchmarkFixtureAuthorityV1:
+        allowed_routes = {self.expected_route, *self.acceptable_alternative_routes}
+        if allowed_routes & set(self.forbidden_routes):
+            raise ValueError("allowed and forbidden fixture routes overlap")
+        recognized = {
+            *self.required_finding_categories,
+            *self.acceptable_alternative_categories,
+        }
+        if recognized & set(self.forbidden_finding_categories):
+            raise ValueError("recognized and forbidden fixture categories overlap")
+        if bool(recognized) != (self.minimum_severity is not None):
+            raise ValueError("fixture severity authority must accompany recognized categories")
+        if self.human_review_mandatory != (self.expected_route == "require_human_review"):
+            raise ValueError("fixture human-review authority contradicts its expected route")
+        return self
+
+
+class PhysicsBenchmarkFixtureAuthoritySetV1(BenchmarkCanonicalModel):
+    """Complete independently reviewed authority set for one benchmark catalog."""
+
+    schema_version: Literal[1] = 1
+    benchmark_id: Identifier
+    manifests: Annotated[
+        tuple[PhysicsBenchmarkFixtureAuthorityV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=20, max_length=MAX_BENCHMARK_CASES),
+    ]
+
+    @field_validator("manifests")
+    @classmethod
+    def canonicalize_manifests(
+        cls, value: tuple[PhysicsBenchmarkFixtureAuthorityV1, ...]
+    ) -> tuple[PhysicsBenchmarkFixtureAuthorityV1, ...]:
+        items = tuple(sorted(value, key=lambda item: item.case_id))
+        if len({item.case_id for item in items}) != len(items):
+            raise ValueError("fixture authority case IDs must be unique")
+        return items
+
+    def manifest(self, case_id: str) -> PhysicsBenchmarkFixtureAuthorityV1:
+        for item in self.manifests:
+            if item.case_id == case_id:
+                return item
+        raise KeyError(case_id)
+
+
 class PhysicsBenchmarkCaseAuthorityV1(BenchmarkCanonicalModel):
     """Answer-key authority kept outside the Physics Auditor projection."""
 
@@ -198,6 +314,10 @@ class PhysicsBenchmarkCaseAuthorityV1(BenchmarkCanonicalModel):
     seeded_defect_authority: BoundedText
     expected_route: PhysicsRoutingOutcome
     required_finding_categories: CanonicalCategories
+    acceptable_alternative_categories: CanonicalCategories = ()
+    forbidden_finding_categories: CanonicalCategories = ()
+    minimum_severity: PhysicsBenchmarkSeverity | None = None
+    acceptable_alternative_routes: OptionalCanonicalRoutes = ()
     forbidden_routes: CanonicalRoutes
     required_evidence_ids: CanonicalStrings
     worker_repair_appropriate: bool
@@ -227,9 +347,17 @@ class PhysicsBenchmarkCaseAuthorityV1(BenchmarkCanonicalModel):
             raise ValueError("clean_case must exactly identify an expected pass")
         if self.clean_case and self.required_finding_categories:
             raise ValueError("clean cases cannot require findings")
-        if self.human_review_mandatory != (
-            self.expected_route == "require_human_review"
-        ):
+        recognized = {
+            *self.required_finding_categories,
+            *self.acceptable_alternative_categories,
+        }
+        if recognized & set(self.forbidden_finding_categories):
+            raise ValueError("recognized and forbidden finding categories overlap")
+        if bool(recognized) != (self.minimum_severity is not None):
+            raise ValueError("recognized finding categories require severity authority")
+        if {self.expected_route, *self.acceptable_alternative_routes} & set(self.forbidden_routes):
+            raise ValueError("allowed and forbidden routes overlap")
+        if self.human_review_mandatory != (self.expected_route == "require_human_review"):
             raise ValueError("human-review authority must match the expected route")
         if self.risk == "highest" and self.repetitions != 3:
             raise ValueError("highest-risk cases require exactly three repetitions")
@@ -238,14 +366,18 @@ class PhysicsBenchmarkCaseAuthorityV1(BenchmarkCanonicalModel):
         expected_risk = "highest" if self.seed_kind in REPEATED_SEED_KINDS else "mechanism"
         if self.risk != expected_risk:
             raise ValueError("case risk disagrees with the frozen repetition design")
-        if self.seed_kind in {
-            "convention_change_request",
-            "unsupported_interpretation",
-            "constraint_mode_claim",
-            "gauge_mode_claim",
-            "boundary_localization_claim",
-            "conflicting_evidence",
-        } and not self.human_review_mandatory:
+        if (
+            self.seed_kind
+            in {
+                "convention_change_request",
+                "unsupported_interpretation",
+                "constraint_mode_claim",
+                "gauge_mode_claim",
+                "boundary_localization_claim",
+                "conflicting_evidence",
+            }
+            and not self.human_review_mandatory
+        ):
             raise ValueError("scientific-interpretation cases require human review")
         return self
 
@@ -255,9 +387,14 @@ class PhysicsBenchmarkCatalogV1(BenchmarkCanonicalModel):
 
     schema_version: Literal[1] = 1
     benchmark_id: Identifier
-    methodology_version: Literal["physics_auditor_pa5b_v1"]
-    answer_key_policy: Literal["separate_unprojected_authority_v1"]
+    methodology_version: Literal["physics_auditor_pa5b_v1", "physics_auditor_pa5c_remediation_v1"]
+    answer_key_policy: Literal[
+        "separate_unprojected_authority_v1",
+        "physically_absent_scorer_only_authority_v1",
+    ]
     prompt_repair_limit: Literal[1]
+    fixture_authority_path: str | None = None
+    fixture_authority_sha256: Sha256 | None = None
     thresholds: PhysicsBenchmarkThresholdsV1
     cases: Annotated[
         tuple[PhysicsBenchmarkCaseAuthorityV1, ...],
@@ -281,6 +418,21 @@ class PhysicsBenchmarkCatalogV1(BenchmarkCanonicalModel):
         if missing:
             raise ValueError("benchmark omits required seed kinds: " + ", ".join(missing))
         return items
+
+    @model_validator(mode="after")
+    def require_remediation_authority(self) -> PhysicsBenchmarkCatalogV1:
+        paired = (
+            self.fixture_authority_path is not None and self.fixture_authority_sha256 is not None
+        )
+        if (self.fixture_authority_path is None) != (self.fixture_authority_sha256 is None):
+            raise ValueError("fixture authority path and hash must be paired")
+        if self.methodology_version == "physics_auditor_pa5c_remediation_v1" and (
+            not paired or self.answer_key_policy != "physically_absent_scorer_only_authority_v1"
+        ):
+            raise ValueError("PA-5C requires a hashed physically separated authority set")
+        if self.fixture_authority_path is not None:
+            _relative_path(self.fixture_authority_path)
+        return self
 
     def case(self, case_id: str) -> PhysicsBenchmarkCaseAuthorityV1:
         for item in self.cases:
@@ -391,12 +543,17 @@ class PhysicsBenchmarkRunRecordV1(BenchmarkCanonicalModel):
     category: Identifier
     repetition: Annotated[int, Field(ge=1, le=3)]
     fixture_sha256: Sha256
+    fixture_authority_sha256: Sha256 | None = None
     contract_sha256: Sha256
     seeded_defect_authority_sha256: Sha256
     expected_route: PhysicsRoutingOutcome
     actual_report_verdict: PhysicsVerdict | None
     actual_route: PhysicsRoutingOutcome | None
     required_finding_categories: CanonicalCategories
+    acceptable_alternative_categories: CanonicalCategories = ()
+    forbidden_finding_categories: CanonicalCategories = ()
+    minimum_severity: PhysicsBenchmarkSeverity | None = None
+    acceptable_alternative_routes: OptionalCanonicalRoutes = ()
     findings: Annotated[
         tuple[PhysicsBenchmarkFindingObservationV1, ...],
         BeforeValidator(_freeze_sequence),
@@ -404,6 +561,14 @@ class PhysicsBenchmarkRunRecordV1(BenchmarkCanonicalModel):
     ]
     critical_defect_detected: bool
     false_positive_finding_ids: CanonicalStrings
+    category_recognized: bool = False
+    severity_matched: bool = False
+    route_matched: bool = False
+    evidence_valid: bool = False
+    required_categories_satisfied: bool = False
+    acceptable_alternative_satisfied: bool = False
+    forbidden_category_observed: bool = False
+    forbidden_route_observed: bool = False
     run_status: PhysicsBenchmarkRunStatus
     malformed_report: bool
     infrastructure_failure: bool
@@ -425,6 +590,9 @@ class PhysicsBenchmarkRunRecordV1(BenchmarkCanonicalModel):
     yolo_inheritance_detected: bool
     pa2_proofs_verified: bool
     pa3_proof_verified: bool
+    source_identities_verified: bool = False
+    contract_identity_verified: bool = False
+    projection_identity_verified: bool = False
     duration_seconds: Annotated[float, Field(ge=0.0, le=86_400.0)]
     usage: PhysicsBenchmarkUsageV1
 
@@ -459,6 +627,26 @@ class PhysicsBenchmarkRunRecordV1(BenchmarkCanonicalModel):
         return self
 
 
+class PhysicsBenchmarkScoringIdentityV1(BenchmarkCanonicalModel):
+    """Mechanical pre-scoring verification over source and qualified proof identities."""
+
+    schema_version: Literal[1] = 1
+    case_id: Identifier
+    repetition: Annotated[int, Field(ge=1, le=3)]
+    fixture_authority_sha256: Sha256
+    fixture_sha256: Sha256
+    contract_sha256: Sha256
+    projection_sha256: Sha256
+    pa2_completion_proof_sha256s: CanonicalStrings
+    pa3_action_proof_sha256: Sha256
+    recovery_proof_sha256: Sha256
+    source_identities_verified: Literal[True]
+    contract_identity_verified: Literal[True]
+    projection_identity_verified: Literal[True]
+    pa2_proofs_verified: Literal[True]
+    pa3_proof_verified: Literal[True]
+
+
 class PhysicsBenchmarkRecoveryProofV1(BenchmarkCanonicalModel):
     """Immutable idempotence receipt over finalized PA-2/PA-3 actions."""
 
@@ -471,8 +659,22 @@ class PhysicsBenchmarkRecoveryProofV1(BenchmarkCanonicalModel):
     pa3_action_id: Identifier
     pa3_action_proof_sha256: Sha256
     pa3_record_count: Annotated[int, Field(ge=1, le=100)]
+    pa3_action_record_sha256s: CanonicalStrings = ()
     resumed_existing_action: bool
     duplicate_action_detected: Literal[False]
+    launch_ambiguity_blocked: Literal[False] = False
+    proofs_reverified: Literal[True] = True
+    finalization_policy: Literal["atomic_fsynced_create_once_v1"] = "atomic_fsynced_create_once_v1"
+
+    @model_validator(mode="after")
+    def validate_action_set(self) -> PhysicsBenchmarkRecoveryProofV1:
+        if self.pa3_action_id in self.pa2_action_ids:
+            raise ValueError("PA-2 and PA-3 recovery action IDs must be disjoint")
+        if self.pa3_action_record_sha256s and (
+            len(self.pa3_action_record_sha256s) != self.pa3_record_count
+        ):
+            raise ValueError("PA-3 action record hashes do not close the record count")
+        return self
 
 
 class PhysicsBenchmarkStatusV1(BenchmarkCanonicalModel):
@@ -515,6 +717,14 @@ class PhysicsBenchmarkMetricSetV1(BenchmarkCanonicalModel):
     repair_success_rate: NonnegativeRate | None
     repeated_run_route_consistency: NonnegativeRate | None
     finding_category_consistency: NonnegativeRate | None
+    category_recognition_rate: NonnegativeRate | None = None
+    severity_match_rate: NonnegativeRate | None = None
+    route_match_rate: NonnegativeRate | None = None
+    evidence_validity_rate: NonnegativeRate | None = None
+    required_categories_satisfaction_rate: NonnegativeRate | None = None
+    acceptable_alternative_satisfaction_rate: NonnegativeRate | None = None
+    forbidden_category_rate: NonnegativeRate | None = None
+    forbidden_route_rate: NonnegativeRate | None = None
     median_duration_seconds: Annotated[float, Field(ge=0.0)] | None
     median_input_tokens: Annotated[float, Field(ge=0.0)] | None
     median_output_tokens: Annotated[float, Field(ge=0.0)] | None
@@ -533,6 +743,12 @@ class PhysicsBenchmarkHardGatesV1(BenchmarkCanonicalModel):
     zero_yolo_inheritance: bool
     zero_unverified_pa2_or_pa3_evidence: bool
     zero_duplicate_recovery_actions: bool
+    zero_forbidden_categories: bool = True
+    zero_forbidden_routes: bool = True
+    all_evidence_references_valid: bool = True
+    all_categories_recognized: bool = True
+    all_required_severities_matched: bool = True
+    all_source_contract_projection_proofs_verified: bool = True
     all_malformed_reports_failed_closed: bool
     all_convention_and_interpretation_cases_human: bool
     all_missing_evidence_cases_blocked_or_human: bool
@@ -555,7 +771,7 @@ class PhysicsBenchmarkReportV1(BenchmarkCanonicalModel):
 
     schema_version: Literal[1] = 1
     benchmark_id: Identifier
-    methodology_version: Literal["physics_auditor_pa5b_v1"]
+    methodology_version: Literal["physics_auditor_pa5b_v1", "physics_auditor_pa5c_remediation_v1"]
     catalog_sha256: Sha256
     thresholds_sha256: Sha256
     thresholds_predeclared: Literal[True]
@@ -613,8 +829,10 @@ class PhysicsBenchmarkReportV1(BenchmarkCanonicalModel):
 
     @model_validator(mode="after")
     def validate_verdict(self) -> PhysicsBenchmarkReportV1:
-        passed = self.complete and self.hard_gates.passed() and all(
-            item.passed for item in self.threshold_outcomes
+        passed = (
+            self.complete
+            and self.hard_gates.passed()
+            and all(item.passed for item in self.threshold_outcomes)
         )
         if (self.qualification_verdict == "qualified") != passed:
             raise ValueError("benchmark qualification verdict contradicts its gates")
@@ -653,6 +871,20 @@ def load_physics_benchmark_run_record(path: Path) -> PhysicsBenchmarkRunRecordV1
         raise PhysicsBenchmarkInputError("Physics benchmark run record is invalid") from exc
 
 
+def load_physics_benchmark_fixture_authority(
+    path: Path,
+) -> PhysicsBenchmarkFixtureAuthoritySetV1:
+    """Load the strict independently reviewed scorer-only fixture authority."""
+    try:
+        raw = path.read_bytes()
+        if len(raw) > MAX_BENCHMARK_FILE_BYTES:
+            raise ValueError("fixture authority exceeds its size limit")
+        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        return PhysicsBenchmarkFixtureAuthoritySetV1.model_validate(value)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise PhysicsBenchmarkInputError("Physics benchmark fixture authority is invalid") from exc
+
+
 def load_physics_benchmark_repair_calibration(
     path: Path,
 ) -> PhysicsBenchmarkRepairCalibrationV1:
@@ -662,9 +894,7 @@ def load_physics_benchmark_repair_calibration(
         value = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
         return PhysicsBenchmarkRepairCalibrationV1.model_validate(value)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
-        raise PhysicsBenchmarkInputError(
-            "Physics benchmark repair calibration is invalid"
-        ) from exc
+        raise PhysicsBenchmarkInputError("Physics benchmark repair calibration is invalid") from exc
 
 
 def _reject_constant(value: str) -> None:

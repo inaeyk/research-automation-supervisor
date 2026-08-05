@@ -31,24 +31,24 @@ from tests.workflow_helpers import (
 
 CASES = {
     "wrong_sign": (
-        "pa5b_case_002",
+        "case_002",
         "def acceleration(force: float) -> float:\n    return force\n",
         "implementation.acceleration(2.0) == 2.0",
     ),
     "missing_normalization": (
-        "pa5b_case_003",
+        "case_003",
         "import math\n\ndef density(x: float, sigma: float) -> float:\n"
         "    return math.exp(-(x*x)/(2*sigma*sigma))/(math.sqrt(2*math.pi)*sigma)\n",
         "abs(implementation.density(0.0, 1.0) - 0.3989422804014327) < 1e-12",
     ),
     "missing_metric_factor": (
-        "pa5b_case_004",
-        "def covector_norm_sq(a_r: float, a_theta: float, r: float) -> float:\n"
+        "case_004",
+        "def vector_norm_sq(a_r: float, a_theta: float, r: float) -> float:\n"
         "    return a_r*a_r + r*r*a_theta*a_theta\n",
-        "implementation.covector_norm_sq(0.0, 1.0, 2.0) == 4.0",
+        "implementation.vector_norm_sq(0.0, 1.0, 2.0) == 4.0",
     ),
     "finite_difference_stencil": (
-        "pa5b_case_011",
+        "case_011",
         "def centered(left: float, right: float, h: float) -> float:\n"
         "    return (right-left)/(2*h)\n",
         "implementation.centered(0.0, 2.0, 1.0) == 1.0",
@@ -106,7 +106,7 @@ def _install_case_authority(
         )
     contract_path = project / "control/physics-contract.yaml"
     contract_path.write_text(yaml.safe_dump(contract, sort_keys=False), encoding="utf-8")
-    oracle_source = f'''import importlib.util
+    oracle_source = f"""import importlib.util
 import json
 from pathlib import Path
 
@@ -121,7 +121,7 @@ print(json.dumps({{
     "outcome": "passed" if all(checks.values()) else "functional_failure",
     "checks": [{{"id": key, "passed": value}} for key, value in sorted(checks.items())],
 }}, sort_keys=True))
-'''
+"""
     oracle_path = project / "tools/oracle.py"
     oracle_path.write_text(oracle_source, encoding="utf-8")
     catalog = {
@@ -237,6 +237,4 @@ def test_four_bounded_pa4_worker_repairs_refresh_all_evidence(
     assert Path(project / "implementation.py").read_text() == clean_source
     prompt = json.loads(Path(state.repair_prompt_path or "").read_text())
     assert prompt["findings"][0]["id"] == "finding_1"
-    assert prompt["findings"][0]["required_repair"] == (
-        "Follow the frozen deterministic route."
-    )
+    assert prompt["findings"][0]["required_repair"] == ("Follow the frozen deterministic route.")

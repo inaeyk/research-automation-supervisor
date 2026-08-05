@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 002 observations
 
-Locked authority: positive force produces positive acceleration. The implementation reverses the sign for every nonzero input.
+For inputs `force = 0` and `force = 2`, the candidate returns `0` and `-2`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

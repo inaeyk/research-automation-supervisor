@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 021 observations
 
-A small unexplained residual is labeled a newly discovered physical instability without a locked interpretation authority.
+The residual is `0.003`. The candidate claim is `new physical instability discovered`.
+No interpretation approval is included in the visible evidence.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

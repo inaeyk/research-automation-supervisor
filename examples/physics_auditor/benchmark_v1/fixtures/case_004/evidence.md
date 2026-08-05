@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 004 observations
 
-Locked authority includes the cylindrical metric factor r^2. The implementation contracts the angular component as if the metric were Cartesian.
+For contravariant components `(A^r, A^theta) = (0, 1)`, the candidate returns `1`
+at both `r = 1` and `r = 2`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

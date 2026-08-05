@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 008 observations
 
-Locked authority is d(x^3)/dx = 3 x^2. The implementation uses coefficient 2.
+At `x = 2`, the candidate derivative function returns `8`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

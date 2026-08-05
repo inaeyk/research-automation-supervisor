@@ -7,12 +7,12 @@ import json
 import sys
 
 PASSING_TASKS = {
-    "gl_pilot_001",
-    "gl_pilot_002",
-    "gl_pilot_003",
-    "gl_pilot_004",
-    "gl_pilot_005",
-    "gl_pilot_010",
+    "task_001",
+    "task_002",
+    "task_003",
+    "task_004",
+    "task_005",
+    "task_010",
 }
 
 

@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 015 observations
 
-Ninety-six percent of the declared norm lies in the outer three grid cells, while the candidate calls the mode a bulk instability.
+The outermost three cells contain `0.96` of the declared norm. The candidate claim is
+`bulk instability`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

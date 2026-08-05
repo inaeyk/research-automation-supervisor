@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 018 observations
 
-The visible implementation is consistent with y=2x, but the required independent oracle result is deliberately unavailable in this benchmark run.
+Inputs `x = 0` and `x = 3` produce `0` and `6`, respectively. No independent oracle
+result is present in the supplied evidence index.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

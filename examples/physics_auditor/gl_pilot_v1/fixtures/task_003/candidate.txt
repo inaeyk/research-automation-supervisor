@@ -1,6 +1,0 @@
-lapse_source=+3*sqrt(r0/x^3)
-shift_source=0
-B_source=0
-field_dependent=false
-
-

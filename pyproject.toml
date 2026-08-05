@@ -61,6 +61,7 @@ include = [
   "/pyproject.toml",
   "/docs",
   "/examples",
+  "/scripts",
   "/src",
 ]
 exclude = [

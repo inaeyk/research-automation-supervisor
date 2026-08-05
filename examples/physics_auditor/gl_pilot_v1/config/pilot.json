@@ -1,258 +1,457 @@
 {
-  "schema_version": 1,
-  "pilot_id": "physics_gl_pilot_pa5b_v1",
-  "methodology_version": "physics_gl_pilot_pa5b_v1",
-  "source_repository": "GL-with-AI",
-  "source_commit": "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1",
-  "source_state_policy": "clean_commit_snapshot_only",
   "auditor_workspace_policy": "exact_read_only_projection_v1",
-  "production_mutation_allowed": false,
+  "methodology_version": "physics_gl_pilot_pa5c_remediation_v1",
   "open_research_questions_allowed": false,
+  "pilot_id": "physics_gl_pilot_pa5c_v1",
+  "production_mutation_allowed": false,
+  "schema_version": 1,
+  "source_commit": "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1",
+  "source_repository": "GL-with-AI",
+  "source_state_policy": "exact_commit_blob_projection_only",
   "tasks": [
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_001",
-      "topic": "uniform_ingoing_gp_background_ledger",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_001",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_001",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
       "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_001/contract.yaml",
+      "contract_sha256": "1dc970a3bb2dff895f5c860fff87d79bcc69bea80a9e6009ee1d6bdf45c418b7",
+      "deliberately_seeded": false,
+      "expected_route": "pass",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_001",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "locked_authority_summary": "Source commit 7d04b5b9882dcd476c1457b8d711ac7b5520b2c1 locks alpha=1, beta^x=sqrt(r0/x), chi=1, h_xx=h_zz=h_ww=1, h_xz=0, K=3 lambda/2, and the listed trace-free A components. The candidate ledger reproduces those values and does not claim a new mode.",
+      "minimum_severity": null,
       "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
+      "required_finding_categories": [],
+      "schema_version": 1,
       "source_refs": [
         {
           "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
-          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df",
-          "role": "locked_derivation"
+          "role": "locked_derivation",
+          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df"
         }
       ],
-      "locked_authority_summary": "Source commit 7d04b5b9882dcd476c1457b8d711ac7b5520b2c1 locks alpha=1, beta^x=sqrt(r0/x), chi=1, h_xx=h_zz=h_ww=1, h_xz=0, K=3 lambda/2, and the listed trace-free A components. The candidate ledger reproduces those values and does not claim a new mode.",
-      "expected_route": "pass",
-      "required_finding_categories": [],
-      "deliberately_seeded": false,
-      "human_review_mandatory": false
+      "task_id": "task_001",
+      "topic": "uniform_ingoing_gp_background_ledger"
     },
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_002",
-      "topic": "trace_free_conformal_extrinsic_curvature",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_002",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_002",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
       "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_002/contract.yaml",
+      "contract_sha256": "ef240a93427ade22a5229468c727c5cddd60a0c0ad6cc374c029f91dc3f3dae3",
+      "deliberately_seeded": false,
+      "expected_route": "pass",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_002",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "locked_authority_summary": "The locked background values are A_xx=-7 lambda/8, A_zz=-3 lambda/8, and A_ww=5 lambda/8 for each of two hidden directions. Their trace is (-7-3+2*5)lambda/8=0. The candidate retains the hidden multiplicity.",
+      "minimum_severity": null,
       "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
+      "required_finding_categories": [],
+      "schema_version": 1,
       "source_refs": [
         {
-          "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
-          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df",
-          "role": "locked_derivation"
-        },
-        {
           "path": "code/BlackStringToy/ConformalCartoonAlgebra.hpp",
-          "sha256": "c3a074745720c9bc9ca6c76294552b4b45439e9a3fb3d37ff4ac2f3f6d8a5e26",
-          "role": "implementation"
+          "role": "implementation",
+          "sha256": "c3a074745720c9bc9ca6c76294552b4b45439e9a3fb3d37ff4ac2f3f6d8a5e26"
         },
         {
           "path": "code/BlackStringToy/tests/Stage4ALTraceFreeCurvatureLapseBlockTest.cpp",
-          "sha256": "ad20357be843f50859a086f433b64ae7fce68755c9f25c19ae7795349d5944b6",
-          "role": "test"
-        }
-      ],
-      "locked_authority_summary": "The locked background values are A_xx=-7 lambda/8, A_zz=-3 lambda/8, and A_ww=5 lambda/8 for each of two hidden directions. Their trace is (-7-3+2*5)lambda/8=0. The candidate retains the hidden multiplicity.",
-      "expected_route": "pass",
-      "required_finding_categories": [],
-      "deliberately_seeded": false,
-      "human_review_mandatory": false
-    },
-    {
-      "schema_version": 1,
-      "task_id": "gl_pilot_003",
-      "topic": "locked_lapse_gauge_source_consistency",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_003",
-      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_003/contract.yaml",
-      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
-      "source_refs": [
+          "role": "test",
+          "sha256": "ad20357be843f50859a086f433b64ae7fce68755c9f25c19ae7795349d5944b6"
+        },
         {
           "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
-          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df",
-          "role": "locked_derivation"
-        },
-        {
-          "path": "code/BlackStringToy/tests/Stage4AOCGRChomboComparisonBatch4GaugeTest.cpp",
-          "sha256": "a05754b891bedef09953de004602791dce9eb7117b23cd93802b67aa721a33e4",
-          "role": "test"
+          "role": "locked_derivation",
+          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df"
         }
       ],
-      "locked_authority_summary": "The locked test constructs the direct moving-puncture lapse residual -3 lambda and a fixed +3 lambda source. It checks cancellation to 1e-13, unchanged shift/B, zero field Jacobian, and mutation detection for wrong sign and missing factor three.",
-      "expected_route": "pass",
-      "required_finding_categories": [],
-      "deliberately_seeded": false,
-      "human_review_mandatory": false
+      "task_id": "task_002",
+      "topic": "trace_free_conformal_extrinsic_curvature"
     },
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_004",
-      "topic": "so3_cartoon_hat_gamma_x_consistency",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_004",
-      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_004/contract.yaml",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_003",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_003/contract.yaml",
+      "contract_sha256": "9a91a651ea95b4e87bb6cb304f38d3d19c046b101c794d424134232facc6c9cd",
+      "deliberately_seeded": false,
+      "expected_route": "pass",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_003",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "locked_authority_summary": "The locked test constructs the direct moving-puncture lapse residual -3 lambda and a fixed +3 lambda source. It checks cancellation to 1e-13, unchanged shift/B, zero field Jacobian, and mutation detection for wrong sign and missing factor three.",
+      "minimum_severity": null,
       "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
+      "required_finding_categories": [],
+      "schema_version": 1,
       "source_refs": [
         {
-          "path": "docs/derivations/stage4AM_hatGammaX_derivation.md",
-          "sha256": "331424a902d1e7f67d6cc4aae04f9f15f2668b5c1cc711eede7277e1e07aa95d",
-          "role": "locked_derivation"
+          "path": "code/BlackStringToy/tests/Stage4AOCGRChomboComparisonBatch4GaugeTest.cpp",
+          "role": "test",
+          "sha256": "a05754b891bedef09953de004602791dce9eb7117b23cd93802b67aa721a33e4"
         },
         {
+          "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
+          "role": "locked_derivation",
+          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df"
+        }
+      ],
+      "task_id": "task_003",
+      "topic": "locked_lapse_gauge_source_consistency"
+    },
+    {
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_004",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_004/contract.yaml",
+      "contract_sha256": "b7f1dac78773711dde3ea38a885b2273bf40f5c8298643399639cf1a68ee0d8e",
+      "deliberately_seeded": false,
+      "expected_route": "pass",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_004",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "locked_authority_summary": "The Stage 4AM lock separates the factor-two hidden multiplicity from the factor two in the hatted-connection definition. The candidate uses the full Christoffel contraction and treats the determinant-reduced identity only as a certified cross-check.",
+      "minimum_severity": null,
+      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
+      "required_finding_categories": [],
+      "schema_version": 1,
+      "source_refs": [
+        {
           "path": "code/BlackStringToy/CartoonHatGammaX.hpp",
-          "sha256": "bd02989289435745f186bc9e14ce52e58ebb206d09c3df1a0605fcd867f22e3d",
-          "role": "implementation"
+          "role": "implementation",
+          "sha256": "bd02989289435745f186bc9e14ce52e58ebb206d09c3df1a0605fcd867f22e3d"
         },
         {
           "path": "code/BlackStringToy/tests/Stage4ANHatGammaXTest.cpp",
-          "sha256": "72a6e8bcc1ae7c640bc11612751b7e8f57047a7a76f1657eab805be89ac39b68",
-          "role": "test"
+          "role": "test",
+          "sha256": "72a6e8bcc1ae7c640bc11612751b7e8f57047a7a76f1657eab805be89ac39b68"
+        },
+        {
+          "path": "docs/derivations/stage4AM_hatGammaX_derivation.md",
+          "role": "locked_derivation",
+          "sha256": "331424a902d1e7f67d6cc4aae04f9f15f2668b5c1cc711eede7277e1e07aa95d"
         }
       ],
-      "locked_authority_summary": "The Stage 4AM lock separates the factor-two hidden multiplicity from the factor two in the hatted-connection definition. The candidate uses the full Christoffel contraction and treats the determinant-reduced identity only as a certified cross-check.",
-      "expected_route": "pass",
-      "required_finding_categories": [],
-      "deliberately_seeded": false,
-      "human_review_mandatory": false
+      "task_id": "task_004",
+      "topic": "so3_cartoon_hat_gamma_x_consistency"
     },
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_005",
-      "topic": "stage4aob_discrete_background_residual_convergence",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_005",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_005",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
       "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_005/contract.yaml",
+      "contract_sha256": "00fa13942b0e97deae1a7bdbdd64c54f574e72539b6e69390290c69f707d984e",
+      "deliberately_seeded": false,
+      "expected_route": "pass",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_005",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "locked_authority_summary": "The locked test uses the unmodified discrete RHS, not the GP-holding source. It checks 256/512/1024, two ratios above 3.4, three lapse target errors below 1e-12, and a fine hat_Gamma^x residual below 1e-3. This is a local preflight, not a completed spectral operator claim.",
+      "minimum_severity": null,
       "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
+      "required_finding_categories": [],
+      "schema_version": 1,
       "source_refs": [
         {
           "path": "code/BlackStringToy/Stage4AOGPDiscretePreflight.hpp",
-          "sha256": "1c298b88e4b52c6d2778ab5dfd6347847b5527dc351edfb22bfb56b82e513f97",
-          "role": "implementation"
+          "role": "implementation",
+          "sha256": "1c298b88e4b52c6d2778ab5dfd6347847b5527dc351edfb22bfb56b82e513f97"
         },
         {
           "path": "code/BlackStringToy/tests/Stage4AOBDiscreteOperatorPreflightTest.cpp",
-          "sha256": "5e4928d4c74f57a9e94e1ee71a6eb242fa54ad5e67841a357438fd349d3d2221",
-          "role": "test"
+          "role": "test",
+          "sha256": "5e4928d4c74f57a9e94e1ee71a6eb242fa54ad5e67841a357438fd349d3d2221"
         }
       ],
-      "locked_authority_summary": "The locked test uses the unmodified discrete RHS, not the GP-holding source. It checks 256/512/1024, two ratios above 3.4, three lapse target errors below 1e-12, and a fine hat_Gamma^x residual below 1e-3. This is a local preflight, not a completed spectral operator claim.",
-      "expected_route": "pass",
-      "required_finding_categories": [],
-      "deliberately_seeded": false,
-      "human_review_mandatory": false
+      "task_id": "task_005",
+      "topic": "stage4aob_discrete_background_residual_convergence"
     },
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_006",
-      "topic": "seeded_constraint_heavy_candidate",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_006",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_006",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
       "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_006/contract.yaml",
-      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
-      "source_refs": [
-        {
-          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
-          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b",
-          "role": "locked_derivation"
-        }
+      "contract_sha256": "995f195626b833fc5d0d6764532078568536e71b7177668d5973942d34d0c188",
+      "deliberately_seeded": true,
+      "expected_route": "require_human_review",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_006",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
       ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
       "locked_authority_summary": "This deliberate pilot seed overlays a 92 percent constraint projection on the locked frozen-gauge classification boundary. The candidate calls it physical. Human review is mandatory; the pilot does not claim a GL mode.",
-      "expected_route": "require_human_review",
+      "minimum_severity": "high",
+      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
       "required_finding_categories": [
         "gauge_constraint_ambiguity"
       ],
-      "deliberately_seeded": true,
-      "human_review_mandatory": true
+      "schema_version": 1,
+      "source_refs": [
+        {
+          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
+        }
+      ],
+      "task_id": "task_006",
+      "topic": "seeded_constraint_heavy_candidate"
     },
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_007",
-      "topic": "seeded_gauge_mode_candidate",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_007",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_007",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
       "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_007/contract.yaml",
-      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
-      "source_refs": [
-        {
-          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
-          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b",
-          "role": "locked_derivation"
-        }
-      ],
-      "locked_authority_summary": "This deliberate pilot seed assigns gauge overlap 0.999 to a candidate labeled physical. The locked workflow requires human review for unresolved gauge classification.",
+      "contract_sha256": "d4ee05e04191959b4dd70301a99ff1f4555a9287ba456c71ae0e0f4fb1b2a661",
+      "deliberately_seeded": true,
       "expected_route": "require_human_review",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_007",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "locked_authority_summary": "This deliberate pilot seed assigns gauge overlap 0.999 to a candidate labeled physical. The locked workflow requires human review for unresolved gauge classification.",
+      "minimum_severity": "high",
+      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
       "required_finding_categories": [
         "gauge_constraint_ambiguity"
       ],
-      "deliberately_seeded": true,
-      "human_review_mandatory": true
-    },
-    {
       "schema_version": 1,
-      "task_id": "gl_pilot_008",
-      "topic": "seeded_boundary_localized_candidate",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_008",
-      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_008/contract.yaml",
-      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
       "source_refs": [
         {
           "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
-          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b",
-          "role": "locked_derivation"
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
         }
       ],
-      "locked_authority_summary": "This deliberate pilot seed places 96 percent of the norm in the outer three cells and labels the result a bulk instability. Boundary-bearing operator gates remain limited, so the interpretation is unsupported and human review is mandatory.",
+      "task_id": "task_007",
+      "topic": "seeded_gauge_mode_candidate"
+    },
+    {
+      "acceptable_alternative_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_008",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_008/contract.yaml",
+      "contract_sha256": "f5a749108c20a44f12236e877cf1b50da45f44c7af0e19047603a53eac131de3",
+      "deliberately_seeded": true,
       "expected_route": "require_human_review",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_008",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "locked_authority_summary": "This deliberate pilot seed places 96 percent of the norm in the outer three cells and labels the result a bulk instability. Boundary-bearing operator gates remain limited, so the interpretation is unsupported and human review is mandatory.",
+      "minimum_severity": "high",
+      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
       "required_finding_categories": [
         "new_physical_interpretation",
         "unsupported_physical_claim"
       ],
-      "deliberately_seeded": true,
-      "human_review_mandatory": true
-    },
-    {
       "schema_version": 1,
-      "task_id": "gl_pilot_009",
-      "topic": "unresolved_physical_constraint_classification",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_009",
-      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_009/contract.yaml",
-      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
       "source_refs": [
         {
           "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
-          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b",
-          "role": "locked_derivation"
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
         }
       ],
-      "locked_authority_summary": "The bounded snapshot deliberately records a physical-observable indicator and a non-negligible constraint indicator with no locked rule selecting one. It is correctly labeled unresolved physical-versus-constraint, not a discovered mode.",
+      "task_id": "task_008",
+      "topic": "seeded_boundary_localized_candidate"
+    },
+    {
+      "acceptable_alternative_categories": [
+        "unsupported_physical_claim"
+      ],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_009",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
+      "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_009/contract.yaml",
+      "contract_sha256": "c506b27dddcf6c45be8a35221277cc7fd5097648dcad72558b227fa0eca840b2",
+      "deliberately_seeded": false,
       "expected_route": "require_human_review",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_009",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "human_review_mandatory": true,
+      "locked_authority_summary": "The bounded snapshot deliberately records a physical-observable indicator and a non-negligible constraint indicator with no locked rule selecting one. It is correctly labeled unresolved physical-versus-constraint, not a discovered mode.",
+      "minimum_severity": "medium",
+      "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
       "required_finding_categories": [
         "gauge_constraint_ambiguity"
       ],
-      "deliberately_seeded": false,
-      "human_review_mandatory": true
+      "schema_version": 1,
+      "source_refs": [
+        {
+          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
+        }
+      ],
+      "task_id": "task_009",
+      "topic": "unresolved_physical_constraint_classification"
     },
     {
-      "schema_version": 1,
-      "task_id": "gl_pilot_010",
-      "topic": "clean_bounded_accepted_implementation",
-      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_010",
+      "acceptable_alternative_categories": [],
+      "acceptable_alternative_routes": [],
+      "approval": {
+        "decision": "approved",
+        "independent_from_fixture_author": true,
+        "review_id": "pa5c_gl_fixture_review_010",
+        "reviewed_on": "2026-08-05",
+        "reviewer_role": "independent_physics_authority_reviewer",
+        "scope": "source_contract_and_scoring_authority"
+      },
       "contract_path": "examples/physics_auditor/gl_pilot_v1/fixtures/task_010/contract.yaml",
+      "contract_sha256": "3ead4dad74ce683c4905f5e1ee7949d90f263e2b4739e3b635e6d296d54ac62c",
+      "deliberately_seeded": false,
+      "expected_route": "pass",
+      "fixture_root": "examples/physics_auditor/gl_pilot_v1/fixtures/task_010",
+      "forbidden_finding_categories": [
+        "report_integrity_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "human_review_mandatory": false,
+      "locked_authority_summary": "The clean bounded snapshot covers determinant, inverse, trace, trace-free projection, and raise/lower comparisons from the accepted conformal algebra tests. It makes no production-wide or mode claim.",
+      "minimum_severity": null,
       "oracle_program_path": "examples/physics_auditor/gl_pilot_v1/oracles/gl_pilot_oracle.py",
+      "required_finding_categories": [],
+      "schema_version": 1,
       "source_refs": [
         {
           "path": "code/BlackStringToy/ConformalCartoonAlgebra.hpp",
-          "sha256": "c3a074745720c9bc9ca6c76294552b4b45439e9a3fb3d37ff4ac2f3f6d8a5e26",
-          "role": "implementation"
+          "role": "implementation",
+          "sha256": "c3a074745720c9bc9ca6c76294552b4b45439e9a3fb3d37ff4ac2f3f6d8a5e26"
         },
         {
           "path": "code/BlackStringToy/tests/Stage4AOCGRChomboComparisonBatch1Test.cpp",
-          "sha256": "1100e029143dd0c5f37fd0732a761d6688d21dbd253c886ef86b0721bb77979d",
-          "role": "test"
+          "role": "test",
+          "sha256": "1100e029143dd0c5f37fd0732a761d6688d21dbd253c886ef86b0721bb77979d"
         }
       ],
-      "locked_authority_summary": "The clean bounded snapshot covers determinant, inverse, trace, trace-free projection, and raise/lower comparisons from the accepted conformal algebra tests. It makes no production-wide or mode claim.",
-      "expected_route": "pass",
-      "required_finding_categories": [],
-      "deliberately_seeded": false,
-      "human_review_mandatory": false
+      "task_id": "task_010",
+      "topic": "clean_bounded_accepted_implementation"
     }
   ]
 }
-

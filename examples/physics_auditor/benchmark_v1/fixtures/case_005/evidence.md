@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 005 observations
 
-Locked authority uses signature (-,+). The implementation copies the contravariant time component without the metric sign.
+For `v^0 = 2`, the candidate returns the lowered component value `2`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

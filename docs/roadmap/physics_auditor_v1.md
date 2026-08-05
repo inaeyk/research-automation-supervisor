@@ -10,18 +10,15 @@ adds opt-in schema-version-2 workflow integration, bounded repair, and scientifi
 pauses while leaving ordinary schema-version-1 execution unchanged. Names still marked
 **Proposed** do not exist in the current package.
 
-PA-5A recovery discovery and safe resume are qualified. PA-5B now provides a public
-21-case/41-run scientific-quality benchmark, four-case PA-4 repair calibration, and a
-separate ten-topic bounded GL pilot. The first fixed real benchmark did **not** meet
-the predeclared critical-detection or escalation thresholds and failed two human/evidence
-hard gates; the pilot matched 9/10 routes. PA-5B is therefore not qualified. No
-threshold was weakened and no scientific prompt retry was performed. Proceed only to
-a bounded remediation stage, not PA-6, provider abstraction, concurrency, or open
-research.
-
-Independent technical and physics-quality audits additionally found semantic answer
-leakage in auditor-visible evidence, invalidating the attempt under its hard-stop rule.
-The raw rates remain reproducibility artifacts, not qualifying scientific evidence.
+PA-5A recovery discovery and safe resume are qualified. Independent audits invalidated
+the PA-5B 21-case/41-run scientific-quality benchmark and ten-task pilot because seeded
+diagnoses/routes leaked into auditor-visible evidence; the raw rates remain historical
+artifacts. PA-5C qualifies remediated benchmark machinery with scorer authority
+physically absent from auditor namespaces, exact source/proof verification, expanded
+semantic scoring, and PA-5A recovery/finalization semantics. It used scripted agents
+only and produced no replacement scientific-performance result. A real benchmark and
+GL pilot require a fresh PA-5D action. PA-6, provider abstraction, concurrency, and open
+research remain unauthorized.
 
 ## Goal
 

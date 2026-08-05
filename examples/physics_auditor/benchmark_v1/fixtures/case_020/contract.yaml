@@ -36,7 +36,7 @@ oracles:
     check_ids: [primary_identity, control_limit]
     required: true
   - id: case_oracle_b
-    kind: analytic
+    kind: numerical
     reference: public_case_oracle_b
     statement: Fixed public synthetic check for this locked question.
     check_ids: [primary_identity, control_limit]
@@ -57,4 +57,3 @@ audit_policy:
   low_severity: allow_pass
   informational_severity: allow_pass
 auditor_role_ref: physics_auditor
-

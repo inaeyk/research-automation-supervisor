@@ -16,8 +16,10 @@ from research_automation_supervisor.codex_models import CodexRunResult
 from research_automation_supervisor.errors import PhysicsBenchmarkIntegrityError
 from research_automation_supervisor.physics_auditor_execution import PhysicsAuditorCodexRun
 from research_automation_supervisor.physics_benchmark import (
+    benchmark_scoring_observation,
     finalize_physics_benchmark_report,
     fixture_sha256,
+    load_validated_fixture_authority,
     render_physics_benchmark_markdown,
     score_physics_benchmark,
     seeded_authority_sha256,
@@ -33,9 +35,11 @@ from research_automation_supervisor.physics_benchmark_models import (
     PhysicsBenchmarkCatalogV1,
     PhysicsBenchmarkFindingObservationV1,
     PhysicsBenchmarkRunRecordV1,
+    PhysicsBenchmarkScoringIdentityV1,
     PhysicsBenchmarkUsageV1,
     PhysicsBenchmarkWorkerRepairV1,
     load_physics_benchmark_catalog,
+    load_physics_benchmark_fixture_authority,
     load_physics_benchmark_repair_calibration,
 )
 from research_automation_supervisor.physics_models import load_physics_task_contract
@@ -76,9 +80,7 @@ def _evidence(
 def _scripted_report(case: Any) -> dict[str, Any]:
     contract = load_physics_task_contract(ROOT / case.contract_path)
     oracle_ids = [item.id for item in contract.oracles if item.required]
-    document_path = next(
-        item.path for item in contract.evidence if item.id == "case_note"
-    )
+    document_path = next(item.path for item in contract.evidence if item.id == "case_note")
     document = _evidence("document", path=document_path)
     oracle_refs = [_evidence("oracle", reference=item) for item in oracle_ids]
     primary_evidence = [document, *oracle_refs]
@@ -164,9 +166,7 @@ def _scripted_report(case: Any) -> dict[str, Any]:
                 "target_kind": "oracle",
                 "target_id": oracle_id,
                 "status": "unresolved" if missing else "passed" if oracle_pass else "failed",
-                "evidence_sufficiency": (
-                    "insufficient" if missing else "sufficient"
-                ),
+                "evidence_sufficiency": ("insufficient" if missing else "sufficient"),
                 "evidence": [_evidence("oracle", reference=oracle_id)],
                 "rationale": (
                     "The required oracle is absent."
@@ -192,13 +192,9 @@ def _scripted_report(case: Any) -> dict[str, Any]:
                 "category": category,
                 "status": "open",
                 "disposition": disposition,
-                "check_ids": (
-                    [item["id"] for item in checks] if missing else finding_check_ids
-                ),
+                "check_ids": ([item["id"] for item in checks] if missing else finding_check_ids),
                 "forbidden_claim_ids": (
-                    ["no_discovery_claim"]
-                    if category == "unsupported_physical_claim"
-                    else []
+                    ["no_discovery_claim"] if category == "unsupported_physical_claim" else []
                 ),
                 "evidence": primary_evidence,
                 "statement": "The bounded semantic seed is present.",
@@ -282,6 +278,7 @@ def _worker_repair(case: Any, repetition: int) -> PhysicsBenchmarkWorkerRepairV1
 
 
 def _records(catalog: PhysicsBenchmarkCatalogV1) -> tuple[PhysicsBenchmarkRunRecordV1, ...]:
+    authority = load_physics_benchmark_fixture_authority(ROOT / str(catalog.fixture_authority_path))
     records: list[PhysicsBenchmarkRunRecordV1] = []
     for case in catalog.cases:
         contract = load_physics_task_contract(ROOT / case.contract_path)
@@ -302,57 +299,100 @@ def _records(catalog: PhysicsBenchmarkCatalogV1) -> tuple[PhysicsBenchmarkRunRec
             for item in report["findings"]
         )
         for repetition in range(1, case.repetitions + 1):
-            session = hashlib.sha256(
-                f"{case.case_id}:{repetition}".encode("ascii")
-            ).hexdigest()
-            records.append(
-                PhysicsBenchmarkRunRecordV1(
-                    benchmark_id=catalog.benchmark_id,
-                    case_id=case.case_id,
-                    category=case.category,
-                    repetition=repetition,
-                    fixture_sha256=fixture_sha256(ROOT / case.fixture_root),
-                    contract_sha256=contract.canonical_sha256(),
-                    seeded_defect_authority_sha256=seeded_authority_sha256(case),
-                    expected_route=case.expected_route,
-                    actual_report_verdict=report["verdict"],
-                    actual_route=decision.outcome,
-                    required_finding_categories=case.required_finding_categories,
-                    findings=findings,
-                    critical_defect_detected=case.critical_seeded_defect,
-                    false_positive_finding_ids=(),
-                    run_status="routing_completed",
-                    malformed_report=False,
-                    infrastructure_failure=False,
-                    infrastructure_reason=None,
-                    worker_repair=_worker_repair(case, repetition),
-                    fresh_session_identity_sha256=session,
-                    session_reused=False,
-                    prompt_template_sha256="1" * 64,
-                    prompt_sha256=hashlib.sha256(
-                        f"prompt:{case.case_id}:{repetition}".encode("ascii")
-                    ).hexdigest(),
-                    projection_sha256="2" * 64,
-                    oracle_proof_manifest_sha256="3" * 64,
-                    action_proof_sha256="4" * 64,
-                    recovery_proof_sha256="5" * 64,
-                    duplicate_recovery_action_detected=False,
-                    workspace_integrity="unchanged",
-                    projection_integrity="unchanged",
-                    oracle_program_access_detected=False,
-                    answer_key_exposure_detected=False,
-                    yolo_inheritance_detected=False,
-                    pa2_proofs_verified=True,
-                    pa3_proof_verified=True,
-                    duration_seconds=float(10 + repetition),
-                    usage=PhysicsBenchmarkUsageV1(
-                        availability="provider_reported",
-                        input_tokens=1_000 + repetition,
-                        output_tokens=100 + repetition,
-                    ),
-                )
+            session = hashlib.sha256(f"{case.case_id}:{repetition}".encode("ascii")).hexdigest()
+            values = dict(
+                benchmark_id=catalog.benchmark_id,
+                case_id=case.case_id,
+                category=case.category,
+                repetition=repetition,
+                fixture_sha256=fixture_sha256(ROOT / case.fixture_root),
+                fixture_authority_sha256=authority.manifest(case.case_id).canonical_sha256(),
+                contract_sha256=contract.canonical_sha256(),
+                seeded_defect_authority_sha256=seeded_authority_sha256(case),
+                expected_route=case.expected_route,
+                acceptable_alternative_routes=case.acceptable_alternative_routes,
+                actual_report_verdict=report["verdict"],
+                actual_route=decision.outcome,
+                required_finding_categories=case.required_finding_categories,
+                acceptable_alternative_categories=case.acceptable_alternative_categories,
+                forbidden_finding_categories=case.forbidden_finding_categories,
+                minimum_severity=case.minimum_severity,
+                findings=findings,
+                critical_defect_detected=case.critical_seeded_defect,
+                false_positive_finding_ids=(),
+                category_recognized=False,
+                severity_matched=False,
+                route_matched=False,
+                evidence_valid=True,
+                required_categories_satisfied=False,
+                acceptable_alternative_satisfied=False,
+                forbidden_category_observed=False,
+                forbidden_route_observed=False,
+                run_status="routing_completed",
+                malformed_report=False,
+                infrastructure_failure=False,
+                infrastructure_reason=None,
+                worker_repair=_worker_repair(case, repetition),
+                fresh_session_identity_sha256=session,
+                session_reused=False,
+                prompt_template_sha256="1" * 64,
+                prompt_sha256=hashlib.sha256(
+                    f"prompt:{case.case_id}:{repetition}".encode("ascii")
+                ).hexdigest(),
+                projection_sha256="2" * 64,
+                oracle_proof_manifest_sha256="3" * 64,
+                action_proof_sha256="4" * 64,
+                recovery_proof_sha256="5" * 64,
+                duplicate_recovery_action_detected=False,
+                workspace_integrity="unchanged",
+                projection_integrity="unchanged",
+                oracle_program_access_detected=False,
+                answer_key_exposure_detected=False,
+                yolo_inheritance_detected=False,
+                pa2_proofs_verified=True,
+                pa3_proof_verified=True,
+                source_identities_verified=True,
+                contract_identity_verified=True,
+                projection_identity_verified=True,
+                duration_seconds=float(10 + repetition),
+                usage=PhysicsBenchmarkUsageV1(
+                    availability="provider_reported",
+                    input_tokens=1_000 + repetition,
+                    output_tokens=100 + repetition,
+                ),
             )
+            provisional = PhysicsBenchmarkRunRecordV1(**values)
+            values.update(benchmark_scoring_observation(case, provisional))
+            records.append(PhysicsBenchmarkRunRecordV1(**values))
     return tuple(records)
+
+
+def _score_inputs(
+    catalog: PhysicsBenchmarkCatalogV1,
+    records: tuple[PhysicsBenchmarkRunRecordV1, ...] | list[PhysicsBenchmarkRunRecordV1],
+) -> tuple[Any, tuple[PhysicsBenchmarkScoringIdentityV1, ...]]:
+    authority = load_validated_fixture_authority(catalog, repository_root=ROOT)
+    assert authority is not None
+    identities = tuple(
+        PhysicsBenchmarkScoringIdentityV1(
+            case_id=record.case_id,
+            repetition=record.repetition,
+            fixture_authority_sha256=authority.manifest(record.case_id).canonical_sha256(),
+            fixture_sha256=record.fixture_sha256,
+            contract_sha256=record.contract_sha256,
+            projection_sha256=record.projection_sha256,
+            pa2_completion_proof_sha256s=(),
+            pa3_action_proof_sha256=record.action_proof_sha256,
+            recovery_proof_sha256=str(record.recovery_proof_sha256),
+            source_identities_verified=True,
+            contract_identity_verified=True,
+            projection_identity_verified=True,
+            pa2_proofs_verified=True,
+            pa3_proof_verified=True,
+        )
+        for record in records
+    )
+    return authority, identities
 
 
 def test_catalog_covers_public_suite_and_fixed_repetition_design() -> None:
@@ -366,10 +406,10 @@ def test_catalog_covers_public_suite_and_fixed_repetition_design() -> None:
     assert catalog.prompt_repair_limit == 1
     assert repair.benchmark_id == catalog.benchmark_id
     assert {item.case_id for item in repair.cases} == {
-        "pa5b_case_002",
-        "pa5b_case_003",
-        "pa5b_case_004",
-        "pa5b_case_011",
+        "case_002",
+        "case_003",
+        "case_004",
+        "case_011",
     }
     assert all(item.result.success for item in repair.cases)
     assert all(
@@ -411,9 +451,12 @@ def test_all_scripted_cases_route_and_score_semantically_without_prose_matching(
 ) -> None:
     catalog = load_physics_benchmark_catalog(CATALOG_PATH)
     records = _records(catalog)
+    authority, identities = _score_inputs(catalog, records)
     report = score_physics_benchmark(
         catalog,
         records,
+        fixture_authority=authority,
+        identity_verifications=identities,
         ordinary_nonphysics_unchanged=True,
         limitations=("Synthetic bounded cases only.",),
     )
@@ -457,6 +500,8 @@ def test_aggregation_resume_reuses_json_and_finalizes_missing_markdown(
     report = score_physics_benchmark(
         catalog,
         _records(catalog),
+        fixture_authority=_score_inputs(catalog, _records(catalog))[0],
+        identity_verifications=_score_inputs(catalog, _records(catalog))[1],
         ordinary_nonphysics_unchanged=True,
         limitations=("Bounded synthetic calibration only.",),
     )
@@ -490,9 +535,16 @@ def test_critical_pass_and_false_critical_clean_finding_fail_qualification() -> 
         }
     )
     records[critical_index] = PhysicsBenchmarkRunRecordV1.model_validate(value)
+    case = catalog.case(records[critical_index].case_id)
+    rescored = records[critical_index].model_dump(mode="json")
+    rescored.update(benchmark_scoring_observation(case, records[critical_index]))
+    records[critical_index] = PhysicsBenchmarkRunRecordV1.model_validate(rescored)
+    authority, identities = _score_inputs(catalog, records)
     report = score_physics_benchmark(
         catalog,
         records,
+        fixture_authority=authority,
+        identity_verifications=identities,
         ordinary_nonphysics_unchanged=True,
         limitations=("Synthetic bounded cases only.",),
     )
@@ -550,7 +602,7 @@ def test_benchmark_status_and_dry_run_are_read_only(tmp_path: Path) -> None:
 
     assert status.expected_run_count == 41
     assert status.completed_run_count == 0
-    assert status.next_case_id == "pa5b_case_001"
+    assert status.next_case_id == "case_001"
     assert status.next_repetition == 1
     assert status.safe_resume
     assert not output.exists()
@@ -609,13 +661,11 @@ def test_bounded_executor_uses_fresh_pa3_actions_and_resumes_without_duplicates(
         check=True,
     )
     subprocess.run(("/usr/bin/git", "-C", workspace, "add", "."), check=True)
-    subprocess.run(
-        ("/usr/bin/git", "-C", workspace, "commit", "-qm", "fixture"), check=True
-    )
+    subprocess.run(("/usr/bin/git", "-C", workspace, "commit", "-qm", "fixture"), check=True)
     copied_catalog_path = benchmark_copy / "authority/catalog.json"
     catalog = load_physics_benchmark_catalog(copied_catalog_path)
-    case = catalog.case("pa5b_case_001")
-    two_oracle_case = catalog.case("pa5b_case_020")
+    case = catalog.case("case_001")
+    two_oracle_case = catalog.case("case_020")
     sessions: list[str] = []
 
     def factory(_case: Any, repetition: int) -> Any:
@@ -665,6 +715,27 @@ def test_bounded_executor_uses_fresh_pa3_actions_and_resumes_without_duplicates(
         "case_ids": (case.case_id, two_oracle_case.case_id),
         "codex_invoker_factory": factory,
     }
+    interruption_points = (
+        "authority_verified",
+        "case_001:case_oracle:before_pa2_resume_or_launch",
+        "case_001:case_oracle:after_pa2_proof_reverification",
+        "case_001:repetition-001:before_pa3_resume_or_launch",
+        "case_001:repetition-001:after_pa3_completion",
+        "case_001:repetition-001:after_pa3_proof_reverification",
+        "case_001:repetition-001:after_recovery_proof_finalization",
+        "case_001:repetition-001:after_record_finalization",
+    )
+    interrupted: set[str] = set()
+    for point in interruption_points:
+
+        def interrupt_once(name: str, *, expected: str = point) -> None:
+            if name == expected and name not in interrupted:
+                interrupted.add(name)
+                raise RuntimeError(f"synthetic interruption at {name}")
+
+        with pytest.raises(RuntimeError, match="synthetic interruption"):
+            run_public_physics_benchmark(**kwargs, checkpoint=interrupt_once)
+
     first = run_public_physics_benchmark(**kwargs)
     completed_status = physics_benchmark_status(
         catalog=catalog,
@@ -674,12 +745,13 @@ def test_bounded_executor_uses_fresh_pa3_actions_and_resumes_without_duplicates(
     second = run_public_physics_benchmark(**kwargs)
 
     assert first == second
+    assert interrupted == set(interruption_points)
     assert len(first) == 4
     assert sessions == [
-        "fresh-pa5b-scripted-pa5b_case_001-1",
-        "fresh-pa5b-scripted-pa5b_case_001-2",
-        "fresh-pa5b-scripted-pa5b_case_001-3",
-        "fresh-pa5b-scripted-pa5b_case_020-1",
+        "fresh-pa5b-scripted-case_001-1",
+        "fresh-pa5b-scripted-case_001-2",
+        "fresh-pa5b-scripted-case_001-3",
+        "fresh-pa5b-scripted-case_020-1",
     ]
     assert tuple(item.actual_route for item in first) == (
         "pass",
@@ -690,6 +762,16 @@ def test_bounded_executor_uses_fresh_pa3_actions_and_resumes_without_duplicates(
     assert all(item.pa2_proofs_verified and item.pa3_proof_verified for item in first)
     assert all(not item.session_reused for item in first)
     assert all(item.recovery_proof_sha256 is not None for item in first)
+    for record in first:
+        action = output / record.case_id / "actions" / f"repetition-{record.repetition:03d}"
+        namespace = action / "quarantine/workspace"
+        projected = b"\n".join(path.read_bytes() for path in namespace.rglob("*") if path.is_file())
+        prompt = (action / "control/prompt.txt").read_bytes()
+        assert b"expected_route" not in projected + prompt
+        assert b"required_finding_categories" not in projected + prompt
+        assert b"seeded_defect_authority" not in projected + prompt
+        assert b"fixture-authority.json" not in projected + prompt
+        assert not (namespace / "examples/physics_auditor/benchmark_v1/authority").exists()
     assert completed_status.completed_run_count == 4
     assert completed_status.pending_run_count == 0
     assert completed_status.next_case_id is None

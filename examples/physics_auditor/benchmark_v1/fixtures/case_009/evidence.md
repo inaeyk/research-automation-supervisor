@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 009 observations
 
-The implementation agrees for constant flat-space data but omits the curved radial 2 f'/r contribution for nonconstant profiles.
+For `(f_prime, f_second, r) = (1, 0, 2)`, the candidate returns `0`. It also returns
+`0` when both derivatives vanish.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

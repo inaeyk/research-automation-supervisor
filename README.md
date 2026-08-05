@@ -56,12 +56,15 @@ Oracle execution substrate](docs/physics_oracle_execution.md), the fresh project
 available only to explicit schema-version-2 physics substages; ordinary 0.2.0
 schema-version-1 workflows are unchanged. Provider-neutral adapters, explicit parallel
 DAG campaigns, and later physics research profiles remain unavailable.
-PA-5A adds qualified model-free recovery discovery and safe resume. The PA-5B public
-quality harness is implemented, but independent audits invalidated its first fixed
-41-run benchmark because auditor-visible evidence disclosed diagnostic/route
-authority. PA-5B is **not qualified**; its bounded GL pilot's raw 9/10 route result is
-diagnostic only. The evidence and limitations are in the
-[PA-5B validation report](docs/validation/physics_auditor_pa5b.md).
+PA-5A adds qualified model-free recovery discovery and safe resume. Independent audits
+invalidated the first PA-5B 41-run benchmark because auditor-visible evidence disclosed
+diagnostic/route authority. PA-5C now qualifies remediated benchmark machinery with
+scripted agents only: scorer authority is physically absent from auditor namespaces,
+source and proof identities are reverified before scoring, and benchmark actions use
+PA-5A recovery semantics. No real PA-5C benchmark or GL pilot was run; the old PA-5B
+scores remain diagnostic only. See the
+[PA-5C machinery methodology](docs/physics_auditor_benchmark.md) and preserved
+[PA-5B invalidation report](docs/validation/physics_auditor_pa5b.md).
 
 ## Current status
 
@@ -249,18 +252,20 @@ ambiguous launches, active/stale/reused process identities, changed authority or
 workspace evidence, and missing completion proof block with one reason code and an
 actionable next step. See [workflow discovery and recovery](docs/workflow_recovery.md).
 
-The public PA-5B scientific-quality benchmark adds separate validation, read-only
-status/dry-run, sequential safe resume, and semantic aggregation commands:
+The PA-5C-remediated scientific-quality benchmark machinery adds separate validation,
+read-only status/dry-run, sequential safe resume, proof-reverified scoring, and atomic
+semantic aggregation commands:
 
 ```bash
 research-supervisor validate-physics-benchmark --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json
-research-supervisor run-physics-benchmark --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json --execution-config examples/physics_auditor/synthetic/execution-config.yaml --output runs/physics-pa5b --dry-run
-research-supervisor physics-benchmark-status --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json --records-root runs/physics-pa5b
+research-supervisor run-physics-benchmark --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json --execution-config examples/physics_auditor/synthetic/execution-config.yaml --output runs/physics-pa5d --dry-run
+research-supervisor physics-benchmark-status --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json --records-root runs/physics-pa5d
 ```
 
 The 21-case benchmark and ten-topic GL pilot are small bounded calibrations, not open
 research or publication authority. See the
-[PA-5B methodology](docs/physics_auditor_benchmark.md).
+[PA-5C machinery methodology](docs/physics_auditor_benchmark.md). A real-model run is
+deferred to a fresh, explicitly authorized PA-5D action.
 
 `resume-substage RUN` continues only a nonterminal interrupted run whose frozen inputs,
 repository identity, journal, and action proof still agree. A known complete action is

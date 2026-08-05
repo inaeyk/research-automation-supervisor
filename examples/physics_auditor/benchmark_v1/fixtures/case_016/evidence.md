@@ -1,6 +1,6 @@
-# Locked synthetic evidence
+# Case 016 observations
 
-The L2 growth estimate is 0.2 while Linf gives 4.1. The candidate calls the result robust to norm choice.
+The reported growth estimates are `L2 = 0.2` and `Linf = 4.1`. The candidate claim is
+`norm robust`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

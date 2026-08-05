@@ -1,6 +1,5 @@
-# Locked synthetic evidence
+# Case 011 observations
 
-The implementation omits the factor 2 in the denominator, doubling every nonzero derivative.
+For `(left, right, h) = (1, 5, 2)`, the candidate returns `2`.
 
-This evidence is public and bounded to this case. It is not a publication-level claim.
-
+These are bounded synthetic observations, not a diagnosis or route instruction.

@@ -1,48 +1,65 @@
 schema_version: 1
 profile: physics_implementation
 conventions:
-  - id: locked_gl_snapshot
-    value: GL-with-AI commit 7d04b5b9882dcd476c1457b8d711ac7b5520b2c1
-    authority: project_locked
+- id: locked_gl_snapshot
+  value: GL-with-AI commit 7d04b5b9882dcd476c1457b8d711ac7b5520b2c1
+  authority: project_locked
 assumptions:
-  - id: bounded_pilot_scope
-    statement: Only the declared public snapshot question is in scope; no GL mode or publication conclusion is authorized.
+- id: bounded_pilot_scope
+  statement: Only the declared public snapshot question is in scope; no GL mode or
+    publication conclusion is authorized.
 required_identities:
-  - id: pilot_identity
-    statement: The conformal extrinsic-curvature components must have zero four-dimensional spatial trace with two hidden ww copies.
-    required_evidence_kinds: [document, oracle]
-    oracle_ids: [pilot_oracle]
+- id: pilot_identity
+  statement: The conformal extrinsic-curvature components must have zero four-dimensional
+    spatial trace with two hidden ww copies.
+  required_evidence_kinds:
+  - derivation
+  - oracle
+  oracle_ids:
+  - pilot_oracle
 limiting_cases:
-  - id: pilot_limit
-    statement: The zero conformal extrinsic curvature has zero trace.
-    required_evidence_kinds: [oracle]
-    oracle_ids: [pilot_oracle]
+- id: pilot_limit
+  statement: The zero conformal extrinsic curvature has zero trace.
+  required_evidence_kinds:
+  - oracle
+  oracle_ids:
+  - pilot_oracle
 evidence:
-  - id: locked_snapshot
-    kind: document
-    description: Bounded public authority snapshot with source commit and hashes.
-    path: examples/physics_auditor/gl_pilot_v1/fixtures/task_002/evidence.md
-    required_for: [pilot_identity]
-  - id: candidate_snapshot
-    kind: artifact
-    description: Bounded candidate ledger or classification data.
-    path: examples/physics_auditor/gl_pilot_v1/fixtures/task_002/candidate.txt
-    required_for: [pilot_identity, pilot_limit]
+- id: source_001
+  kind: derivation
+  description: Exact reviewed blob from the declared source commit.
+  path: source/docs/derivations/stage4AO_A_uniform_gp_background_residual.md
+  required_for:
+  - pilot_identity
+- id: source_002
+  kind: artifact
+  description: Exact reviewed blob from the declared source commit.
+  path: source/code/BlackStringToy/ConformalCartoonAlgebra.hpp
+  required_for:
+  - pilot_identity
+- id: source_003
+  kind: artifact
+  description: Exact reviewed blob from the declared source commit.
+  path: source/code/BlackStringToy/tests/Stage4ALTraceFreeCurvatureLapseBlockTest.cpp
+  required_for:
+  - pilot_identity
 oracles:
-  - id: pilot_oracle
-    kind: analytic
-    reference: public_gl_pilot_check
-    statement: Fixed public check for this already-locked bounded question.
-    check_ids: [pilot_identity, pilot_limit]
-    required: true
+- id: pilot_oracle
+  kind: analytic
+  reference: public_gl_pilot_check
+  statement: Fixed public check for this already-locked bounded question.
+  check_ids:
+  - pilot_identity
+  - pilot_limit
+  required: true
 forbidden_claims:
-  - id: no_gl_mode_claim
-    statement: The pilot cannot claim discovery of a GL mode or approve publication.
+- id: no_gl_mode_claim
+  statement: The pilot cannot claim discovery of a GL mode or approve publication.
 human_gate:
   required_for:
-    - convention_change
-    - new_physical_interpretation
-    - unresolved_gauge_constraint_ambiguity
+  - convention_change
+  - new_physical_interpretation
+  - unresolved_gauge_constraint_ambiguity
 audit_policy:
   schema_version: 1
   insufficient_required_evidence: block
@@ -51,4 +68,3 @@ audit_policy:
   low_severity: allow_pass
   informational_severity: allow_pass
 auditor_role_ref: physics_auditor
-
