@@ -1,0 +1,121 @@
+{
+  "all_mandatory_human_routes_satisfied": false,
+  "config_sha256": "8cde6242ab02b94df571f8ca6ba90e2ffdeefe5525c9089ae1305b52771fd7c8",
+  "gl_mode_claimed": false,
+  "human_review_route_count": 3,
+  "infrastructure_failure_count": 0,
+  "malformed_report_count": 1,
+  "matched_route_count": 9,
+  "outcome": "not_completed",
+  "pass_route_count": 6,
+  "pilot_id": "physics_gl_pilot_pa5b_v1",
+  "report_sha256": "1ca5657a80b6864e814fd298b800f68f68d09d7d9db56e77d93f7e32bd6c82aa",
+  "run_count": 10,
+  "schema_version": 1,
+  "source_commit": "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1",
+  "tasks": [
+    {
+      "action_proof_sha256": "762fbf8ab21307e3ceb6a30c1d916ec06d5152873252e4ed4f50fc3b22438459",
+      "actual_route": "pass",
+      "expected_route": "pass",
+      "recovery_proof_sha256": "69bf42a8f7bd99245187a0561ac95c8d14e96439bf0cd6b9b24d0e9c19ff07cc",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_001",
+      "topic": "uniform_ingoing_gp_background_ledger"
+    },
+    {
+      "action_proof_sha256": "3e4b540241c7815816171f47493a84beae1e2cc3e11d416d5e14aaebf2ad3525",
+      "actual_route": "pass",
+      "expected_route": "pass",
+      "recovery_proof_sha256": "a8c057b5c73593f465ffd2823616d5c9ce76c5447dacbcc8f9f1b489bcbc3865",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_002",
+      "topic": "trace_free_conformal_extrinsic_curvature"
+    },
+    {
+      "action_proof_sha256": "0e972d2e4823a57d2e5b363d966ad3f6e95b71b6ef035fe8a29424843c20b40b",
+      "actual_route": "pass",
+      "expected_route": "pass",
+      "recovery_proof_sha256": "baf024b26c828546116e9bd42cdddcdff983895da4437c6a417a8ebd249eb6b6",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_003",
+      "topic": "locked_lapse_gauge_source_consistency"
+    },
+    {
+      "action_proof_sha256": "b0928fd57e1e0319966599ebc54325382e100287f1b8f4143c1bf23df3b2fa16",
+      "actual_route": "pass",
+      "expected_route": "pass",
+      "recovery_proof_sha256": "b9c8f456060cc6ab67be815c66eaacf69f3c930c3784b996d77e6df7eb3e1961",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_004",
+      "topic": "so3_cartoon_hat_gamma_x_consistency"
+    },
+    {
+      "action_proof_sha256": "afb12c0cc54eec7ff1c103a34e4dbf5e5cccfe6bb1a1ca54b87621476d36b910",
+      "actual_route": "pass",
+      "expected_route": "pass",
+      "recovery_proof_sha256": "a67443296fad397dda1ad0c678486c045a4101efab3199094c67b871ee9cb474",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_005",
+      "topic": "stage4aob_discrete_background_residual_convergence"
+    },
+    {
+      "action_proof_sha256": "5a51f04fc2e2ee0aaa379efe37cfa430e4939f99fd2169754d3a250d57eabc6a",
+      "actual_route": "require_human_review",
+      "expected_route": "require_human_review",
+      "recovery_proof_sha256": "5325e97f18a5302834fb31edac16183bfb452d82363c6c590677d2997b4369d0",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_006",
+      "topic": "seeded_constraint_heavy_candidate"
+    },
+    {
+      "action_proof_sha256": "f73c703836e333500aec8da377bcb0bf6d35f6a99fed2c2715b22a05e07640e1",
+      "actual_route": "require_human_review",
+      "expected_route": "require_human_review",
+      "recovery_proof_sha256": "3c63d6bf939d37ce1cb72d1cb7070f5b88dad4f1541eb051dc325093c841b799",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_007",
+      "topic": "seeded_gauge_mode_candidate"
+    },
+    {
+      "action_proof_sha256": "d50b37a13c3aef0626b738ca612dd4f5299e43bc8c8a9c17151c32568dc413b5",
+      "actual_route": "require_human_review",
+      "expected_route": "require_human_review",
+      "recovery_proof_sha256": "f82191c89c1629a906a77c62cdccd5991f084cbe581e955caaf72d97367d902f",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_008",
+      "topic": "seeded_boundary_localized_candidate"
+    },
+    {
+      "action_proof_sha256": "734b47cf4f32853d731c18b097a240f82d909627c51ddfdff20376a4e369875b",
+      "actual_route": null,
+      "expected_route": "require_human_review",
+      "recovery_proof_sha256": "4e54e2603f7a00d11e95716a640cd32e672fb6729b074d34c3140b85d17361df",
+      "route_matched": false,
+      "run_status": "malformed_report",
+      "task_id": "gl_pilot_009",
+      "topic": "unresolved_physical_constraint_classification"
+    },
+    {
+      "action_proof_sha256": "7042d2742278973999b6857e20f18fa70c17fd01e2ee3bc220743a10ca84d5d1",
+      "actual_route": "pass",
+      "expected_route": "pass",
+      "recovery_proof_sha256": "583d7f502240906f05d35d65048101f16cd65439e0300009308e8c8820fc048a",
+      "route_matched": true,
+      "run_status": "routing_completed",
+      "task_id": "gl_pilot_010",
+      "topic": "clean_bounded_accepted_implementation"
+    }
+  ],
+  "zero_authority_exposure": true,
+  "zero_session_reuse_or_yolo": true,
+  "zero_workspace_mutations": true
+}

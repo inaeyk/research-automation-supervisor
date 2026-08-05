@@ -56,8 +56,12 @@ Oracle execution substrate](docs/physics_oracle_execution.md), the fresh project
 available only to explicit schema-version-2 physics substages; ordinary 0.2.0
 schema-version-1 workflows are unchanged. Provider-neutral adapters, explicit parallel
 DAG campaigns, and later physics research profiles remain unavailable.
-The qualification evidence is recorded in the [PA-4 validation
-report](docs/validation/physics_auditor_pa4.md).
+PA-5A adds qualified model-free recovery discovery and safe resume. The PA-5B public
+quality harness is implemented, but independent audits invalidated its first fixed
+41-run benchmark because auditor-visible evidence disclosed diagnostic/route
+authority. PA-5B is **not qualified**; its bounded GL pilot's raw 9/10 route result is
+diagnostic only. The evidence and limitations are in the
+[PA-5B validation report](docs/validation/physics_auditor_pa5b.md).
 
 ## Current status
 
@@ -244,6 +248,19 @@ journals. Automatic recovery is limited to journal-proven, proof-verified bounda
 ambiguous launches, active/stale/reused process identities, changed authority or
 workspace evidence, and missing completion proof block with one reason code and an
 actionable next step. See [workflow discovery and recovery](docs/workflow_recovery.md).
+
+The public PA-5B scientific-quality benchmark adds separate validation, read-only
+status/dry-run, sequential safe resume, and semantic aggregation commands:
+
+```bash
+research-supervisor validate-physics-benchmark --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json
+research-supervisor run-physics-benchmark --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json --execution-config examples/physics_auditor/synthetic/execution-config.yaml --output runs/physics-pa5b --dry-run
+research-supervisor physics-benchmark-status --catalog examples/physics_auditor/benchmark_v1/authority/catalog.json --records-root runs/physics-pa5b
+```
+
+The 21-case benchmark and ten-topic GL pilot are small bounded calibrations, not open
+research or publication authority. See the
+[PA-5B methodology](docs/physics_auditor_benchmark.md).
 
 `resume-substage RUN` continues only a nonterminal interrupted run whose frozen inputs,
 repository identity, journal, and action proof still agree. A known complete action is

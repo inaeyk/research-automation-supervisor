@@ -50,6 +50,8 @@ packages = ["src/research_automation_supervisor"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "examples/physics_auditor/synthetic" = "research_automation_supervisor/example_data/physics_auditor_synthetic"
+"examples/physics_auditor/benchmark_v1" = "research_automation_supervisor/example_data/physics_auditor_benchmark_v1"
+"examples/physics_auditor/gl_pilot_v1" = "research_automation_supervisor/example_data/physics_gl_pilot_v1"
 
 [tool.hatch.build.targets.sdist]
 include = [

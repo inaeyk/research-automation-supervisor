@@ -1,0 +1,681 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "physics_auditor_pa5b_public_v1",
+  "methodology_version": "physics_auditor_pa5b_v1",
+  "answer_key_policy": "separate_unprojected_authority_v1",
+  "prompt_repair_limit": 1,
+  "thresholds": {
+    "schema_version": 1,
+    "clean_case_pass_rate_min": 0.9,
+    "critical_defect_detection_rate_min": 0.9,
+    "false_critical_finding_rate_max": 0.05,
+    "correct_escalation_rate_min": 0.9,
+    "repeated_run_route_consistency_min": 0.9,
+    "infrastructure_failure_rate_max": 0.05
+  },
+  "cases": [
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_001",
+      "seed_kind": "clean_reference",
+      "category": "reference_correctness",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_001",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_001/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The reference implementation satisfies every locked identity and limiting case.",
+      "expected_route": "pass",
+      "required_finding_categories": [],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": false,
+      "clean_case": true,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_002",
+      "seed_kind": "wrong_sign",
+      "category": "algebraic_tensor",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_002",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_002/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate reverses the locked force sign and requires an unambiguous implementation repair.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "sign_or_normalization_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_003",
+      "seed_kind": "missing_normalization",
+      "category": "algebraic_tensor",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_003",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_003/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate omits the Gaussian normalization prefactor.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "sign_or_normalization_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_004",
+      "seed_kind": "missing_metric_factor",
+      "category": "algebraic_tensor",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_004",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_004/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate omits the cylindrical r-squared metric factor in a contraction.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "tensor_or_index_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_005",
+      "seed_kind": "raised_lowered_index",
+      "category": "algebraic_tensor",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_005",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_005/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate copies a timelike contravariant component without the lowering sign.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "tensor_or_index_error"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_006",
+      "seed_kind": "dimensional_inconsistency",
+      "category": "algebraic_tensor",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_006",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_006/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The position update omits dt and adds unlike dimensions.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "dimensional_inconsistency"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_007",
+      "seed_kind": "nonzero_trace",
+      "category": "analytic_limits",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_007",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_007/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The tensor advertised as trace-free has trace one.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "violated_identity"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_008",
+      "seed_kind": "failed_analytic_identity",
+      "category": "analytic_limits",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_008",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_008/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The polynomial derivative uses coefficient two instead of three.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "violated_identity"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_009",
+      "seed_kind": "curved_background_error",
+      "category": "analytic_limits",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_009",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_009/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The radial operator passes a constant flat limit but omits the curved two-over-r term.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "failed_limiting_case"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_010",
+      "seed_kind": "continuum_discrete_translation",
+      "category": "discretization",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_010",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_010/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The continuum integral is translated to a sum without cell width.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "continuum_discrete_mismatch"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_011",
+      "seed_kind": "finite_difference_stencil",
+      "category": "discretization",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_011",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_011/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The centered derivative omits the factor two in its denominator.",
+      "expected_route": "request_repair",
+      "required_finding_categories": [
+        "continuum_discrete_mismatch"
+      ],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "pass",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": true,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_012",
+      "seed_kind": "false_convergence_claim",
+      "category": "numerical_inference",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_012",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_012/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "Two non-asymptotic resolutions with ratio 1.67 do not support the claimed second-order convergence.",
+      "expected_route": "block_insufficient_evidence",
+      "required_finding_categories": [
+        "insufficient_numerical_evidence"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_013",
+      "seed_kind": "constraint_mode_claim",
+      "category": "mode_classification",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_013",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_013/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate is constraint dominated; physical classification requires human review.",
+      "expected_route": "require_human_review",
+      "required_finding_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": true,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_014",
+      "seed_kind": "gauge_mode_claim",
+      "category": "mode_classification",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_014",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_014/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate matches a pure gauge generator; physical classification requires human review.",
+      "expected_route": "require_human_review",
+      "required_finding_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": true,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_015",
+      "seed_kind": "boundary_localization_claim",
+      "category": "mode_classification",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_015",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_015/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate is boundary localized and cannot be promoted to a bulk instability automatically.",
+      "expected_route": "require_human_review",
+      "required_finding_categories": [
+        "new_physical_interpretation",
+        "unsupported_physical_claim"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": true,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_016",
+      "seed_kind": "norm_sensitivity_claim",
+      "category": "numerical_inference",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_016",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_016/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The L2 and Linf diagnostics disagree, so robustness to norm choice is unsupported.",
+      "expected_route": "block_insufficient_evidence",
+      "required_finding_categories": [
+        "insufficient_numerical_evidence"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_017",
+      "seed_kind": "correct_alternative",
+      "category": "reference_correctness",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_017",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_017/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The alternative stencil is algebraically equivalent to the locked implementation.",
+      "expected_route": "pass",
+      "required_finding_categories": [],
+      "forbidden_routes": [
+        "block_insufficient_evidence",
+        "request_repair",
+        "require_human_review"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": false,
+      "clean_case": true,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_018",
+      "seed_kind": "insufficient_evidence",
+      "category": "evidence_quality",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_018",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_018/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The visible implementation is correct but the required independent oracle evidence is deliberately absent.",
+      "expected_route": "block_insufficient_evidence",
+      "required_finding_categories": [
+        "missing_required_evidence"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": false,
+      "critical_seeded_defect": false,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_019",
+      "seed_kind": "convention_change_request",
+      "category": "scientific_governance",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_019",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_019/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate asks to change a locked convention and must route to human review.",
+      "expected_route": "require_human_review",
+      "required_finding_categories": [
+        "convention_change_requested"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": true,
+      "critical_seeded_defect": false,
+      "clean_case": false,
+      "risk": "highest",
+      "repetitions": 3
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_020",
+      "seed_kind": "conflicting_evidence",
+      "category": "evidence_quality",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_020",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_020/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "Valid analytic and numerical evidence conflict; the model cannot select an authority.",
+      "expected_route": "require_human_review",
+      "required_finding_categories": [
+        "oracle_failure"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle_a",
+        "case_oracle_b"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": true,
+      "critical_seeded_defect": false,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    },
+    {
+      "schema_version": 1,
+      "case_id": "pa5b_case_021",
+      "seed_kind": "unsupported_interpretation",
+      "category": "scientific_governance",
+      "fixture_root": "examples/physics_auditor/benchmark_v1/fixtures/case_021",
+      "contract_path": "examples/physics_auditor/benchmark_v1/fixtures/case_021/contract.yaml",
+      "oracle_program_paths": [
+        "examples/physics_auditor/benchmark_v1/oracles/benchmark_oracle.py"
+      ],
+      "seeded_defect_authority": "The candidate introduces a new unsupported physical interpretation requiring human review.",
+      "expected_route": "require_human_review",
+      "required_finding_categories": [
+        "new_physical_interpretation",
+        "unsupported_physical_claim"
+      ],
+      "forbidden_routes": [
+        "pass",
+        "request_repair"
+      ],
+      "required_evidence_ids": [
+        "case_note",
+        "implementation_source",
+        "case_oracle"
+      ],
+      "worker_repair_appropriate": false,
+      "human_review_mandatory": true,
+      "critical_seeded_defect": true,
+      "clean_case": false,
+      "risk": "mechanism",
+      "repetitions": 1
+    }
+  ]
+}
+

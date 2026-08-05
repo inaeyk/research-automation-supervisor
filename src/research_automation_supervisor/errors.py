@@ -100,6 +100,22 @@ class PhysicsAuditorIntegrityError(PhysicsAuditorStateError):
     """Physics Auditor evidence, output, workspace, or proof was substituted."""
 
 
+class PhysicsBenchmarkError(SupervisorError):
+    """Base class for public PA-5B benchmark failures."""
+
+
+class PhysicsBenchmarkInputError(PhysicsBenchmarkError):
+    """A benchmark catalog, fixture, threshold, or run record is invalid."""
+
+
+class PhysicsBenchmarkIntegrityError(PhysicsBenchmarkError):
+    """Benchmark authority separation or bound proof integrity failed."""
+
+
+class PhysicsBenchmarkStateError(PhysicsBenchmarkError):
+    """A benchmark result cannot be aggregated or recovered safely."""
+
+
 class PhysicsOracleError(SupervisorError):
     """Base class for trusted, model-free physics-oracle execution errors."""
 

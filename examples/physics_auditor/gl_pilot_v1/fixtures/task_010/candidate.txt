@@ -1,0 +1,6 @@
+physical_spatial_dim=4
+hidden_multiplicity=2
+trace_denominator=4
+classification=bounded implementation check
+
+

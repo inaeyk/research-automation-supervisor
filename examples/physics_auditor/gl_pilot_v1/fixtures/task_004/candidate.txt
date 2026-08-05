@@ -1,0 +1,4 @@
+hidden_ww_multiplicity=2
+hat_Gamma_x=tilde_Gamma_x+2*Z_over_chi_x
+
+

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "stage": "PA-5B",
+  "audit_date": "2026-08-05",
+  "base_commit": "5741f41bb91cc203152c758a9665e4dad43a2f85",
+  "branch": "feature/physics-auditor-quality-benchmark",
+  "final_verdict": "not_qualified",
+  "attempt_validity": "invalidated_by_answer_key_exposure_hard_stop",
+  "qualified_commit": null,
+  "branch_pushed": false,
+  "raw_benchmark": {
+    "path": "docs/validation/physics_auditor_pa5b.json",
+    "canonical_report_sha256": "beb8857647d19f38075286de6c323eff3c50e9fdadbd9f9520ab205a726fe92a",
+    "file_sha256": "c755697fb3d2ae358ced57382cba925715a6457c7b9d9323a48efc240e22421b",
+    "case_count": 21,
+    "repetition_count": 41,
+    "catalog_sha256": "acfdf755ea6b1a9c3af537468947dc91bf485be0ae3266d761b0cec79fc68a2f",
+    "thresholds_sha256": "5e021ba97d40d2f9d9d28babe2707637bc4a269612933af9b1d4fffe18d8dd50",
+    "raw_verdict": "not_qualified",
+    "score_status": "diagnostic_only"
+  },
+  "audit_override": {
+    "hard_stop_triggered": true,
+    "hard_stop_reason": "Auditor-visible task evidence disclosed seeded diagnoses and required routes.",
+    "answer_key_exposure_detected": true,
+    "superseded_raw_field": "hard_gates.zero_oracle_or_answer_key_exposure",
+    "scientific_scores_may_qualify_stage": false
+  },
+  "worker_repair": {
+    "execution_kind": "scripted_fake_agent_pa4_loop",
+    "attempted": 4,
+    "mechanism_successes": 4,
+    "live_worker_scientific_metric": false,
+    "scientifically_invalid_case_ids": [
+      "pa5b_case_004"
+    ]
+  },
+  "gl_pilot": {
+    "path": "docs/validation/physics_auditor_pa5b_gl_pilot.json",
+    "config_sha256": "8cde6242ab02b94df571f8ca6ba90e2ffdeefe5525c9089ae1305b52771fd7c8",
+    "canonical_report_sha256": "1ca5657a80b6864e814fd298b800f68f68d09d7d9db56e77d93f7e32bd6c82aa",
+    "compact_file_sha256": "d06e597f15226e998847ddbeeeb6f8b47fe5766fcb15342ff6370fe113b26fe1",
+    "run_count": 10,
+    "matched_route_count": 9,
+    "malformed_report_count": 1,
+    "outcome": "not_completed",
+    "independent_quality_evidence": false,
+    "answer_key_exposure_detected": true,
+    "gl_mode_claimed": false
+  },
+  "bounded_repair": {
+    "allowance_used": 1,
+    "scope": "multi_oracle_recovery_receipt_identity_comparison",
+    "scientific_inputs_or_outcomes_changed": false,
+    "post_repair_full_resume_duplicate_actions": 0,
+    "action_tree_sha256_before_and_after": "133b1c9324ee9f11a52a4c5e7e8ce0d8f164ffe919520b03baf239af485205f3"
+  },
+  "independent_audits": {
+    "technical": {
+      "verdict": "not_qualified",
+      "critical_findings": 1,
+      "high_findings": 3,
+      "medium_findings": 2
+    },
+    "physics_quality": {
+      "verdict": "not_qualified",
+      "critical_findings": 1,
+      "high_findings": 3,
+      "medium_findings": 3
+    }
+  },
+  "validation": {
+    "focused_pa5b_tests_passed": 17,
+    "focused_pa1_through_pa5a_tests_passed": 403,
+    "complete_tests_passed": 1393,
+    "complete_tests_skipped": 1,
+    "complete_test_duration_seconds": 540.42,
+    "ruff": "passed",
+    "strict_mypy": "passed_58_source_files",
+    "package_version": "0.2.0",
+    "wheel_build": "passed",
+    "sdist_build": "passed",
+    "distribution_hashes": "reported_in_final_handoff_to_avoid_sdist_self_reference",
+    "clean_install_smoke": "passed",
+    "installed_cli_help_smoke": "passed",
+    "packaged_pa5b_data_entry_count": 100
+  },
+  "recommendation": "Do not proceed to PA-6. Use a separately bounded remediation stage, freeze corrected authority hashes, and rerun once without threshold weakening or outcome-driven prompt tuning."
+}

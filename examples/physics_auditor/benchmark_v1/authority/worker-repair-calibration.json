@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "physics_auditor_pa5b_public_v1",
+  "execution_kind": "scripted_fake_agent_pa4_loop",
+  "cases": [
+    {
+      "case_id": "pa5b_case_002",
+      "result": {
+        "applicable": true,
+        "attempted": true,
+        "same_worker_session": true,
+        "repair_round_count": 1,
+        "stale_evidence_invalidated": true,
+        "fresh_auditor_enforced": true,
+        "final_route": "pass",
+        "success": true,
+        "new_regressions": [],
+        "final_workspace_integrity": "unchanged",
+        "final_proof_integrity": "verified"
+      }
+    },
+    {
+      "case_id": "pa5b_case_003",
+      "result": {
+        "applicable": true,
+        "attempted": true,
+        "same_worker_session": true,
+        "repair_round_count": 1,
+        "stale_evidence_invalidated": true,
+        "fresh_auditor_enforced": true,
+        "final_route": "pass",
+        "success": true,
+        "new_regressions": [],
+        "final_workspace_integrity": "unchanged",
+        "final_proof_integrity": "verified"
+      }
+    },
+    {
+      "case_id": "pa5b_case_004",
+      "result": {
+        "applicable": true,
+        "attempted": true,
+        "same_worker_session": true,
+        "repair_round_count": 1,
+        "stale_evidence_invalidated": true,
+        "fresh_auditor_enforced": true,
+        "final_route": "pass",
+        "success": true,
+        "new_regressions": [],
+        "final_workspace_integrity": "unchanged",
+        "final_proof_integrity": "verified"
+      }
+    },
+    {
+      "case_id": "pa5b_case_011",
+      "result": {
+        "applicable": true,
+        "attempted": true,
+        "same_worker_session": true,
+        "repair_round_count": 1,
+        "stale_evidence_invalidated": true,
+        "fresh_auditor_enforced": true,
+        "final_route": "pass",
+        "success": true,
+        "new_regressions": [],
+        "final_workspace_integrity": "unchanged",
+        "final_proof_integrity": "verified"
+      }
+    }
+  ]
+}

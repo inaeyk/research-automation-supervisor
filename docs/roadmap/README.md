@@ -2,11 +2,13 @@
 
 These documents describe both qualified foundations and later implementation plans.
 Version 0.2.0 remains sequential and Codex-backed. Physics Auditor PA-1 strict schemas
-and model-free routing, PA-2 trusted oracle execution, and the standalone PA-3 Codex
-action are qualified. The PA-3 action uses a fresh read-only Bubblewrap projection and
-is not integrated into ordinary workflows. Provider-neutral adapters, workflow
-integration, parallel DAG campaigns, and broader physics research profiles follow only
-after their stated release gates pass.
+and model-free routing, PA-2 trusted oracle execution, standalone PA-3, PA-4 workflow
+integration, and PA-5A recovery are qualified. The public PA-5B quality harness is
+implemented, but answer-key exposure found by independent audits invalidated the first
+fixed real benchmark and bounded GL pilot. See the
+[PA-5B methodology and results](../physics_auditor_benchmark.md). PA-6 is not
+authorized. Provider-neutral adapters, parallel DAG campaigns, and broader physics
+research profiles follow only after their stated release gates pass.
 
 - [0.3–0.6 upgrade program](upgrade_program_0.3_to_0.6.md)
 - [Physics Auditor v1](physics_auditor_v1.md)

@@ -1,0 +1,54 @@
+schema_version: 1
+profile: physics_implementation
+conventions:
+  - id: locked_convention
+    value: Constraint projection classification
+    authority: task_locked
+assumptions:
+  - id: synthetic_scope
+    statement: This case is a bounded public synthetic question; no research claim is authorized.
+required_identities:
+  - id: primary_identity
+    statement: A candidate with dominant projection onto the frozen constraint subspace cannot be classified as a physical mode.
+    required_evidence_kinds: [document, oracle]
+    oracle_ids: [case_oracle]
+limiting_cases:
+  - id: control_limit
+    statement: A zero constraint projection is compatible with, but does not prove, a physical mode.
+    required_evidence_kinds: [oracle]
+    oracle_ids: [case_oracle]
+evidence:
+  - id: implementation_source
+    kind: artifact
+    description: Public synthetic candidate implementation or claim data.
+    path: examples/physics_auditor/benchmark_v1/fixtures/case_013/implementation.py
+    required_for: [primary_identity, control_limit]
+  - id: case_note
+    kind: document
+    description: Auditor-visible locked authority and candidate observation.
+    path: examples/physics_auditor/benchmark_v1/fixtures/case_013/evidence.md
+    required_for: [primary_identity]
+oracles:
+  - id: case_oracle
+    kind: analytic
+    reference: public_case_oracle
+    statement: Fixed public synthetic check for this locked question.
+    check_ids: [primary_identity, control_limit]
+    required: true
+forbidden_claims:
+  - id: no_discovery_claim
+    statement: This synthetic case must not be presented as a new physical discovery.
+human_gate:
+  required_for:
+    - convention_change
+    - new_physical_interpretation
+    - unresolved_gauge_constraint_ambiguity
+audit_policy:
+  schema_version: 1
+  insufficient_required_evidence: block
+  conflicting_required_evidence: human_review
+  medium_severity: request_repair
+  low_severity: allow_pass
+  informational_severity: allow_pass
+auditor_role_ref: physics_auditor
+

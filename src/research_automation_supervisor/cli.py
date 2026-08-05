@@ -37,6 +37,7 @@ from research_automation_supervisor.errors import (
     PhysicsAuditorInputError,
     PhysicsAuditorIntegrityError,
     PhysicsAuditorStateError,
+    PhysicsBenchmarkError,
     PhysicsContractError,
     PhysicsOracleDependencyError,
     PhysicsOracleInputError,
@@ -78,6 +79,27 @@ from research_automation_supervisor.physics_auditor_execution import (
     resume_physics_auditor,
     run_physics_auditor,
     validate_physics_auditor_action,
+)
+from research_automation_supervisor.physics_benchmark import (
+    finalize_physics_benchmark_report,
+    score_physics_benchmark,
+    validate_benchmark_authority_separation,
+)
+from research_automation_supervisor.physics_benchmark_execution import (
+    physics_benchmark_status,
+    run_public_physics_benchmark,
+)
+from research_automation_supervisor.physics_benchmark_models import (
+    load_physics_benchmark_catalog,
+    load_physics_benchmark_repair_calibration,
+    load_physics_benchmark_run_record,
+)
+from research_automation_supervisor.physics_gl_pilot import (
+    load_physics_gl_pilot_config,
+    validate_physics_gl_pilot,
+)
+from research_automation_supervisor.physics_gl_pilot_execution import (
+    run_bounded_physics_gl_pilot,
 )
 from research_automation_supervisor.physics_models import (
     DEFAULT_PHYSICS_AUDIT_POLICY_V1,
@@ -527,6 +549,433 @@ def audit_physics_command(
         route_value = cast(dict[str, object], payload["routing_decision"])["outcome"]
         if route_value != "pass":
             raise typer.Exit(code=5)
+
+
+@app.command("validate-physics-benchmark")
+def validate_physics_benchmark_command(
+    catalog_path: Annotated[
+        Path,
+        typer.Option("--catalog", help="Public PA-5B answer-key catalog."),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Clean benchmark repository root."),
+    ] = Path("."),
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate PA-5B schemas, fixtures, thresholds, and answer-key separation."""
+    try:
+        catalog = load_physics_benchmark_catalog(catalog_path)
+        fixture_hashes = validate_benchmark_authority_separation(
+            catalog,
+            repository_root=workspace,
+            catalog_path=catalog_path,
+        )
+        payload = {
+            "schema_version": 1,
+            "ok": True,
+            "benchmark_id": catalog.benchmark_id,
+            "catalog_sha256": catalog.canonical_sha256(),
+            "thresholds_sha256": catalog.thresholds.canonical_sha256(),
+            "case_count": len(catalog.cases),
+            "repetition_count": sum(item.repetitions for item in catalog.cases),
+            "fixture_hashes": fixture_hashes,
+            "answer_key_projected": False,
+        }
+    except PhysicsBenchmarkError as exc:
+        _render_physics_benchmark_error(str(exc), as_json, 2)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    "Physics Auditor PA-5B benchmark inputs are valid.",
+                    f"Cases: {payload['case_count']}",
+                    f"Predeclared repetitions: {payload['repetition_count']}",
+                    f"Catalog SHA-256: {payload['catalog_sha256']}",
+                    "Answer-key projection: forbidden and absent",
+                    "Model invocation: none",
+                )
+            )
+        )
+
+
+@app.command("run-physics-benchmark")
+def run_physics_benchmark_command(
+    catalog_path: Annotated[
+        Path,
+        typer.Option("--catalog", help="Validated public PA-5B authority catalog."),
+    ],
+    execution_config_path: Annotated[
+        Path,
+        typer.Option(
+            "--execution-config",
+            help="Qualified fresh read-only PA-3 execution configuration.",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Dedicated benchmark action directory."),
+    ],
+    repair_calibration_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--repair-calibration",
+            help="Optional strict results from the separate bounded PA-4 repair loops.",
+        ),
+    ] = None,
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Clean benchmark repository root."),
+    ] = Path("."),
+    case_ids: Annotated[
+        list[str] | None,
+        typer.Option("--case", help="Optional opaque case ID; repeat to select cases."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Validate and report the next resumable action without writes or launches.",
+        ),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Run or safely resume sequential PA-2/PA-3 benchmark actions."""
+    try:
+        catalog = load_physics_benchmark_catalog(catalog_path)
+        repair_results = None
+        if repair_calibration_path is not None:
+            repair_calibration = load_physics_benchmark_repair_calibration(
+                repair_calibration_path
+            )
+            if repair_calibration.benchmark_id != catalog.benchmark_id:
+                raise PhysicsBenchmarkError(
+                    "repair calibration benchmark identity does not match the catalog"
+                )
+            repair_results = repair_calibration.as_mapping()
+        if dry_run:
+            validate_benchmark_authority_separation(
+                catalog,
+                repository_root=workspace,
+                catalog_path=catalog_path,
+            )
+            status = physics_benchmark_status(
+                catalog=catalog,
+                output_directory=output,
+                case_ids=tuple(case_ids or ()),
+            )
+            payload = {
+                **status.model_dump(mode="json"),
+                "dry_run": True,
+                "output": str(output.resolve()),
+            }
+        else:
+            records = run_public_physics_benchmark(
+                catalog=catalog,
+                catalog_path=catalog_path,
+                execution_config_path=execution_config_path,
+                repository_root=workspace,
+                output_directory=output,
+                case_ids=tuple(case_ids or ()),
+                repair_results=repair_results,
+            )
+            route_counts: dict[str, int] = {}
+            for record in records:
+                route = record.actual_route or record.run_status
+                route_counts[route] = route_counts.get(route, 0) + 1
+            payload = {
+                "schema_version": 1,
+                "benchmark_id": catalog.benchmark_id,
+                "run_count": len(records),
+                "route_counts": route_counts,
+                "output": str(output.resolve()),
+                "aggregation_finalized": False,
+                "dry_run": False,
+            }
+    except PhysicsBenchmarkError as exc:
+        _render_physics_benchmark_error(str(exc), as_json, 4)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    elif dry_run:
+        typer.echo(
+            "\n".join(
+                (
+                    "Physics benchmark dry run completed without a launch.",
+                    f"Completed: {payload['completed_run_count']}/"
+                    f"{payload['expected_run_count']}",
+                    f"Next: {payload['next_case_id'] or 'none'}"
+                    + (
+                        f" repetition {payload['next_repetition']}"
+                        if payload["next_repetition"] is not None
+                        else ""
+                    ),
+                    "Safe resume: yes",
+                )
+            )
+        )
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    f"Physics benchmark runs: {payload['run_count']}",
+                    f"Actions: {payload['output']}",
+                    "Aggregation: run score-physics-benchmark after required validations.",
+                )
+            )
+        )
+
+
+@app.command("physics-benchmark-status")
+def physics_benchmark_status_command(
+    catalog_path: Annotated[
+        Path,
+        typer.Option("--catalog", help="The predeclared PA-5B authority catalog."),
+    ],
+    records_root: Annotated[
+        Path,
+        typer.Option("--records-root", help="Benchmark action root to inspect read-only."),
+    ],
+    case_ids: Annotated[
+        list[str] | None,
+        typer.Option("--case", help="Optional opaque case ID; repeat to select cases."),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Report benchmark progress and next safe resume action without writes."""
+    try:
+        catalog = load_physics_benchmark_catalog(catalog_path)
+        status = physics_benchmark_status(
+            catalog=catalog,
+            output_directory=records_root,
+            case_ids=tuple(case_ids or ()),
+        )
+        payload = status.model_dump(mode="json")
+    except PhysicsBenchmarkError as exc:
+        _render_physics_benchmark_error(str(exc), as_json, 4)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    f"Physics benchmark: {payload['benchmark_id']}",
+                    f"Completed: {payload['completed_run_count']}/"
+                    f"{payload['expected_run_count']}",
+                    f"Partial actions: {payload['partial_action_count']}",
+                    f"Next: {payload['next_case_id'] or 'none'}",
+                    "Safe resume: yes",
+                    "Process launched: no",
+                )
+            )
+        )
+
+
+@app.command("score-physics-benchmark")
+def score_physics_benchmark_command(
+    catalog_path: Annotated[
+        Path,
+        typer.Option("--catalog", help="The predeclared PA-5B authority catalog."),
+    ],
+    records_root: Annotated[
+        Path,
+        typer.Option("--records-root", help="Root produced by run-physics-benchmark."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="New or recoverable aggregate output directory."),
+    ],
+    ordinary_nonphysics_unchanged: Annotated[
+        bool,
+        typer.Option(
+            "--ordinary-nonphysics-unchanged",
+            help="Assert the frozen ordinary-workflow validation passed in this attempt.",
+        ),
+    ] = False,
+    validation_layout: Annotated[
+        bool,
+        typer.Option(
+            "--validation-layout",
+            help="Use the versioned docs/validation PA-5B artifact names.",
+        ),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Aggregate semantic outcomes and apply only predeclared thresholds."""
+    try:
+        catalog = load_physics_benchmark_catalog(catalog_path)
+        paths = sorted(records_root.glob("*/actions/repetition-*/benchmark-record.json"))
+        records = tuple(load_physics_benchmark_run_record(path) for path in paths)
+        report = score_physics_benchmark(
+            catalog,
+            records,
+            ordinary_nonphysics_unchanged=ordinary_nonphysics_unchanged,
+            limitations=(
+                "Public synthetic fixtures are deliberately small and bounded.",
+                "The benchmark does not answer open research questions.",
+                "Human review remains mandatory for scientific interpretation.",
+            ),
+        )
+        json_path, markdown_path = finalize_physics_benchmark_report(
+            output,
+            report,
+            validation_layout=validation_layout,
+        )
+        payload = {
+            "schema_version": 1,
+            "benchmark_id": report.benchmark_id,
+            "qualification_verdict": report.qualification_verdict,
+            "complete": report.complete,
+            "run_count": report.aggregate.run_count,
+            "report_sha256": report.canonical_sha256(),
+            "json_report": str(json_path.resolve()),
+            "markdown_summary": str(markdown_path.resolve()),
+        }
+    except PhysicsBenchmarkError as exc:
+        _render_physics_benchmark_error(str(exc), as_json, 4)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    f"Physics benchmark verdict: {payload['qualification_verdict']}",
+                    f"Runs: {payload['run_count']}",
+                    f"JSON: {payload['json_report']}",
+                    f"Markdown: {payload['markdown_summary']}",
+                )
+            )
+        )
+    if payload["qualification_verdict"] != "qualified":
+        raise typer.Exit(code=5)
+
+
+@app.command("validate-gl-pilot")
+def validate_gl_pilot_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", help="Separate bounded GL pilot configuration."),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Repository containing pilot snapshots."),
+    ] = Path("."),
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate the read-only GL pilot scope without a model or project mutation."""
+    try:
+        config = load_physics_gl_pilot_config(config_path)
+        fixtures = validate_physics_gl_pilot(
+            config,
+            repository_root=workspace,
+            config_path=config_path,
+        )
+        payload = {
+            "schema_version": 1,
+            "ok": True,
+            "pilot_id": config.pilot_id,
+            "config_sha256": config.canonical_sha256(),
+            "source_commit": config.source_commit,
+            "task_count": len(config.tasks),
+            "fixture_hashes": fixtures,
+            "production_mutation_allowed": config.production_mutation_allowed,
+            "open_research_questions_allowed": config.open_research_questions_allowed,
+            "model_launched": False,
+        }
+    except PhysicsBenchmarkError as exc:
+        _render_physics_benchmark_error(str(exc), as_json, 2)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    "Bounded GL pilot inputs are valid.",
+                    f"Tasks: {payload['task_count']}",
+                    f"Source commit: {payload['source_commit']}",
+                    "Production mutation: forbidden",
+                    "Model invocation: none",
+                )
+            )
+        )
+
+
+@app.command("run-gl-pilot")
+def run_gl_pilot_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", help="Validated bounded GL pilot configuration."),
+    ],
+    execution_config_path: Annotated[
+        Path,
+        typer.Option(
+            "--execution-config", help="Qualified fresh read-only PA-3 configuration."
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Dedicated GL pilot action directory."),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", help="Clean repository containing pilot snapshots."),
+    ] = Path("."),
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Run ten bounded GL actions after harness and deterministic-test qualification."""
+    try:
+        config = load_physics_gl_pilot_config(config_path)
+        report = run_bounded_physics_gl_pilot(
+            config=config,
+            config_path=config_path,
+            execution_config_path=execution_config_path,
+            repository_root=workspace,
+            output_directory=output,
+        )
+        payload = {
+            "schema_version": 1,
+            "pilot_id": report.pilot_id,
+            "outcome": report.outcome,
+            "source_commit": report.source_commit,
+            "run_count": report.run_count,
+            "matched_route_count": report.matched_route_count,
+            "pass_route_count": report.pass_route_count,
+            "human_review_route_count": report.human_review_route_count,
+            "report_sha256": report.canonical_sha256(),
+            "artifact_directory": str(output.resolve()),
+            "gl_mode_claimed": False,
+        }
+    except PhysicsBenchmarkError as exc:
+        _render_physics_benchmark_error(str(exc), as_json, 4)
+    if as_json:
+        typer.echo(_stable_json(payload))
+    else:
+        typer.echo(
+            "\n".join(
+                (
+                    f"GL pilot outcome: {payload['outcome']}",
+                    f"Routes matched: {payload['matched_route_count']}/{payload['run_count']}",
+                    f"Pass/human: {payload['pass_route_count']}/"
+                    f"{payload['human_review_route_count']}",
+                    "GL mode claim: none",
+                )
+            )
+        )
+    if payload["outcome"] != "completed_bounded":
+        raise typer.Exit(code=5)
 
 
 @app.command("validate-codex-request")
@@ -1808,6 +2257,23 @@ def _render_physics_error(error: str, as_json: bool) -> Never:
     else:
         typer.echo(f"Physics validation error: {sanitized}", err=True)
     raise typer.Exit(code=2)
+
+
+def _render_physics_benchmark_error(
+    error: str,
+    as_json: bool,
+    exit_code: int,
+) -> Never:
+    _, _, sensitive_values = build_subprocess_environment()
+    sanitized = redact_text(error, sensitive_values)
+    kind = "input" if exit_code == 2 else "integrity"
+    if as_json:
+        typer.echo(
+            _stable_json({"error": sanitized, "error_kind": kind, "ok": False})
+        )
+    else:
+        typer.echo(f"Physics benchmark error: {sanitized}", err=True)
+    raise typer.Exit(code=exit_code)
 
 
 def _render_physics_internal_error(as_json: bool) -> Never:
