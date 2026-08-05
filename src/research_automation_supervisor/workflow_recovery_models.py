@@ -85,11 +85,17 @@ class RunIndexEntryV1(BaseModel):
     run_token: Identifier
     status: ObservedWorkflowStatus
     completion: RunCompletionV1
-    journal_sequence: Annotated[int, Field(ge=1)]
+    journal_sequence: Annotated[int, Field(ge=0)]
     journal_hash: Sha256
     updated_at: str
     state_sha256: Sha256
     journal_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_journal_sequence(self) -> RunIndexEntryV1:
+        if self.workflow_schema_version == 1 and self.journal_sequence == 0:
+            raise ValueError("schema-version-1 run-index entries require a journal head")
+        return self
 
 
 class RunIndexIssueV1(BaseModel):
@@ -176,7 +182,7 @@ class RecoveryPlanV1(BaseModel):
     substage_id: Identifier
     run_token: Identifier
     observed_status: ObservedWorkflowStatus
-    journal_sequence: Annotated[int, Field(ge=1)]
+    journal_sequence: Annotated[int, Field(ge=0)]
     journal_hash: Sha256
     state_sha256: Sha256
     journal_sha256: Sha256
@@ -199,6 +205,8 @@ class RecoveryPlanV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_disposition(self) -> RecoveryPlanV1:
+        if self.workflow_schema_version == 1 and self.journal_sequence == 0:
+            raise ValueError("schema-version-1 recovery plans require a journal head")
         if self.auto_resume_safe != (self.disposition in {"auto_resume", "finish_finalization"}):
             raise ValueError("recovery plan safety flag contradicts its disposition")
         allowed = {

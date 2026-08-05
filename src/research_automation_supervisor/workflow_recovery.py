@@ -21,12 +21,15 @@ from pydantic import ValidationError
 
 from research_automation_supervisor.codex_adapter import build_subprocess_environment
 from research_automation_supervisor.durable_state import (
+    ZERO_HASH,
     atomic_write_json,
     canonical_json,
+    commit_result_then_state,
     reconcile_model_snapshot,
     render_json_bytes,
 )
 from research_automation_supervisor.errors import (
+    PhysicsOracleError,
     SupervisorError,
     WorkflowDependencyError,
     WorkflowInputError,
@@ -80,6 +83,7 @@ from research_automation_supervisor.physics_workflow_models import (
     PHYSICS_PAUSED_STATUSES_V2,
     PHYSICS_TERMINAL_STATUSES_V2,
     PhysicsReviewDecisionV1,
+    PhysicsWorkflowJournalEntryV2,
     PhysicsWorkflowResultV2,
     PhysicsWorkflowStateV2,
     PreparedPhysicsSubstageV2,
@@ -325,7 +329,11 @@ def execute_recovery_plan(
             outcome_status = "already_terminal"
             result_status = plan.observed_status
         elif plan.operation == "finalize_snapshots":
-            result = _finalize_snapshots(Path(plan.run_directory), plan.workflow_schema_version)
+            result = _finalize_snapshots(
+                Path(plan.run_directory),
+                plan.workflow_schema_version,
+                physics_services=services.physics_services,
+            )
             result_status = result.status
             outcome_status = "finalized"
             reason = "snapshot_finalization_completed"
@@ -358,8 +366,17 @@ def execute_recovery_plan(
             next_step = _next_step_for_status(result_status)
     except SupervisorError as exc:
         outcome_status = "failed"
-        reason = "recovery_execution_failed"
-        next_step = "Run status again; inspect the new durable head before taking manual action."
+        if plan.operation == "finalize_snapshots":
+            reason = "snapshot_finalization_integrity_failed"
+            next_step = (
+                "Restore the exact authoritative state, journal, and proof records; "
+                "the corrupt public result was not trusted."
+            )
+        else:
+            reason = "recovery_execution_failed"
+            next_step = (
+                "Run status again; inspect the new durable head before taking manual action."
+            )
         del exc
     finished = _utc_string(services.utc_now())
     outcome = RecoveryOutcomeV1(
@@ -395,6 +412,8 @@ def _discover_run(run_directory: Path) -> RunIndexEntryV1:
         physics_state = _load_reconciled_physics_state(
             run_directory, DEFAULT_PHYSICS_WORKFLOW_SERVICES, persist=False
         )
+        physics_entries = _read_physics_journal(run_directory)
+        _verify_physics_state_reconstruction(physics_state, physics_entries)
         journal_path = run_directory / PHYSICS_JOURNAL_FILE
         terminal = physics_state.status in _TERMINAL_V2
         state = physics_state
@@ -570,6 +589,7 @@ def _build_physics_plan(run_directory: Path) -> RecoveryPlanV1:
         run_directory, DEFAULT_PHYSICS_WORKFLOW_SERVICES, persist=False
     )
     entries = _read_physics_journal(run_directory)
+    _verify_physics_state_reconstruction(state, entries)
     prepared = load_physics_substage_specification(
         Path(state.specification_path), require_clean=False
     )
@@ -615,21 +635,40 @@ def _build_physics_plan(run_directory: Path) -> RecoveryPlanV1:
             reason_code=_process_reason(aggregate),
             next_step=_process_next_step(aggregate),
         )
-    if not _physics_workspace_and_authority_match(run_directory, state, prepared):
+    workspace = _physics_workspace_and_authority_reconciliation(
+        run_directory, state, prepared, entries
+    )
+    if workspace != "verified":
+        reason_code = {
+            "changed": "workspace_integrity_failure",
+            "missing": "workspace_identity_authority_missing",
+            "invalid": "workspace_identity_authority_invalid",
+        }[workspace]
+        next_step = {
+            "changed": (
+                "Restore the exact journal-accepted workspace content manually; "
+                "recovery will not reset it."
+            ),
+            "missing": (
+                "Restore the authoritative persisted workspace evidence or abandon the run; "
+                "the observed workspace is never adopted as authority."
+            ),
+            "invalid": (
+                "Restore the exact workspace/configuration/contract/evidence records manually; "
+                "recovery will not rewrite them."
+            ),
+        }[workspace]
         return _make_plan(
             common,
-            workspace_reconciliation="changed",
+            workspace_reconciliation="changed" if workspace == "changed" else "invalid",
             proof_reconciliation=proof,
             pending_action_id=pending_id,
             pending_action_kind=pending_kind,
             disposition="blocked",
             operation="none",
             auto_resume_safe=False,
-            reason_code="workspace_or_authority_changed",
-            next_step=(
-                "Restore the exact workspace/configuration/contract/evidence manually; "
-                "recovery will not reset it."
-            ),
+            reason_code=reason_code,
+            next_step=next_step,
         )
     if proof in {"missing", "invalid"}:
         return _make_plan(
@@ -911,35 +950,129 @@ def _verify_physics_auditor_output(
         raise WorkflowStateError("Physics Auditor proof contradicts physics state")
 
 
-def _physics_workspace_and_authority_match(
+def _physics_workspace_and_authority_reconciliation(
     run_directory: Path,
     state: PhysicsWorkflowStateV2,
     prepared: PreparedPhysicsSubstageV2,
-) -> bool:
+    entries: Sequence[PhysicsWorkflowJournalEntryV2],
+) -> Literal["verified", "changed", "missing", "invalid"]:
     try:
         authority = json.loads(
             (run_directory / "control" / "authority.json").read_text(encoding="utf-8")
         )
         software_sha = sha256_regular_file(Path(state.software_specification_path))
         if authority.get("software_specification_sha256") != software_sha:
-            return False
+            return "invalid"
         baseline = record_git_baseline(prepared.workspace)
         if (
             str(baseline.repository_root) != state.repository_root
             or baseline.head != state.baseline_commit
             or baseline.branch != state.baseline_branch
         ):
-            return False
-        if state.current_workspace_identity_sha256 is not None and (
-            state.oracle_evidence
-            or state.status in {"physics_oracles_running", "physics_auditor_running"}
+            return "changed"
+
+        journal_current_identity: str | None = None
+        journal_accepted_identity: str | None = None
+        for entry in entries:
+            if "current_workspace_identity_sha256" in entry.state_updates:
+                value = entry.state_updates["current_workspace_identity_sha256"]
+                if value is not None and not isinstance(value, str):
+                    return "invalid"
+                journal_current_identity = value
+            if "accepted_workspace_identity_sha256" in entry.state_updates:
+                value = entry.state_updates["accepted_workspace_identity_sha256"]
+                if value is not None and not isinstance(value, str):
+                    return "invalid"
+                journal_accepted_identity = value
+        if (
+            journal_current_identity != state.current_workspace_identity_sha256
+            or journal_accepted_identity != state.accepted_workspace_identity_sha256
         ):
+            return "invalid"
+
+        nested = _physics_software_workspace_reconciliation(
+            run_directory, state, prepared, entries, baseline.clean
+        )
+        if nested != "verified":
+            return nested
+
+        expected_identity = journal_current_identity
+        if state.status in {"completed", "checkpoint_paused"}:
+            if journal_accepted_identity is None:
+                return "missing"
+            if expected_identity is not None and expected_identity != journal_accepted_identity:
+                return "invalid"
+            expected_identity = journal_accepted_identity
+        if state.status == "physics_auditor_running" and expected_identity is None:
+            return "missing"
+        if expected_identity is not None:
             current = collect_physics_oracle_workspace_identity(prepared.workspace)
-            if current.canonical_sha256() != state.current_workspace_identity_sha256:
-                return False
-        return True
-    except (OSError, ValueError, WorkflowInputError, WorkflowStateError):
-        return False
+            if current.canonical_sha256() != expected_identity:
+                return "changed"
+        return "verified"
+    except (
+        OSError,
+        ValidationError,
+        ValueError,
+        PhysicsOracleError,
+        WorkflowDependencyError,
+        WorkflowInputError,
+        WorkflowStateError,
+    ):
+        return "invalid"
+
+
+def _physics_software_workspace_reconciliation(
+    run_directory: Path,
+    state: PhysicsWorkflowStateV2,
+    prepared: PreparedPhysicsSubstageV2,
+    entries: Sequence[PhysicsWorkflowJournalEntryV2],
+    baseline_clean: bool,
+) -> Literal["verified", "changed", "missing", "invalid"]:
+    expected_run = run_directory / "software-runs" / f"{state.substage_id}-sw-{state.run_token}"
+    if state.software_run_directory is None:
+        if state.status not in {"initialized", "software_running"}:
+            return "missing"
+        return "verified" if baseline_clean else "changed"
+    nested = Path(state.software_run_directory)
+    try:
+        metadata = nested.lstat()
+    except OSError:
+        return "missing"
+    if nested != expected_run or nested.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        return "invalid"
+    nested_state = _load_reconciled_workflow_state(nested)
+    if (
+        nested_state.workspace != state.workspace
+        or nested_state.repository_root != state.repository_root
+        or nested_state.baseline_commit != state.baseline_commit
+        or nested_state.baseline_branch != state.baseline_branch
+    ):
+        return "invalid"
+
+    lifecycle: str | None = None
+    for entry in entries:
+        if entry.action_kind == "software":
+            lifecycle = "intent" if entry.event_type == "action_intent" else "completed"
+    if lifecycle == "completed":
+        if state.latest_software_result_path is None:
+            return "missing"
+        try:
+            evidence = _load_physics_model(Path(state.latest_software_result_path), WorkflowResult)
+        except WorkflowStateError:
+            return "invalid"
+        if evidence != nested_state.to_result():
+            return "invalid"
+    software_gate_accepted = state.code_auditor_passed or state.status in {
+        "physics_oracles_running",
+        "physics_auditor_running",
+        "physics_repair_pending",
+        "completed",
+        "checkpoint_paused",
+    }
+    if software_gate_accepted and nested_state.latest_git_evidence_path is None:
+        return "missing"
+    return "verified" if _workflow_workspace_matches_evidence(nested, nested_state) else "changed"
 
 
 def _verify_pending_human_decision(state: PhysicsWorkflowStateV2) -> None:
@@ -948,6 +1081,65 @@ def _verify_pending_human_decision(state: PhysicsWorkflowStateV2) -> None:
     decision = _load_physics_model(Path(state.human_decision_path), PhysicsReviewDecisionV1)
     if decision.canonical_sha256() != state.human_decision_sha256:
         raise WorkflowStateError("durable human decision was replaced")
+
+
+def _verify_physics_state_reconstruction(
+    state: PhysicsWorkflowStateV2,
+    entries: Sequence[PhysicsWorkflowJournalEntryV2],
+) -> None:
+    """Rebuild every mutable v2 field from the qualified sequence-zero form."""
+    initial_values = state.model_dump(mode="python")
+    initial_values.update(
+        {
+            "status": "initialized",
+            "repair_round": 0,
+            "software_run_directory": None,
+            "worker_thread_id": None,
+            "latest_software_result_path": None,
+            "tests_passed": False,
+            "code_auditor_passed": False,
+            "required_oracle_proofs_verified": False,
+            "oracle_evidence": (),
+            "historical_oracle_evidence": (),
+            "invalidated_oracle_ids": (),
+            "preserved_oracle_ids": (),
+            "current_workspace_identity_sha256": None,
+            "accepted_workspace_identity_sha256": None,
+            "physics_auditor_action_directory": None,
+            "physics_auditor_result_sha256": None,
+            "physics_auditor_proof_sha256": None,
+            "physics_report_sha256": None,
+            "physics_routing_sha256": None,
+            "physics_route": None,
+            "physics_reason_codes": (),
+            "prior_physics_auditor_thread_ids": (),
+            "repair_prompt_path": None,
+            "repair_prompt_sha256": None,
+            "repair_prompt_consumed": False,
+            "human_review_packet_path": None,
+            "human_review_packet_sha256": None,
+            "human_decision_path": None,
+            "human_decision_sha256": None,
+            "pause_reason": None,
+            "summary": "Physics workflow initialized.",
+            "journal_sequence": 0,
+            "journal_hash": ZERO_HASH,
+            "updated_at": state.started_at,
+        }
+    )
+    try:
+        initial = PhysicsWorkflowStateV2.model_validate(initial_values)
+    except ValidationError as exc:
+        raise WorkflowStateError("physics sequence-zero snapshot is invalid") from exc
+    reconstructed = reconcile_model_snapshot(
+        initial,
+        [item.model_dump(mode="json") for item in entries],
+        model=PhysicsWorkflowStateV2,
+        error_factory=WorkflowStateError,
+        error_message="physics journal cannot reconstruct its authoritative state",
+    )
+    if reconstructed != state:
+        raise WorkflowStateError("physics state contradicts its journal-derived authority")
 
 
 def _load_reconciled_workflow_state(run_directory: Path) -> WorkflowState:
@@ -1035,7 +1227,10 @@ def _physics_snapshots_synchronized(run_directory: Path, state: PhysicsWorkflowS
 
 
 def _finalize_snapshots(
-    run_directory: Path, version: Literal[1, 2]
+    run_directory: Path,
+    version: Literal[1, 2],
+    *,
+    physics_services: PhysicsWorkflowServices = DEFAULT_PHYSICS_WORKFLOW_SERVICES,
 ) -> WorkflowResult | PhysicsWorkflowResultV2:
     if version == 1:
         with _WorkflowLock(run_directory, lambda: datetime.now(UTC)):
@@ -1045,11 +1240,49 @@ def _finalize_snapshots(
             return state.to_result()
     with _WorkflowLock(run_directory, lambda: datetime.now(UTC)):
         state_v2 = _load_reconciled_physics_state(
-            run_directory, DEFAULT_PHYSICS_WORKFLOW_SERVICES, persist=True
+            run_directory, DEFAULT_PHYSICS_WORKFLOW_SERVICES, persist=False
         )
         if state_v2.status not in _TERMINAL_V2:
             raise WorkflowStateError("snapshot finalization no longer has a terminal head")
-        return state_v2.to_result()
+        entries = _read_physics_journal(run_directory)
+        _verify_physics_state_reconstruction(state_v2, entries)
+        prepared = load_physics_substage_specification(
+            Path(state_v2.specification_path), require_clean=False
+        )
+        _verify_frozen_state(prepared, state_v2)
+        observations, proof, pending_id, pending_kind = _physics_action_reconciliation(
+            run_directory, state_v2, prepared, entries
+        )
+        if (
+            observations
+            or pending_id is not None
+            or pending_kind is not None
+            or proof
+            in {
+                "missing",
+                "invalid",
+            }
+        ):
+            raise WorkflowStateError("terminal snapshot has unresolved external action evidence")
+        workspace = _physics_workspace_and_authority_reconciliation(
+            run_directory, state_v2, prepared, entries
+        )
+        if workspace != "verified":
+            raise WorkflowStateError("terminal snapshot workspace authority does not verify")
+        expected = state_v2.to_result()
+        commit_result_then_state(
+            result_path=run_directory / PHYSICS_RESULT_FILE,
+            result_value=expected.model_dump(mode="json"),
+            state_path=run_directory / "state.json",
+            state_value=state_v2.model_dump(mode="json"),
+            checkpoint=lambda name: physics_services.checkpoint(f"recovery_finalization:{name}"),
+            error_factory=WorkflowStateError,
+            error_message="physics recovery snapshots could not be finalized",
+        )
+        verified = physics_substage_status(run_directory)
+        if verified != expected:
+            raise WorkflowStateError("finalized public result contradicts authoritative state")
+        return verified
 
 
 def _inspect_workflow_lock(path: Path) -> RecoveryProcessObservationV1:

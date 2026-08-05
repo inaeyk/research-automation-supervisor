@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import stat
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,7 +15,15 @@ import research_automation_supervisor.workflow_engine as workflow_engine
 import research_automation_supervisor.workflow_recovery as workflow_recovery
 from research_automation_supervisor.cli import app
 from research_automation_supervisor.codex_adapter import run_prepared_codex
-from research_automation_supervisor.physics_workflow import PhysicsWorkflowServices
+from research_automation_supervisor.durable_state import canonical_json
+from research_automation_supervisor.physics_workflow import (
+    PhysicsWorkflowServices,
+    resume_physics_substage,
+)
+from research_automation_supervisor.physics_workflow_models import (
+    PhysicsWorkflowResultV2,
+    PhysicsWorkflowStateV2,
+)
 from research_automation_supervisor.workflow_engine import (
     WorkflowServices,
     _WorkflowLock,
@@ -607,3 +617,373 @@ def test_corrupt_discovered_run_prevents_latest_guess(tmp_path: Path) -> None:
     with pytest.raises(RecoverySelectionError) as caught:
         latest_incomplete_run(index)
     assert caught.value.reason_code == "run_discovery_integrity_failed"
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+def test_post_code_auditor_missing_physics_identity_uses_validated_software_gate(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake = _physics_tree(tmp_path)
+    physics = ScriptedPhysicsAuditor(SYNTHETIC / "reports/clean.json")
+    crash = CrashOnce("journal:code_auditor_passed")
+    software = WorkflowServices(codex_executable=str(fake), token_factory=lambda: "gate-match")
+    physics_services = PhysicsWorkflowServices(
+        physics_auditor_codex_invoker=physics,
+        checkpoint=crash,
+    )
+    with pytest.raises(RuntimeError, match="injected crash"):
+        run_substage(
+            spec,
+            runs_dir=tmp_path / "runs",
+            services=software,
+            physics_services=physics_services,
+        )
+    run_directory = tmp_path / "runs/minimal-substage-gate-match"
+    state = PhysicsWorkflowStateV2.model_validate(
+        json.loads((run_directory / "state.json").read_text(encoding="ascii"))
+    )
+    assert state.status == "physics_oracles_running"
+    assert state.current_workspace_identity_sha256 is None
+
+    plan = build_recovery_plan(run_directory)
+    assert plan.workspace_reconciliation == "verified"
+    assert plan.disposition == "auto_resume"
+    execution = execute_recovery_plan(
+        plan,
+        services=RecoveryServices(
+            workflow_services=software,
+            physics_services=physics_services,
+            attempt_token=lambda: "gate-match-once",
+        ),
+    )
+    assert execution.outcome.result_status == "completed"
+    assert physics.calls == 1
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+@pytest.mark.parametrize("mutation", ["tracked", "untracked", "mode", "symlink"])
+def test_post_code_auditor_workspace_mutation_blocks_without_external_action(
+    tmp_path: Path, mutation: str
+) -> None:
+    spec, project, fake = _physics_tree(tmp_path)
+    physics = ScriptedPhysicsAuditor(SYNTHETIC / "reports/clean.json")
+    software = WorkflowServices(codex_executable=str(fake), token_factory=lambda: "gate-drift")
+    with pytest.raises(RuntimeError, match="injected crash"):
+        run_substage(
+            spec,
+            runs_dir=tmp_path / "runs",
+            services=software,
+            physics_services=PhysicsWorkflowServices(
+                physics_auditor_codex_invoker=physics,
+                checkpoint=CrashOnce("journal:code_auditor_passed"),
+            ),
+        )
+    run_directory = tmp_path / "runs/minimal-substage-gate-drift"
+    target = project / "implementation.py"
+    if mutation == "tracked":
+        target.write_text("# changed after the accepted software gate\n", encoding="utf-8")
+    elif mutation == "untracked":
+        (project / "new-untracked.txt").write_text("not audited\n", encoding="utf-8")
+    elif mutation == "mode":
+        target.chmod(target.stat().st_mode ^ stat.S_IXUSR)
+    else:
+        target.unlink()
+        target.symlink_to("derivation.md")
+
+    counter_before = (tmp_path / "fake-counter").read_bytes()
+    journal = run_directory / "physics-journal-v2.jsonl"
+    journal_before = journal.read_bytes()
+    plan = build_recovery_plan(run_directory)
+    assert plan.disposition == "blocked"
+    assert plan.reason_code == "workspace_integrity_failure"
+    assert plan.workspace_reconciliation == "changed"
+    execution = execute_recovery_plan(
+        plan,
+        services=RecoveryServices(
+            workflow_services=software,
+            physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+            attempt_token=lambda: f"gate-drift-{mutation}",
+        ),
+    )
+    assert execution.outcome.status == "blocked"
+    assert (tmp_path / "fake-counter").read_bytes() == counter_before
+    assert physics.calls == 0
+    assert journal.read_bytes() == journal_before
+    assert not tuple((run_directory / "physics/oracles").rglob("action-records"))
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+@pytest.mark.parametrize("corruption", ["missing", "truncated", "altered"])
+def test_v2_result_is_reconstructed_and_repeated_resume_is_idempotent(
+    tmp_path: Path, corruption: str
+) -> None:
+    spec, _, fake = _physics_tree(tmp_path)
+    physics = ScriptedPhysicsAuditor(SYNTHETIC / "reports/clean.json")
+    software = WorkflowServices(codex_executable=str(fake), token_factory=lambda: "result-repair")
+    completed = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=software,
+        physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+    )
+    run_directory = Path(completed.artifact_directory)
+    result_path = run_directory / "result.json"
+    if corruption == "missing":
+        result_path.unlink()
+    elif corruption == "truncated":
+        result_path.write_text("{", encoding="ascii")
+    else:
+        value = json.loads(result_path.read_text(encoding="ascii"))
+        value["summary"] = "altered public result"
+        result_path.write_text(json.dumps(value) + "\n", encoding="ascii")
+
+    counter_before = (tmp_path / "fake-counter").read_bytes()
+    journal_before = (run_directory / "physics-journal-v2.jsonl").read_bytes()
+    plan = build_recovery_plan(run_directory)
+    assert plan.operation == "finalize_snapshots"
+    execution = execute_recovery_plan(
+        plan,
+        services=RecoveryServices(
+            workflow_services=software,
+            physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+            attempt_token=lambda: f"result-repair-{corruption}",
+        ),
+    )
+    assert execution.outcome.status == "finalized"
+    state = PhysicsWorkflowStateV2.model_validate(
+        json.loads((run_directory / "state.json").read_text(encoding="ascii"))
+    )
+    repaired = PhysicsWorkflowResultV2.model_validate(
+        json.loads(result_path.read_text(encoding="ascii"))
+    )
+    assert repaired == state.to_result()
+    repaired_bytes = result_path.read_bytes()
+    repaired_mtime = result_path.stat().st_mtime_ns
+
+    terminal = build_recovery_plan(run_directory)
+    assert terminal.disposition == "already_terminal"
+    repeated = execute_recovery_plan(
+        terminal,
+        services=RecoveryServices(
+            workflow_services=software,
+            physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+            attempt_token=lambda: f"result-repeat-{corruption}",
+        ),
+    )
+    assert repeated.outcome.status == "already_terminal"
+    assert result_path.read_bytes() == repaired_bytes
+    assert result_path.stat().st_mtime_ns == repaired_mtime
+    assert (tmp_path / "fake-counter").read_bytes() == counter_before
+    assert physics.calls == 1
+    assert (run_directory / "physics-journal-v2.jsonl").read_bytes() == journal_before
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+def test_v2_finalization_rejects_wrong_authoritative_proof_hash(tmp_path: Path) -> None:
+    spec, _, fake = _physics_tree(tmp_path)
+    physics = ScriptedPhysicsAuditor(SYNTHETIC / "reports/clean.json")
+    software = WorkflowServices(codex_executable=str(fake), token_factory=lambda: "wrong-proof")
+    completed = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=software,
+        physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+    )
+    run_directory = Path(completed.artifact_directory)
+    state_path = run_directory / "state.json"
+    value = json.loads(state_path.read_text(encoding="ascii"))
+    value["physics_auditor_proof_sha256"] = "0" * 64
+    state_path.write_text(json.dumps(value) + "\n", encoding="ascii")
+    result_path = run_directory / "result.json"
+    result_path.write_text("{", encoding="ascii")
+    counter_before = (tmp_path / "fake-counter").read_bytes()
+
+    with pytest.raises(RecoverySelectionError) as caught:
+        build_recovery_plan(run_directory)
+    assert caught.value.reason_code == "run_record_integrity_failed"
+    assert result_path.read_text(encoding="ascii") == "{"
+    assert (tmp_path / "fake-counter").read_bytes() == counter_before
+    assert physics.calls == 1
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+def test_v2_finalization_power_cut_before_replace_is_safe_and_retryable(tmp_path: Path) -> None:
+    spec, _, fake = _physics_tree(tmp_path)
+    physics = ScriptedPhysicsAuditor(SYNTHETIC / "reports/clean.json")
+    software = WorkflowServices(codex_executable=str(fake), token_factory=lambda: "finalize-cut")
+    completed = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=software,
+        physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+    )
+    run_directory = Path(completed.artifact_directory)
+    result_path = run_directory / "result.json"
+    result_path.write_text("{", encoding="ascii")
+    plan = build_recovery_plan(run_directory)
+    counter_before = (tmp_path / "fake-counter").read_bytes()
+    with pytest.raises(RuntimeError, match="injected crash"):
+        execute_recovery_plan(
+            plan,
+            services=RecoveryServices(
+                workflow_services=software,
+                physics_services=PhysicsWorkflowServices(
+                    physics_auditor_codex_invoker=physics,
+                    checkpoint=CrashOnce("recovery_finalization:before_result_replacement"),
+                ),
+                attempt_token=lambda: "finalize-cut-first",
+            ),
+        )
+    assert result_path.read_text(encoding="ascii") == "{"
+    assert (tmp_path / "fake-counter").read_bytes() == counter_before
+    assert physics.calls == 1
+
+    retried = execute_recovery_plan(
+        build_recovery_plan(run_directory),
+        services=RecoveryServices(
+            workflow_services=software,
+            physics_services=PhysicsWorkflowServices(physics_auditor_codex_invoker=physics),
+            attempt_token=lambda: "finalize-cut-retry",
+        ),
+    )
+    assert retried.outcome.status == "finalized"
+    assert build_recovery_plan(run_directory).disposition == "already_terminal"
+    assert (tmp_path / "fake-counter").read_bytes() == counter_before
+    assert physics.calls == 1
+
+
+def _make_sequence_zero_run(
+    root: Path, token: str
+) -> tuple[Path, Path, ScriptedPhysicsAuditor, WorkflowServices, PhysicsWorkflowServices]:
+    spec, _, fake = _physics_tree(root)
+    physics = ScriptedPhysicsAuditor(SYNTHETIC / "reports/clean.json")
+    software = WorkflowServices(codex_executable=str(fake), token_factory=lambda: token)
+    physics_services = PhysicsWorkflowServices(
+        physics_auditor_codex_invoker=physics,
+        checkpoint=CrashOnce("initial_snapshot:after_result_replacement"),
+    )
+    with pytest.raises(RuntimeError, match="injected crash"):
+        run_substage(
+            spec,
+            runs_dir=root / "runs",
+            services=software,
+            physics_services=physics_services,
+        )
+    return root / f"runs/minimal-substage-{token}", spec, physics, software, physics_services
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+def test_valid_sequence_zero_discovery_and_easy_recovery_match_pa4_resumer(
+    tmp_path: Path,
+) -> None:
+    easy, _, easy_physics, easy_software, easy_services = _make_sequence_zero_run(
+        tmp_path / "easy", "easy-zero"
+    )
+    direct, _, direct_physics, direct_software, direct_services = _make_sequence_zero_run(
+        tmp_path / "direct", "direct-zero"
+    )
+    index = discover_workflow_runs(easy.parent)
+    assert len(index.entries) == 1
+    assert index.entries[0].journal_sequence == 0
+    plan = build_recovery_plan(easy)
+    assert plan.journal_sequence == 0
+    assert plan.reason_code == "safe_deterministic_transition"
+    assert plan.auto_resume_safe
+
+    easy_result = execute_recovery_plan(
+        plan,
+        services=RecoveryServices(
+            workflow_services=easy_software,
+            physics_services=easy_services,
+            attempt_token=lambda: "easy-zero-once",
+        ),
+    ).outcome
+    direct_result = resume_physics_substage(
+        direct,
+        software_services=direct_software,
+        physics_services=direct_services,
+    )
+    assert easy_result.result_status == direct_result.status == "completed"
+    assert easy_physics.calls == direct_physics.calls == 1
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+def test_sequence_zero_snapshot_reconciles_a_valid_journal_suffix(tmp_path: Path) -> None:
+    run_directory, _, physics, software, _ = _make_sequence_zero_run(tmp_path, "zero-suffix")
+    state_zero = (run_directory / "state.json").read_bytes()
+    result_zero = (run_directory / "result.json").read_bytes()
+    with pytest.raises(RuntimeError, match="injected crash"):
+        resume_physics_substage(
+            run_directory,
+            software_services=software,
+            physics_services=PhysicsWorkflowServices(
+                physics_auditor_codex_invoker=physics,
+                checkpoint=CrashOnce("journal:software_workflow_requested"),
+            ),
+        )
+    (run_directory / "state.json").write_bytes(state_zero)
+    (run_directory / "result.json").write_bytes(result_zero)
+    plan = build_recovery_plan(run_directory)
+    assert plan.journal_sequence == 2
+    assert plan.observed_status == "software_running"
+    assert not plan.snapshots_synchronized
+    assert plan.auto_resume_safe
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+@pytest.mark.parametrize(
+    "corruption",
+    ["duplicate", "duplicate_zero", "reordered", "skipped", "negative"],
+)
+def test_invalid_physics_journal_sequences_are_rejected(tmp_path: Path, corruption: str) -> None:
+    run_directory, _, physics, software, _ = _make_sequence_zero_run(tmp_path, f"bad-{corruption}")
+    with pytest.raises(RuntimeError, match="injected crash"):
+        resume_physics_substage(
+            run_directory,
+            software_services=software,
+            physics_services=PhysicsWorkflowServices(
+                physics_auditor_codex_invoker=physics,
+                checkpoint=CrashOnce("journal:software_workflow_requested"),
+            ),
+        )
+    journal = run_directory / "physics-journal-v2.jsonl"
+    entries = [json.loads(line) for line in journal.read_text(encoding="ascii").splitlines()]
+    if corruption == "duplicate":
+        entries.insert(1, dict(entries[0]))
+    elif corruption == "duplicate_zero":
+        entries[0]["sequence"] = 0
+    elif corruption == "reordered":
+        entries.reverse()
+    elif corruption == "skipped":
+        entries[1]["sequence"] = 3
+    else:
+        entries[0]["sequence"] = -1
+    rendered: list[bytes] = []
+    for entry in entries:
+        body = {key: value for key, value in entry.items() if key != "entry_hash"}
+        entry["entry_hash"] = hashlib.sha256(canonical_json(body)).hexdigest()
+        rendered.append(canonical_json(entry))
+    journal.write_bytes(b"".join(rendered))
+
+    with pytest.raises(RecoverySelectionError) as caught:
+        build_recovery_plan(run_directory)
+    assert caught.value.reason_code == "run_record_integrity_failed"
+    assert physics.calls == 0
+
+
+@pytest.mark.skipif(not BWRAP.is_file(), reason="Bubblewrap PA-2 path unavailable")
+def test_missing_or_malformed_sequence_zero_snapshot_is_rejected(tmp_path: Path) -> None:
+    missing, _, _, _, _ = _make_sequence_zero_run(tmp_path / "missing", "missing-zero")
+    (missing / "state.json").unlink()
+    with pytest.raises(RecoverySelectionError) as missing_error:
+        build_recovery_plan(missing)
+    assert missing_error.value.reason_code == "run_record_integrity_failed"
+
+    malformed, _, _, _, _ = _make_sequence_zero_run(tmp_path / "malformed", "malformed-zero")
+    state_path = malformed / "state.json"
+    value = json.loads(state_path.read_text(encoding="ascii"))
+    value["status"] = "software_running"
+    state_path.write_text(json.dumps(value) + "\n", encoding="ascii")
+    with pytest.raises(RecoverySelectionError) as malformed_error:
+        build_recovery_plan(malformed)
+    assert malformed_error.value.reason_code == "run_record_integrity_failed"

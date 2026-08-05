@@ -141,3 +141,11 @@ checks their Linux PID/start identities before invoking a resumer, reopens physi
 human/evidence pauses, and can replay one journaled `PhysicsReviewDecisionV1` exactly
 once. It never changes the physics contract, catalog, auditor configuration, routing,
 Worker thread, model, approval, sandbox, oracle policy, or repair limit.
+
+The layer accepts PA-4's qualified sequence-zero initial snapshot without adding a new
+journal form. Before continuing past the software gate, it recursively verifies the
+nested software workflow and compares the current worktree with its accepted Git
+evidence; once PA-4 has journaled a full physics workspace identity, that identity must
+match as well. Terminal public-result reconstruction ignores corrupt result bytes,
+reverifies the authoritative state and proofs, writes atomically, and verifies the
+replacement before declaring finalization complete.
