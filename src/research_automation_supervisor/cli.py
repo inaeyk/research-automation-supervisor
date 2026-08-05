@@ -90,7 +90,7 @@ from research_automation_supervisor.physics_oracle_execution import (
 from research_automation_supervisor.physics_routing import (
     derive_physics_audit_decision,
 )
-from research_automation_supervisor.redaction import redact_text
+from research_automation_supervisor.redaction import redact_json, redact_text
 from research_automation_supervisor.replay_campaign_engine import (
     DEFAULT_REPLAY_RUNS_DIRECTORY,
     replay_campaign_exit_code,
@@ -147,6 +147,18 @@ from research_automation_supervisor.workflow_engine import (
 )
 from research_automation_supervisor.workflow_engine import workflow_exit_code
 from research_automation_supervisor.workflow_models import WorkflowResult
+from research_automation_supervisor.workflow_recovery import (
+    RecoveryExecutionV1,
+    RecoverySelectionError,
+    build_recovery_plan,
+    discover_workflow_runs,
+    execute_recovery_plan,
+    latest_incomplete_run,
+)
+from research_automation_supervisor.workflow_recovery_models import (
+    RecoveryPlanV1,
+    RunIndexV1,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -640,6 +652,163 @@ def validate_substage_command(
             f"Workspace: {prepared.workspace}\n"
             f"Fixed tests: {len(prepared.acceptance_tests)}"
         )
+
+
+@app.command("status")
+def workflow_recovery_status_command(
+    run_directory: Annotated[
+        Path | None,
+        typer.Argument(help="Explicit workflow run directory to inspect."),
+    ] = None,
+    runs_dir: Annotated[
+        Path,
+        typer.Option("--runs-dir", help="Directory containing workflow runs."),
+    ] = Path("runs/workflows"),
+    latest: Annotated[
+        bool,
+        typer.Option("--latest", help="Inspect the unique latest incomplete run."),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Discover runs or build one read-only deterministic recovery plan."""
+    if run_directory is not None and latest:
+        _render_recovery_error(
+            "conflicting_run_selection",
+            "Pass either an explicit run directory or --latest, not both.",
+            as_json,
+            2,
+        )
+    try:
+        if run_directory is None and not latest:
+            index = discover_workflow_runs(runs_dir)
+            _render_recovery_index(index, as_json)
+            if index.issues:
+                raise typer.Exit(code=4)
+            return
+        selected = run_directory
+        if latest:
+            selected = Path(latest_incomplete_run(discover_workflow_runs(runs_dir)).run_directory)
+        if selected is None:
+            raise RecoverySelectionError(
+                "run_selection_missing", "Pass an explicit run directory or --latest."
+            )
+        plan = build_recovery_plan(selected)
+    except RecoverySelectionError as exc:
+        _render_recovery_error(exc.reason_code, exc.next_step, as_json, 4)
+    except (WorkflowInputError, WorkflowStateError):
+        _render_recovery_error(
+            "run_record_integrity_failed",
+            "Restore the exact durable run records and retry status.",
+            as_json,
+            4,
+        )
+    except Exception:
+        _render_recovery_internal_error(as_json)
+    _render_recovery_plan(plan, as_json)
+    if plan.disposition == "blocked":
+        raise typer.Exit(code=4)
+
+
+@app.command("latest-incomplete")
+def latest_incomplete_command(
+    runs_dir: Annotated[
+        Path,
+        typer.Option("--runs-dir", help="Directory containing workflow runs."),
+    ] = Path("runs/workflows"),
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Locate the unique latest incomplete run from authoritative journals."""
+    try:
+        entry = latest_incomplete_run(discover_workflow_runs(runs_dir))
+    except RecoverySelectionError as exc:
+        _render_recovery_error(exc.reason_code, exc.next_step, as_json, 4)
+    except (WorkflowInputError, WorkflowStateError):
+        _render_recovery_error(
+            "run_discovery_integrity_failed",
+            "Inspect the runs directory and restore exact durable records before retrying.",
+            as_json,
+            4,
+        )
+    except Exception:
+        _render_recovery_internal_error(as_json)
+    value = entry.model_dump(mode="json")
+    if as_json:
+        _emit_recovery_payload(value, _stable_json(value))
+    else:
+        _emit_recovery_payload(value, entry.run_directory)
+
+
+@app.command("resume")
+def workflow_recovery_resume_command(
+    run_directory: Annotated[
+        Path | None,
+        typer.Argument(help="Explicit workflow run directory to recover."),
+    ] = None,
+    runs_dir: Annotated[
+        Path,
+        typer.Option("--runs-dir", help="Directory containing workflow runs."),
+    ] = Path("runs/workflows"),
+    latest: Annotated[
+        bool,
+        typer.Option("--latest", help="Recover the unique latest incomplete run."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Build and verify the plan without writes or launches."),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit stable machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Safely recover one journal-proven workflow without duplicate actions."""
+    if (run_directory is None) == (not latest):
+        _render_recovery_error(
+            "run_selection_invalid",
+            "Pass exactly one explicit run directory or --latest.",
+            as_json,
+            2,
+        )
+    try:
+        selected = run_directory
+        if latest:
+            selected = Path(
+                latest_incomplete_run(
+                    discover_workflow_runs(runs_dir, persist_cache=not dry_run)
+                ).run_directory
+            )
+        if selected is None:
+            raise RecoverySelectionError(
+                "run_selection_missing", "Pass an explicit run directory or --latest."
+            )
+        plan = build_recovery_plan(selected)
+        if dry_run:
+            _render_recovery_plan(plan, as_json)
+            if plan.disposition == "blocked":
+                raise typer.Exit(code=4)
+            return
+        execution = execute_recovery_plan(plan)
+    except RecoverySelectionError as exc:
+        _render_recovery_error(exc.reason_code, exc.next_step, as_json, 4)
+    except (WorkflowInputError, WorkflowStateError):
+        _render_recovery_error(
+            "recovery_integrity_failed",
+            "Run status again and restore the exact durable evidence before retrying.",
+            as_json,
+            4,
+        )
+    except Exception:
+        _render_recovery_internal_error(as_json)
+    _render_recovery_execution(execution, as_json)
+    if execution.outcome.status in {"blocked", "failed"}:
+        raise typer.Exit(code=4)
+    if execution.outcome.result_status is not None:
+        exit_code = workflow_exit_code(execution.outcome.result_status)
+        if exit_code:
+            raise typer.Exit(code=exit_code)
 
 
 @app.command("run-substage")
@@ -1269,6 +1438,102 @@ def abort_live_shadow_command(
     except Exception:
         _render_live_shadow_internal_error(as_json)
     _render_live_shadow_result_and_exit(result, as_json)
+
+
+def _render_recovery_index(index: RunIndexV1, as_json: bool) -> None:
+    value = index.model_dump(mode="json")
+    if as_json:
+        _emit_recovery_payload(value, _stable_json(value))
+        return
+    lines = [
+        f"Runs directory: {index.runs_directory}",
+        f"Verified runs: {len(index.entries)}",
+        f"Integrity issues: {len(index.issues)}",
+    ]
+    lines.extend(
+        f"{item.status}: {item.run_directory}"
+        for item in sorted(index.entries, key=lambda entry: entry.updated_at, reverse=True)
+    )
+    lines.extend(f"CORRUPT: {item.run_directory}" for item in index.issues)
+    _emit_recovery_payload(value, "\n".join(lines))
+
+
+def _render_recovery_plan(plan: RecoveryPlanV1, as_json: bool) -> None:
+    value = {
+        "ok": plan.disposition != "blocked",
+        "plan": plan.model_dump(mode="json"),
+        "plan_sha256": plan.canonical_sha256(),
+    }
+    if as_json:
+        _emit_recovery_payload(value, _stable_json(value))
+        return
+    rendered = "\n".join(
+        (
+            f"Run: {plan.run_directory}",
+            f"State: {plan.observed_status} (journal {plan.journal_sequence})",
+            f"Recovery: {plan.disposition} / {plan.operation}",
+            f"Reason: {plan.reason_code}",
+            f"Next: {plan.next_step}",
+        )
+    )
+    _emit_recovery_payload(value, rendered)
+
+
+def _render_recovery_execution(execution: RecoveryExecutionV1, as_json: bool) -> None:
+    value = execution.to_dict()
+    if as_json:
+        _emit_recovery_payload(value, _stable_json(value))
+        return
+    outcome = execution.outcome
+    rendered = "\n".join(
+        (
+            f"Run: {outcome.run_directory}",
+            f"Recovery outcome: {outcome.status}",
+            f"Workflow state: {outcome.result_status or execution.plan.observed_status}",
+            f"Reason: {outcome.reason_code}",
+            f"Next: {outcome.next_step}",
+            f"Plan receipt: {execution.plan_receipt_path}",
+            f"Outcome receipt: {execution.outcome_receipt_path}",
+        )
+    )
+    _emit_recovery_payload(value, rendered)
+
+
+def _emit_recovery_payload(value: object, rendered: str) -> None:
+    _, _, sensitive_values = build_subprocess_environment()
+    safe_value = redact_json(value, sensitive_values)
+    safe_rendered = redact_text(rendered, sensitive_values)
+    typer.echo(_stable_json(safe_value) if rendered.startswith("{") else safe_rendered)
+
+
+def _render_recovery_error(
+    reason_code: str,
+    next_step: str,
+    as_json: bool,
+    exit_code: int,
+) -> Never:
+    value = {
+        "ok": False,
+        "reason_code": reason_code,
+        "next_step": next_step,
+    }
+    if as_json:
+        _emit_recovery_payload(value, _stable_json(value))
+    else:
+        _emit_recovery_payload(
+            value,
+            f"Recovery blocked: {reason_code}\nNext: {next_step}",
+        )
+    raise typer.Exit(code=exit_code)
+
+
+def _render_recovery_internal_error(as_json: bool) -> Never:
+    _render_recovery_error(
+        "unexpected_recovery_failure",
+        "Run status again; if the failure repeats, inspect the durable records manually.",
+        as_json,
+        1,
+    )
 
 
 def _stable_json(value: object) -> str:

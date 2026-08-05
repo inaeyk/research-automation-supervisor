@@ -230,6 +230,21 @@ read-only and manifest-pinned. Copy the complete candidate directory; do not edi
 
 ## Resume, repair, and human pauses
 
+For interruption recovery across ordinary and physics-enabled workflows, prefer the
+PA-5A discovery command:
+
+```bash
+research-supervisor status --runs-dir runs/workflows
+research-supervisor resume --runs-dir runs/workflows --latest --dry-run
+research-supervisor resume --runs-dir runs/workflows --latest
+```
+
+The replaceable run index is rebuilt from authoritative manifests and hash-chained
+journals. Automatic recovery is limited to journal-proven, proof-verified boundaries;
+ambiguous launches, active/stale/reused process identities, changed authority or
+workspace evidence, and missing completion proof block with one reason code and an
+actionable next step. See [workflow discovery and recovery](docs/workflow_recovery.md).
+
 `resume-substage RUN` continues only a nonterminal interrupted run whose frozen inputs,
 repository identity, journal, and action proof still agree. A known complete action is
 finalized exactly once; uncertain external action completion pauses instead of being

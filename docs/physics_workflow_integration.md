@@ -131,3 +131,13 @@ guessing or retrying.
 PA-4 does not add provider-neutral adapters, parallel scheduling, campaign integration,
 protected historical evaluation, publication approval, or any change to PA-1, PA-2,
 or PA-3 canonical proof semantics.
+
+## PA-5A recovery UX
+
+The separate PA-5A [workflow recovery layer](workflow_recovery.md) discovers both
+schema-version-1 and schema-version-2 runs and delegates only a verified safe plan back
+to this unchanged engine. It recursively verifies current PA-2 and PA-3 evidence,
+checks their Linux PID/start identities before invoking a resumer, reopens physics
+human/evidence pauses, and can replay one journaled `PhysicsReviewDecisionV1` exactly
+once. It never changes the physics contract, catalog, auditor configuration, routing,
+Worker thread, model, approval, sandbox, oracle policy, or repair limit.
