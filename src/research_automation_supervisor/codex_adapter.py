@@ -231,6 +231,7 @@ ProcessLaunchBuilder = Callable[
     ],
     CodexProcessLaunch,
 ]
+ProcessLaunchVerifier = Callable[[CodexProcessLaunch], None]
 
 
 def execute_codex_request(
@@ -306,6 +307,7 @@ def run_prepared_codex(
     rejected_confidential_fragments: Sequence[str] = (),
     durable_command_replacements: Mapping[str, str] | None = None,
     process_launch_builder: ProcessLaunchBuilder | None = None,
+    process_launch_verifier: ProcessLaunchVerifier | None = None,
     process_started: ProcessStarted | None = None,
     process_finished: ProcessFinished | None = None,
 ) -> CodexRunResult:
@@ -422,6 +424,11 @@ def run_prepared_codex(
                 started_monotonic,
                 monotonic,
                 rejected_values,
+                (
+                    (lambda: process_launch_verifier(launch))
+                    if process_launch_verifier is not None
+                    else None
+                ),
                 process_started,
                 process_finished,
             )
@@ -793,9 +800,12 @@ def _run_process(
     started_monotonic: float,
     monotonic: Monotonic,
     rejected_values: Sequence[bytes],
+    prelaunch_verifier: Callable[[], None] | None,
     process_started: ProcessStarted | None,
     process_finished: ProcessFinished | None,
 ) -> None:
+    if prelaunch_verifier is not None:
+        prelaunch_verifier()
     try:
         process = subprocess.Popen(
             list(command),

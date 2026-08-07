@@ -76,6 +76,7 @@ from research_automation_supervisor.physics_auditor_models import (
     PhysicsAuditorExecutionConfigV1,
     PhysicsAuditorFailureReason,
     PhysicsAuditorProcessIdentityV1,
+    PhysicsAuditorProjectionManifestV1,
     PhysicsAuditorProviderObservationV1,
     PhysicsAuditorStatus,
     load_physics_auditor_execution_config,
@@ -94,6 +95,15 @@ from research_automation_supervisor.physics_auditor_projection import (
 from research_automation_supervisor.physics_auditor_prompts import (
     RenderedPhysicsAuditorPrompt,
     build_physics_auditor_prompt,
+)
+from research_automation_supervisor.physics_benchmark_blindness import (
+    BlindBenchmarkLaunchAuthority,
+    BlindnessCertificateV1,
+    PA3LaunchBindingInputsV1,
+    issue_blindness_certificate,
+    load_blindness_certificate,
+    persist_blindness_certificate,
+    verify_certified_pa3_launch,
 )
 from research_automation_supervisor.physics_models import (
     DEFAULT_PHYSICS_AUDIT_POLICY_V1,
@@ -139,6 +149,7 @@ OUTPUT_SCHEMA_FILE = "physics-audit-report-output-schema.json"
 ROLE_POLICY_FILE = "codex-role-policy.json"
 BUBBLEWRAP_POLICY_FILE = "bubblewrap-policy.json"
 BUBBLEWRAP_BACKEND_FILE = "bubblewrap-backend-identity.json"
+BLINDNESS_CERTIFICATE_FILE = "blindness-certificate.json"
 PROVIDER_OBSERVATION_FILE = "provider-observation.json"
 MODEL_OUTPUT_FILE = "model-output.json"
 REPORT_FILE = "physics-audit-report.json"
@@ -287,9 +298,14 @@ def run_physics_auditor(
     attempt_number: int = 1,
     environ: Mapping[str, str] | None = None,
     codex_invoker: PhysicsAuditorCodexInvoker | None = None,
+    blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
     checkpoint: Checkpoint = lambda _name: None,
 ) -> PhysicsAuditorActionResultV1:
     """Create and execute one fresh read-only standalone Physics Auditor action."""
+    if blindness_authority is not None and codex_invoker is not None:
+        raise PhysicsAuditorInputError(
+            "blind benchmark certification requires the real PA-3 launch path"
+        )
     prepared = _prepare_action(
         contract_path=contract_path,
         execution_config_path=execution_config_path,
@@ -319,6 +335,7 @@ def run_physics_auditor(
             current=current,
             environ=environ,
             codex_invoker=codex_invoker or _invoke_qualified_codex,
+            blindness_authority=blindness_authority,
             checkpoint=checkpoint,
         )
 
@@ -335,9 +352,14 @@ def resume_physics_auditor(
     attempt_number: int = 1,
     environ: Mapping[str, str] | None = None,
     codex_invoker: PhysicsAuditorCodexInvoker | None = None,
+    blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
     checkpoint: Checkpoint = lambda _name: None,
 ) -> PhysicsAuditorActionResultV1:
     """Recover without resuming a session or blindly repeating a possible launch."""
+    if blindness_authority is not None and codex_invoker is not None:
+        raise PhysicsAuditorInputError(
+            "blind benchmark certification requires the real PA-3 launch path"
+        )
     output = _existing_output_directory(output_directory)
     records = _load_records(output)
     if not records:
@@ -383,6 +405,7 @@ def resume_physics_auditor(
             current=current,
             environ=environ,
             codex_invoker=codex_invoker or _invoke_qualified_codex,
+            blindness_authority=blindness_authority,
             checkpoint=checkpoint,
         )
 
@@ -584,6 +607,7 @@ def _continue_action(
     current: PhysicsAuditorActionRecordV1,
     environ: Mapping[str, str] | None,
     codex_invoker: PhysicsAuditorCodexInvoker,
+    blindness_authority: BlindBenchmarkLaunchAuthority | None,
     checkpoint: Checkpoint,
 ) -> PhysicsAuditorActionResultV1:
     if current.phase == "action_accepted":
@@ -690,22 +714,55 @@ def _continue_action(
             )
             checkpoint("model_running")
 
+        output_schema = _isolated_output_schema(
+            output,
+            prepared.request.action_id,
+        )
         try:
-            codex_run = codex_invoker(
-                prepared=codex_prepared,
-                runs_dir=output / BACKEND_DIRECTORY,
-                codex_executable=executable,
-                config=prepared.config,
-                output_schema=_isolated_output_schema(
-                    output,
-                    prepared.request.action_id,
-                ),
-                environ=environ,
-                process_started=process_started,
-                source_workspace=prepared.workspace,
-                oracle_evidence_root=prepared.oracle_evidence_root,
-                action_root=output,
-            )
+            if blindness_authority is None:
+                codex_run = codex_invoker(
+                    prepared=codex_prepared,
+                    runs_dir=output / BACKEND_DIRECTORY,
+                    codex_executable=executable,
+                    config=prepared.config,
+                    output_schema=output_schema,
+                    environ=environ,
+                    process_started=process_started,
+                    source_workspace=prepared.workspace,
+                    oracle_evidence_root=prepared.oracle_evidence_root,
+                    action_root=output,
+                )
+            else:
+                proof_set = [
+                    item.model_dump(mode="json")
+                    for item in prepared.request.oracle_completion_proofs
+                ]
+                binding_inputs = PA3LaunchBindingInputsV1(
+                    action_request_sha256=prepared.request.canonical_sha256(),
+                    execution_config_sha256=prepared.config.canonical_sha256(),
+                    evidence_index_sha256=prepared.discovered.index.canonical_sha256(),
+                    oracle_completion_proof_set_sha256=hashlib.sha256(
+                        canonical_json(proof_set)
+                    ).hexdigest(),
+                    workspace_identity_sha256=prepared.initial_identity.canonical_sha256(),
+                    prompt_sha256=prepared.prompt.rendered_sha256,
+                    output_schema_sha256=hashlib.sha256(output_schema.read_bytes()).hexdigest(),
+                )
+                codex_run = _invoke_qualified_codex(
+                    prepared=codex_prepared,
+                    runs_dir=output / BACKEND_DIRECTORY,
+                    codex_executable=executable,
+                    config=prepared.config,
+                    output_schema=output_schema,
+                    environ=environ,
+                    process_started=process_started,
+                    source_workspace=prepared.workspace,
+                    oracle_evidence_root=prepared.oracle_evidence_root,
+                    action_root=output,
+                    blindness_authority=blindness_authority,
+                    launch_binding_inputs=binding_inputs,
+                    projection_manifest=prepared.projection.manifest,
+                )
         except (CodexAdapterError, LiveShadowDependencyError, LiveShadowIntegrityError) as exc:
             raise PhysicsAuditorDependencyError("Codex Physics Auditor transport failed") from exc
         codex_run = replace(
@@ -1186,6 +1243,9 @@ def _invoke_qualified_codex(
     source_workspace: Path,
     oracle_evidence_root: Path,
     action_root: Path,
+    blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
+    launch_binding_inputs: PA3LaunchBindingInputsV1 | None = None,
+    projection_manifest: PhysicsAuditorProjectionManifestV1 | None = None,
 ) -> PhysicsAuditorCodexRun:
     parent_environment = os.environ if environ is None else environ
     _, _, sensitive_values = build_subprocess_environment(parent_environment)
@@ -1205,6 +1265,8 @@ def _invoke_qualified_codex(
         write_backend_identity(identity_path, capability.identity)
     runtime_home = action_root / RUNTIME_HOME_DIRECTORY
     auth_fragments = capability.authentication_confidentiality.text_fragments()
+    certified: BlindnessCertificateV1 | None = None
+    certified_semantic_argv: tuple[str, ...] | None = None
 
     def isolated_launch(
         command: Sequence[str],
@@ -1213,11 +1275,12 @@ def _invoke_qualified_codex(
         final_message_path: Path,
         resolved_schema: Path | None,
     ) -> CodexProcessLaunch:
+        nonlocal certified, certified_semantic_argv
         indexes = [index for index, item in enumerate(command) if item == "--add-dir"]
         if len(indexes) != 1 or indexes[0] + 1 >= len(command):
             raise LiveShadowIntegrityError("Physics Auditor scratch authority is absent")
         scratch = Path(command[indexes[0] + 1])
-        return build_bubblewrap_process_launch(
+        launch = build_bubblewrap_process_launch(
             command,
             request,
             environment,
@@ -1228,6 +1291,76 @@ def _invoke_qualified_codex(
             runtime_home=runtime_home,
             forbidden_roots=(source_workspace, oracle_evidence_root),
             auditor_scratch=scratch,
+        )
+        if blindness_authority is not None:
+            if (
+                launch_binding_inputs is None
+                or projection_manifest is None
+                or resolved_schema is None
+            ):
+                raise PhysicsAuditorIntegrityError(
+                    "blind PA-3 launch binding authority is incomplete"
+                )
+            certified_semantic_argv = tuple(command)
+            certified = issue_blindness_certificate(
+                catalog=blindness_authority.catalog,
+                pair=blindness_authority.pair,
+                variant_id=blindness_authority.variant_id,
+                repository_root=blindness_authority.repository_root,
+                projection_manifest=projection_manifest,
+                projection_root=request.workspace,
+                prompt=request.prompt_bytes,
+                runtime_home=runtime_home,
+                launch=launch,
+                semantic_argv=certified_semantic_argv,
+                codex_executable=codex_executable,
+                execution_config=config,
+                binding_inputs=launch_binding_inputs,
+                output_schema=resolved_schema,
+                bubblewrap_identity=capability.identity,
+            )
+            persist_blindness_certificate(
+                certified,
+                action_root / CONTROL_DIRECTORY / BLINDNESS_CERTIFICATE_FILE,
+            )
+        return launch
+
+    def verify_actual_launch(launch: CodexProcessLaunch) -> None:
+        if blindness_authority is None:
+            return
+        if (
+            certified is None
+            or certified_semantic_argv is None
+            or launch_binding_inputs is None
+            or projection_manifest is None
+        ):
+            raise PhysicsAuditorIntegrityError(
+                "blindness certificate was not completed before process launch"
+            )
+        persisted = load_blindness_certificate(
+            action_root / CONTROL_DIRECTORY / BLINDNESS_CERTIFICATE_FILE
+        )
+        if persisted != certified:
+            raise PhysicsAuditorIntegrityError(
+                "persisted blindness certificate changed before process launch"
+            )
+        verify_certified_pa3_launch(
+            persisted,
+            catalog=blindness_authority.catalog,
+            pair=blindness_authority.pair,
+            variant_id=blindness_authority.variant_id,
+            repository_root=blindness_authority.repository_root,
+            projection_manifest=projection_manifest,
+            projection_root=prepared.workspace,
+            prompt=prepared.prompt_bytes,
+            runtime_home=runtime_home,
+            launch=launch,
+            semantic_argv=certified_semantic_argv,
+            codex_executable=codex_executable,
+            execution_config=config,
+            binding_inputs=launch_binding_inputs,
+            output_schema=output_schema,
+            bubblewrap_identity=capability.identity,
         )
 
     try:
@@ -1249,6 +1382,9 @@ def _invoke_qualified_codex(
                 str(capability.authentication_file): RECORDED_AUTH_SOURCE,
             },
             process_launch_builder=isolated_launch,
+            process_launch_verifier=(
+                verify_actual_launch if blindness_authority is not None else None
+            ),
             version_probe=lambda _executable, _environment, _workspace: None,
             process_started=process_started,
         )

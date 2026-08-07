@@ -423,6 +423,8 @@ def build_bubblewrap_process_launch(
         {
             "HOME": ISOLATED_HOME,
             "CODEX_HOME": ISOLATED_HOME,
+            "TEMP": ISOLATED_TMPDIR,
+            "TMP": ISOLATED_TMPDIR,
             "TMPDIR": ISOLATED_TMPDIR,
         }
     )

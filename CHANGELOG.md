@@ -26,6 +26,12 @@ versioning while it remains pre-1.0.
   source-blob verification, generic raw-measurement oracles, pre-launch blindness
   certificates, and detached exact-manifest human-review authority. This stage does
   not run a Physics Auditor benchmark or GL pilot.
+- PA-5C1-T closes the technical blindness boundary with bytes-only, subject-neutral
+  Bubblewrap execution for generic raw oracles and an exact PA-3 launch manifest that
+  is embedded in the blindness certificate and reconstructed immediately before exec.
+- Physics Oracle Git diff inspection now uses a private copy of the sealed Git index,
+  preventing read-only Git from refreshing authoritative `.git/index` stat-cache bytes
+  while retaining raw-index and staged-manifest checks before and after collection.
 
 ### Preserved
 

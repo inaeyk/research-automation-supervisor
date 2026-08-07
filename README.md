@@ -54,7 +54,9 @@ Oracle execution substrate](docs/physics_oracle_execution.md), the fresh project
 [PA-3 Physics Auditor action](docs/physics_auditor_execution.md), and versioned
 [PA-4 physics workflow integration](docs/physics_workflow_integration.md). The
 [PA-5C1 blind-fixture preparation](docs/physics_benchmark_blind_authority.md) keeps
-benchmark authority outside every auditor-visible byte and requires detached human
+generic fixture-oracle execution subject-neutral and binds the exact real PA-3 launch
+manifest before exec. It keeps benchmark authority outside every auditor-visible byte
+and requires detached human
 approval of the exact visible manifest before any future launch. It prepares fixtures
 only; no Physics Auditor benchmark or GL pilot is run. PA-4 is available only to
 explicit schema-version-2 physics substages; ordinary 0.2.0 schema-version-1 workflows

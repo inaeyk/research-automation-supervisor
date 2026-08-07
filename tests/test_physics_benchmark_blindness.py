@@ -5,7 +5,8 @@ import json
 import re
 import shutil
 import subprocess
-import sys
+import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -29,15 +30,20 @@ from research_automation_supervisor.physics_auditor_execution import (
     _prepare_action,
     _prepare_projection_layout,
     _prepared_codex_request,
+    run_physics_auditor,
 )
 from research_automation_supervisor.physics_auditor_projection import (
     materialize_physics_auditor_projection,
 )
 from research_automation_supervisor.physics_benchmark_blindness import (
+    BlindBenchmarkLaunchAuthority,
+    BlindnessCertificateV1,
     HumanReviewReceiptV1,
+    PA3LaunchBindingInputsV1,
     PhysicsBlindFixtureCatalogV1,
     build_gl_visible_manifest,
     build_paired_visible_manifest,
+    execute_subject_neutral_raw_oracle,
     issue_blindness_certificate,
     load_blind_fixture_catalog,
     load_human_review_receipt,
@@ -46,6 +52,7 @@ from research_automation_supervisor.physics_benchmark_blindness import (
     prepare_exact_gl_fixture,
     qualify_fixture_authority,
     validate_generic_raw_oracle_program,
+    verify_certified_pa3_launch,
     verify_scorer_root_excluded_from_bubblewrap_command,
 )
 
@@ -323,17 +330,15 @@ def test_generic_oracle_returns_raw_measurements_only_and_is_identity_independen
     for root in roots:
         program = root / "raw_measurement_oracle.py"
         validate_generic_raw_oracle_program(program.read_bytes())
-        completed = subprocess.run(
-            (sys.executable, program, root / "observations.json"),
-            check=True,
-            capture_output=True,
+        execution = execute_subject_neutral_raw_oracle(
+            program.read_bytes(),
+            (root / "observations.json").read_bytes(),
         )
-        output = parse_raw_oracle_output(completed.stdout)
+        output = execution.output
         assert output.measurements
-        assert not (
-            {"outcome", "passed", "route", "diagnosis", "classification"}
-            & set(json.loads(completed.stdout))
-        )
+        assert execution.subject_identity_inputs == "absent"
+        assert execution.original_fixture_path_mounted is False
+        assert execution.catalog_or_scorer_mounted is False
 
     with pytest.raises(PhysicsBenchmarkBlindnessIntegrityError, match="case or task"):
         validate_generic_raw_oracle_program(
@@ -341,6 +346,89 @@ def test_generic_oracle_returns_raw_measurements_only_and_is_identity_independen
         )
     with pytest.raises(PhysicsBenchmarkBlindnessIntegrityError, match="classification"):
         parse_raw_oracle_output(b'{"schema_version":1,"outcome":"passed"}\n')
+
+
+@pytest.mark.skipif(not Path("/usr/bin/bwrap").is_file(), reason="Bubblewrap unavailable")
+def test_real_neutral_oracle_path_hides_all_subject_identity_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = "case_777"
+    source = ROOT / (
+        "examples/physics_auditor/benchmark_v1/auditor_visible/cases/"
+        "case_001/variant_001"
+    )
+    aliased = tmp_path / canary
+    aliased.symlink_to(source, target_is_directory=True)
+    monkeypatch.setenv("PA5C1_SUBJECT_CANARY", canary)
+    adversarial = textwrap.dedent(
+        '''\
+        import json
+        import os
+        import sys
+        from pathlib import Path
+
+        marker = "ca" + "se_" + ("7" * 3)
+        argv = list(getattr(sys, "argv"))
+        cwd = getattr(os, "getcwd")()
+        environ = dict(getattr(os, "environ"))
+        filename = globals()["__file__"]
+        path = Path(filename)
+        alias = Path("payload-alias")
+        alias.symlink_to("/input/payload.json")
+        surfaces = [
+            *argv,
+            cwd,
+            filename,
+            *(str(item) for item in path.resolve().parents),
+            *(f"{name}={value}" for name, value in environ.items()),
+            getattr(os, "readlink")("/proc/self/exe"),
+            getattr(os, "readlink")("/proc/self/cwd"),
+            getattr(os, "readlink")(alias),
+            str(alias.resolve()),
+            Path("/proc/self/cmdline").read_bytes().decode("utf-8", "replace"),
+            Path("/proc/self/environ").read_bytes().decode("utf-8", "replace"),
+            Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
+            Path("/proc/1/cmdline").read_bytes().decode("utf-8", "replace"),
+            Path("/proc/1/environ").read_bytes().decode("utf-8", "replace"),
+            Path("/proc/1/mountinfo").read_text(encoding="utf-8"),
+        ]
+        for directory in (Path("/"), Path("/oracle"), Path("/input"), Path("/work"), Path("/tmp")):
+            surfaces.extend(str(item) for item in directory.iterdir())
+        recovered = int(any(marker in item for item in surfaces))
+        print(json.dumps({
+            "schema_version": 1,
+            "measurements": [{
+                "name": "identity_recovered",
+                "value": recovered,
+                "unit": "count",
+                "uncertainty": None,
+            }],
+        }, separators=(",", ":"), sort_keys=True))
+        '''
+    ).encode("utf-8")
+    payload = (
+        b'{"schema_version":1,"measurements":'
+        b'[{"name":"input_value","value":1,"unit":"1","uncertainty":null}]}'
+    )
+
+    execution = execute_subject_neutral_raw_oracle(
+        adversarial,
+        (aliased / "observations.json").read_bytes(),
+    )
+
+    assert execution.output.measurements[0].name == "identity_recovered"
+    assert execution.output.measurements[0].value == 0
+    with pytest.raises(PhysicsBenchmarkBlindnessInputError, match="only sealed"):
+        execute_subject_neutral_raw_oracle(  # type: ignore[arg-type]
+            aliased / "raw_measurement_oracle.py",
+            payload,
+        )
+    with pytest.raises(PhysicsBenchmarkBlindnessIntegrityError, match="subject identity"):
+        execute_subject_neutral_raw_oracle(
+            adversarial,
+            payload.replace(b"input_value", b"case_777"),
+        )
 
 
 def test_unapproved_or_stale_fixture_receipt_cannot_qualify(tmp_path: Path) -> None:
@@ -465,6 +553,63 @@ def test_blindness_certificate_is_prelaunch_and_binds_real_pa3_projection(
     projection_root = action / "quarantine/workspace"
     materialize_physics_auditor_projection(prepared.projection, projection_root)
     runtime_home = action / "quarantine/codex-home"
+    codex = tmp_path / "codex"
+    codex.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    codex.chmod(0o700)
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}\n", encoding="ascii")
+    volatile = tmp_path / "volatile-action"
+    scratch = volatile / "scratch"
+    scratch.mkdir(parents=True)
+    final_message = volatile / "final-message.md"
+    codex_prepared = _prepared_codex_request(action, prepared)
+    schema = action / "decisions/blindness-test-action/output-schema.json"
+    semantic = build_codex_command(
+        codex_prepared,
+        str(codex),
+        final_message,
+        output_schema=schema,
+        skip_git_repo_check=True,
+        writable_scratch=scratch,
+    )
+    capability = BubblewrapCapability(
+        identity=BubblewrapBackendIdentity(
+            schema_version=1,
+            isolation_schema_version=1,
+            backend="bubblewrap",
+            canonical_bubblewrap_path="/usr/bin/bwrap",
+            bubblewrap_version="bubblewrap scripted-test",
+            capability_result="passed",
+        ),
+        authentication_file=auth,
+    )
+    scorer = repository / catalog.scorer_only_root
+    launch = build_bubblewrap_process_launch(
+        semantic,
+        codex_prepared,
+        {"HOME": "/nonexistent", "PATH": "/usr/bin:/bin"},
+        final_message,
+        schema,
+        capability=capability,
+        stage4_run_root=action,
+        runtime_home=runtime_home,
+        forbidden_roots=(workspace, evidence, scorer),
+        auditor_scratch=scratch,
+    )
+    proof_set = [
+        item.model_dump(mode="json") for item in prepared.request.oracle_completion_proofs
+    ]
+    binding_inputs = PA3LaunchBindingInputsV1(
+        action_request_sha256=prepared.request.canonical_sha256(),
+        execution_config_sha256=prepared.config.canonical_sha256(),
+        evidence_index_sha256=prepared.discovered.index.canonical_sha256(),
+        oracle_completion_proof_set_sha256=hashlib.sha256(
+            canonical_json(proof_set)
+        ).hexdigest(),
+        workspace_identity_sha256=prepared.initial_identity.canonical_sha256(),
+        prompt_sha256=prepared.prompt.rendered_sha256,
+        output_schema_sha256=hashlib.sha256(schema.read_bytes()).hexdigest(),
+    )
 
     certificate = issue_blindness_certificate(
         catalog=catalog,
@@ -475,6 +620,13 @@ def test_blindness_certificate_is_prelaunch_and_binds_real_pa3_projection(
         projection_root=projection_root,
         prompt=prepared.prompt.content,
         runtime_home=runtime_home,
+        launch=launch,
+        semantic_argv=semantic,
+        codex_executable=codex,
+        execution_config=prepared.config,
+        binding_inputs=binding_inputs,
+        output_schema=schema,
+        bubblewrap_identity=capability.identity,
     )
 
     assert certificate.validation_phase == "before_model_launch"
@@ -482,6 +634,64 @@ def test_blindness_certificate_is_prelaunch_and_binds_real_pa3_projection(
     assert certificate.reviewed_visible_manifest_sha256 == (
         certificate.paired_visible_manifest_sha256
     )
+    assert certificate.pa3_launch_manifest_sha256 == (
+        certificate.launch_manifest.canonical_sha256()
+    )
+    assert certificate.launch_manifest.bubblewrap_argv == launch.command
+    assert certificate.launch_manifest.scorer_root_mount == "absent"
+    verify_certified_pa3_launch(
+        certificate,
+        catalog=catalog,
+        pair=pair,
+        variant_id=variant.variant_id,
+        repository_root=repository,
+        projection_manifest=prepared.projection.manifest,
+        projection_root=projection_root,
+        prompt=prepared.prompt.content,
+        runtime_home=runtime_home,
+        launch=launch,
+        semantic_argv=semantic,
+        codex_executable=codex,
+        execution_config=prepared.config,
+        binding_inputs=binding_inputs,
+        output_schema=schema,
+        bubblewrap_identity=capability.identity,
+    )
+    changed_model = list(launch.command)
+    changed_model[changed_model.index("--model") + 1] = "changed-model"
+    changed_mount = list(launch.command)
+    workspace_mount = next(
+        index
+        for index, item in enumerate(changed_mount[:-2])
+        if item == "--ro-bind" and changed_mount[index + 2] == "/workspace"
+    )
+    changed_mount[workspace_mount] = "--bind"
+    tampered_launches = (
+        replace(launch, environment={**launch.environment, "HOME": "/changed"}),
+        replace(launch, cwd=Path("/tmp")),
+        replace(launch, command=tuple(changed_model)),
+        replace(launch, command=tuple(changed_mount)),
+    )
+    for tampered in tampered_launches:
+        with pytest.raises(PhysicsBenchmarkBlindnessIntegrityError):
+            verify_certified_pa3_launch(
+                certificate,
+                catalog=catalog,
+                pair=pair,
+                variant_id=variant.variant_id,
+                repository_root=repository,
+                projection_manifest=prepared.projection.manifest,
+                projection_root=projection_root,
+                prompt=prepared.prompt.content,
+                runtime_home=runtime_home,
+                launch=tampered,
+                semantic_argv=semantic,
+                codex_executable=codex,
+                execution_config=prepared.config,
+                binding_inputs=binding_inputs,
+                output_schema=schema,
+                bubblewrap_identity=capability.identity,
+            )
     certificate_path = tmp_path / "certificate.json"
     persist_blindness_certificate(certificate, certificate_path)
     with pytest.raises(PhysicsBenchmarkBlindnessIntegrityError, match="immutable"):
@@ -504,6 +714,13 @@ def test_blindness_certificate_is_prelaunch_and_binds_real_pa3_projection(
             projection_root=projection_root,
             prompt=prepared.prompt.content,
             runtime_home=runtime_home,
+            launch=launch,
+            semantic_argv=semantic,
+            codex_executable=codex,
+            execution_config=prepared.config,
+            binding_inputs=binding_inputs,
+            output_schema=schema,
+            bubblewrap_identity=capability.identity,
         )
 
 
@@ -588,6 +805,90 @@ def test_real_pa3_bubblewrap_builder_omits_scorer_root(tmp_path: Path) -> None:
         scorer_root=scorer,
     )
     assert str(scorer) not in launch.command
+
+
+@pytest.mark.skipif(not Path("/usr/bin/bwrap").is_file(), reason="Bubblewrap unavailable")
+def test_real_pa3_exec_verifies_exact_certificate_before_scripted_process_start(
+    tmp_path: Path,
+) -> None:
+    repository, catalog_path = _copy_benchmark(tmp_path)
+    catalog = _approve_all(repository, catalog_path)
+    pair = catalog.pair("case_001")
+    variant = pair.variants[0]
+    workspace = tmp_path / "workspace"
+    shutil.copytree(repository / variant.visible_root, workspace)
+    _git("init", "-q", cwd=workspace)
+    _git("config", "user.name", "Certified Launch Test", cwd=workspace)
+    _git("config", "user.email", "certified-launch@example.invalid", cwd=workspace)
+    _git("add", ".", cwd=workspace)
+    _git("commit", "-qm", "fixture", cwd=workspace)
+    evidence = tmp_path / "oracle-evidence"
+    evidence.mkdir()
+    fake = tmp_path / "scripted-codex"
+    fake.write_text(
+        textwrap.dedent(
+            '''\
+            #!/usr/bin/python3
+            import json
+            import sys
+            from pathlib import Path
+
+            sys.stdin.buffer.read()
+            index = sys.argv.index("--output-last-message")
+            Path(sys.argv[index + 1]).write_text("{}", encoding="ascii")
+            print(json.dumps({"type": "thread.started", "thread_id": "certified-fake"}))
+            '''
+        ),
+        encoding="ascii",
+    )
+    fake.chmod(0o700)
+    config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    config["trusted_executable"] = {
+        "path": str(fake),
+        "sha256": hashlib.sha256(fake.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "execution-config.json"
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    auth_home = tmp_path / "codex-home"
+    auth_home.mkdir()
+    (auth_home / "auth.json").write_text("{}\n", encoding="ascii")
+    output = tmp_path / "audit-output"
+    certificate_path = output / "control/blindness-certificate.json"
+    checkpoints: list[str] = []
+
+    def checkpoint(name: str) -> None:
+        checkpoints.append(name)
+        if name == "model_running":
+            assert certificate_path.is_file()
+
+    result = run_physics_auditor(
+        contract_path=workspace / "contract.yaml",
+        execution_config_path=config_path,
+        task_id=pair.case_id,
+        workspace=workspace,
+        oracle_evidence_root=evidence,
+        output_directory=output,
+        action_id="certified-launch-test",
+        environ={"CODEX_HOME": str(auth_home), "PATH": "/usr/bin:/bin"},
+        blindness_authority=BlindBenchmarkLaunchAuthority(
+            catalog=catalog,
+            pair=pair,
+            variant_id=variant.variant_id,
+            repository_root=repository,
+        ),
+        checkpoint=checkpoint,
+    )
+
+    assert "model_running" in checkpoints
+    assert result.failure_reason == "invalid_structured_output"
+    certificate = BlindnessCertificateV1.model_validate_json(
+        certificate_path.read_bytes()
+    )
+    assert certificate.validation_phase == "before_model_launch"
+    assert certificate.launch_manifest.bubblewrap_argv[0] == "/usr/bin/bwrap"
+    assert certificate.launch_manifest.source_workspace_mount == "absent"
+    assert certificate.launch_manifest.oracle_evidence_mount == "absent"
+    assert certificate.launch_manifest.scorer_root_mount == "absent"
 
 
 def test_runtime_symlink_path_and_proc_escape_attempts_fail_closed(tmp_path: Path) -> None:

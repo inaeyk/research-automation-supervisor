@@ -6,6 +6,8 @@ import hashlib
 import os
 import stat
 import subprocess
+import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, cast
 
@@ -69,10 +71,11 @@ def collect_physics_oracle_workspace_identity(
     )
     tracked_manifest_hash = _filesystem_manifest_hash(root, tracked_paths)
     untracked_manifest_hash = _filesystem_manifest_hash(root, untracked_paths)
-    tracked_diff = _git_bytes(
+    tracked_diff = _tracked_diff_without_index_refresh(
         git,
         root,
-        (
+        before[3],
+        arguments=(
             "-c",
             "color.ui=false",
             "diff",
@@ -91,8 +94,9 @@ def collect_physics_oracle_workspace_identity(
         ("submodule", "status", "--recursive"),
         accepted_exit_codes=frozenset({0}),
     )
+    final_index_manifest = _git_bytes(git, root, ("ls-files", "--stage", "-z"))
     after = _anchors(git, root)
-    if before != after:
+    if before != after or index_manifest != final_index_manifest:
         raise PhysicsOracleIntegrityError(
             "workspace changed while its oracle identity was being collected"
         )
@@ -156,10 +160,7 @@ def _anchors(git: Path, workspace: Path) -> tuple[str, str | None, str, str, str
     object_format = _git_text(git, workspace, ("rev-parse", "--show-object-format")).strip()
     if object_format not in {"sha1", "sha256"}:
         raise PhysicsOracleInputError("workspace Git object format is unsupported")
-    index_path_text = _git_text(git, workspace, ("rev-parse", "--git-path", "index")).strip()
-    index_path = Path(index_path_text)
-    if not index_path.is_absolute():
-        index_path = workspace / index_path
+    index_path = _index_path(git, workspace)
     try:
         index_hash = hashlib.sha256(
             index_path.read_bytes() if index_path.exists() else b""
@@ -172,6 +173,49 @@ def _anchors(git: Path, workspace: Path) -> tuple[str, str | None, str, str, str
         ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
     )
     return head, branch, object_format, index_hash, hashlib.sha256(status_bytes).hexdigest()
+
+
+def _index_path(git: Path, workspace: Path) -> Path:
+    index_path_text = _git_text(git, workspace, ("rev-parse", "--git-path", "index")).strip()
+    index_path = Path(index_path_text)
+    if not index_path.is_absolute():
+        index_path = workspace / index_path
+    return index_path
+
+
+def _tracked_diff_without_index_refresh(
+    git: Path,
+    workspace: Path,
+    expected_index_sha256: str,
+    *,
+    arguments: tuple[str, ...],
+) -> bytes:
+    index_path = _index_path(git, workspace)
+    try:
+        index_bytes = index_path.read_bytes() if index_path.exists() else b""
+    except OSError as exc:
+        raise PhysicsOracleInputError("Git index could not be sealed for inspection") from exc
+    if hashlib.sha256(index_bytes).hexdigest() != expected_index_sha256:
+        raise PhysicsOracleIntegrityError(
+            "workspace changed before its tracked diff could be collected"
+        )
+    try:
+        with tempfile.TemporaryDirectory(prefix="ras-readonly-git-index-") as temporary:
+            copied_index = Path(temporary) / "index"
+            if index_bytes:
+                with copied_index.open("xb") as handle:
+                    handle.write(index_bytes)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            environment = {**_GIT_ENVIRONMENT, "GIT_INDEX_FILE": str(copied_index)}
+            return _git_bytes(
+                git,
+                workspace,
+                arguments,
+                environment=environment,
+            )
+    except OSError as exc:
+        raise PhysicsOracleInputError("private Git index inspection failed") from exc
 
 
 def _filesystem_manifest_hash(root: Path, paths: tuple[str, ...]) -> str:
@@ -281,6 +325,7 @@ def _git_bytes(
     arguments: tuple[str, ...],
     *,
     accepted_exit_codes: frozenset[int] = frozenset({0}),
+    environment: Mapping[str, str] | None = None,
 ) -> bytes:
     command = (
         str(git),
@@ -298,7 +343,7 @@ def _git_bytes(
             stderr=subprocess.DEVNULL,
             check=False,
             close_fds=True,
-            env=_GIT_ENVIRONMENT,
+            env=dict(_GIT_ENVIRONMENT if environment is None else environment),
             timeout=GIT_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:

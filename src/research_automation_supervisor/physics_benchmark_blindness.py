@@ -10,10 +10,13 @@ import ast
 import hashlib
 import json
 import os
+import platform
 import re
 import stat
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, TypeAlias, cast
 
@@ -28,13 +31,16 @@ from pydantic import (
     model_validator,
 )
 
+from research_automation_supervisor.codex_adapter import CodexProcessLaunch
 from research_automation_supervisor.durable_state import canonical_json
 from research_automation_supervisor.errors import (
     PhysicsBenchmarkBlindnessInputError,
     PhysicsBenchmarkBlindnessIntegrityError,
 )
+from research_automation_supervisor.live_shadow_isolation import BubblewrapBackendIdentity
 from research_automation_supervisor.physics_auditor_models import (
     PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1,
+    PhysicsAuditorExecutionConfigV1,
     PhysicsAuditorProjectionManifestV1,
 )
 from research_automation_supervisor.physics_auditor_projection import (
@@ -48,6 +54,44 @@ MAX_BLIND_CATALOG_BYTES = 4 * 1024 * 1024
 MAX_BLIND_FILES = 2_000
 MAX_BLIND_FILE_BYTES = 16 * 1024 * 1024
 MAX_RAW_MEASUREMENTS = 1_000
+MAX_NEUTRAL_ORACLE_BYTES = 2 * 1024 * 1024
+MAX_NEUTRAL_ORACLE_OUTPUT_BYTES = 2 * 1024 * 1024
+NEUTRAL_ORACLE_TIMEOUT_SECONDS = 15
+DEFAULT_NEUTRAL_ORACLE_BUBBLEWRAP = Path("/usr/bin/bwrap")
+DEFAULT_NEUTRAL_ORACLE_PYTHON = Path("/usr/bin/python3")
+NEUTRAL_ORACLE_PROGRAM_PATH = "/oracle/program.py"
+NEUTRAL_ORACLE_PAYLOAD_PATH = "/input/payload.json"
+NEUTRAL_ORACLE_CWD = "/work"
+_PA3_LAUNCH_ENVIRONMENT_NAMES = frozenset(
+    {
+        "CODEX_HOME",
+        "COLORTERM",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "NO_COLOR",
+        "PATH",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TEMP",
+        "TERM",
+        "TMP",
+        "TMPDIR",
+        "XDG_DATA_DIRS",
+        "XDG_RUNTIME_DIR",
+    }
+)
+_PA3_MOUNT_ROLES = {
+    "/opt/ras/codex": "codex_executable",
+    "/workspace": "projected_workspace",
+    "/action": "action_output",
+    "/control/output-schema.json": "output_schema",
+    "/home/supervisor": "runtime_home",
+    "/home/supervisor/auth.json": "authentication",
+    "/scratch": "auditor_scratch",
+    "/etc/ssl/certs": "tls_certificates",
+}
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 NeutralCaseId = Annotated[str, Field(pattern=r"^case_[0-9]{3}$")]
@@ -485,6 +529,158 @@ class RawOracleOutputV1(BlindCanonicalModel):
         return items
 
 
+class SubjectNeutralRawOracleExecutionV1(BlindCanonicalModel):
+    """One raw result produced without a subject-bearing execution surface."""
+
+    schema_version: Literal[1] = 1
+    program_sha256: Sha256
+    payload_sha256: Sha256
+    isolation_manifest_sha256: Sha256
+    output: RawOracleOutputV1
+    subject_identity_inputs: Literal["absent"] = "absent"
+    original_fixture_path_mounted: Literal[False] = False
+    catalog_or_scorer_mounted: Literal[False] = False
+
+
+class PA3LaunchEnvironmentEntryV1(BlindCanonicalModel):
+    """One allowlisted launch variable bound without persisting its value."""
+
+    name: Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,79}$")]
+    value_sha256: Sha256
+
+
+class PA3LaunchMountV1(BlindCanonicalModel):
+    """One exact Bubblewrap bind and its effective permission."""
+
+    option: Literal["--bind", "--ro-bind", "--dev-bind"]
+    source: Annotated[str, Field(min_length=1, max_length=4_096)]
+    destination: Annotated[str, Field(min_length=1, max_length=4_096)]
+    permission: Literal["read_only", "read_write"]
+    role: Literal[
+        "system_runtime",
+        "system_configuration",
+        "tls_certificates",
+        "codex_executable",
+        "projected_workspace",
+        "action_output",
+        "output_schema",
+        "runtime_home",
+        "authentication",
+        "auditor_scratch",
+    ]
+
+    @model_validator(mode="after")
+    def validate_permission(self) -> PA3LaunchMountV1:
+        expected = "read_only" if self.option == "--ro-bind" else "read_write"
+        if self.permission != expected:
+            raise ValueError("launch mount permission contradicts its Bubblewrap option")
+        for value in (self.source, self.destination):
+            path = PurePosixPath(value)
+            if not path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+                raise ValueError("launch mounts require exact absolute POSIX paths")
+        return self
+
+
+class PA3LaunchProjectedObjectV1(BlindCanonicalModel):
+    """One exact regular byte object mounted into the PA-3 projection."""
+
+    path: RelativePath
+    byte_length: Annotated[int, Field(ge=0, le=MAX_BLIND_FILE_BYTES)]
+    sha256: Sha256
+
+
+class PA3LaunchBindingInputsV1(BlindCanonicalModel):
+    """Prelaunch evidence identities that are not recoverable from argv alone."""
+
+    schema_version: Literal[1] = 1
+    action_request_sha256: Sha256
+    execution_config_sha256: Sha256
+    evidence_index_sha256: Sha256
+    oracle_completion_proof_set_sha256: Sha256
+    workspace_identity_sha256: Sha256
+    prompt_sha256: Sha256
+    output_schema_sha256: Sha256
+
+
+class PA3LaunchManifestV1(BlindCanonicalModel):
+    """Canonical reconstruction of the exact PA-3 Bubblewrap launch boundary."""
+
+    schema_version: Literal[1] = 1
+    codex_executable: Annotated[str, Field(min_length=1, max_length=4_096)]
+    codex_executable_sha256: Sha256
+    model: Annotated[str, Field(min_length=1, max_length=160)]
+    reasoning_effort: Annotated[str, Field(min_length=1, max_length=40)]
+    execution_config_sha256: Sha256
+    semantic_argv: Annotated[
+        tuple[str, ...], BeforeValidator(_freeze_sequence), Field(min_length=1, max_length=512)
+    ]
+    bubblewrap_argv: Annotated[
+        tuple[str, ...], BeforeValidator(_freeze_sequence), Field(min_length=1, max_length=1_024)
+    ]
+    bubblewrap_executable_sha256: Sha256
+    subprocess_cwd: Annotated[str, Field(min_length=1, max_length=4_096)]
+    bubblewrap_cwd: Annotated[str, Field(min_length=1, max_length=4_096)]
+    mounts: Annotated[
+        tuple[PA3LaunchMountV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=1, max_length=128),
+    ]
+    environment: Annotated[
+        tuple[PA3LaunchEnvironmentEntryV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=1, max_length=64),
+    ]
+    environment_allowlist_profile: Literal["codex_cli_minimal_v1"]
+    projection_manifest_sha256: Sha256
+    projected_files: Annotated[
+        tuple[PA3LaunchProjectedObjectV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=1, max_length=MAX_BLIND_FILES),
+    ]
+    runtime_home_source: Annotated[str, Field(min_length=1, max_length=4_096)]
+    runtime_home_manifest_sha256: Sha256
+    network_policy: Literal["disabled_by_codex_policy_not_kernel_enforced"]
+    action_output_mount: Literal["/action"] = "/action"
+    scratch_output_mount: Literal["/scratch"] = "/scratch"
+    output_schema_sha256: Sha256
+    action_request_sha256: Sha256
+    evidence_index_sha256: Sha256
+    oracle_completion_proof_set_sha256: Sha256
+    workspace_identity_sha256: Sha256
+    prompt_sha256: Sha256
+    bubblewrap_backend_identity_sha256: Sha256
+    bubblewrap_policy_sha256: Sha256
+    source_workspace_mount: Literal["absent"] = "absent"
+    oracle_evidence_mount: Literal["absent"] = "absent"
+    scorer_root_mount: Literal["absent"] = "absent"
+
+    @field_validator("environment")
+    @classmethod
+    def canonicalize_environment(
+        cls, value: tuple[PA3LaunchEnvironmentEntryV1, ...]
+    ) -> tuple[PA3LaunchEnvironmentEntryV1, ...]:
+        items = tuple(sorted(value, key=lambda item: item.name))
+        if len({item.name for item in items}) != len(items):
+            raise ValueError("launch environment contains duplicate names")
+        return items
+
+    @model_validator(mode="after")
+    def validate_launch(self) -> PA3LaunchManifestV1:
+        if len({item.destination for item in self.mounts}) != len(self.mounts):
+            raise ValueError("launch mount destinations must be unique")
+        return self
+
+
+@dataclass(frozen=True)
+class BlindBenchmarkLaunchAuthority:
+    """Scorer-side authority needed to certify one exact real PA-3 launch."""
+
+    catalog: PhysicsBlindFixtureCatalogV1
+    pair: BlindPairAuthorityV1
+    variant_id: str
+    repository_root: Path
+
+
 class BlindnessCertificateV1(BlindCanonicalModel):
     """Prelaunch binding for one exact neutral PA-3 fixture projection."""
 
@@ -505,10 +701,18 @@ class BlindnessCertificateV1(BlindCanonicalModel):
     review_receipt_sha256: Sha256
     reviewed_visible_manifest_sha256: Sha256
     reviewed_scorer_authority_sha256: Sha256
+    pa3_launch_manifest_sha256: Sha256
+    launch_manifest: PA3LaunchManifestV1
     bubblewrap_policy_sha256: Sha256
     runtime_home_empty_sha256: Sha256
     validation_phase: Literal["before_model_launch"] = "before_model_launch"
     model_launched_during_validation: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_launch_manifest_digest(self) -> BlindnessCertificateV1:
+        if self.pa3_launch_manifest_sha256 != self.launch_manifest.canonical_sha256():
+            raise ValueError("blindness certificate launch-manifest digest is invalid")
+        return self
 
 
 class FixtureQualificationV1(BlindCanonicalModel):
@@ -767,6 +971,7 @@ def qualify_fixture_authority(
         )
         for item in catalog.gl_tasks
     )
+    _qualify_subject_neutral_oracle_execution(catalog, root)
     manifest_by_subject: dict[str, BlindCanonicalModel] = {
         **{item.case_id: item for item in pair_manifests},
         **{item.subject_id: item for item in gl_manifests},
@@ -805,6 +1010,54 @@ def qualify_fixture_authority(
         gl_manifests=gl_manifests,
         approved_subject_ids=tuple(approved),
     )
+
+
+def _qualify_subject_neutral_oracle_execution(
+    catalog: PhysicsBlindFixtureCatalogV1,
+    repository_root: Path,
+) -> None:
+    executions: list[tuple[bytes, bytes]] = []
+    for pair in catalog.pairs:
+        for variant in pair.variants:
+            for oracle_file in pair.oracle_files:
+                program = _object_bytes(repository_root, variant.visible_root, oracle_file)
+                for observation_file in pair.raw_observation_files:
+                    payload = _object_bytes(
+                        repository_root,
+                        variant.visible_root,
+                        observation_file,
+                    )
+                    executions.append((program, payload))
+    for task in catalog.gl_tasks:
+        visible = _resolve_below(repository_root, task.visible_root, kind="directory")
+        manifest = _manifest_for_directory(
+            subject_id=task.task_id,
+            pair_id=None,
+            variant_id=None,
+            directory=visible,
+        )
+        payload_paths = tuple(
+            item.path for item in manifest.objects if item.role == "raw_observation"
+        )
+        if not payload_paths:
+            raise PhysicsBenchmarkBlindnessIntegrityError(
+                "GL fixture lacks a declared raw observation payload"
+            )
+        for oracle_file in task.oracle_files:
+            program = _resolve_below(visible, oracle_file, kind="file").read_bytes()
+            for payload_path in payload_paths:
+                payload = _resolve_below(visible, payload_path, kind="file").read_bytes()
+                executions.append((program, payload))
+    if len({hashlib.sha256(program).hexdigest() for program, _payload in executions}) != 1:
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "benchmark subjects do not share one generic oracle program"
+        )
+    for program, payload in executions:
+        observed = execute_subject_neutral_raw_oracle(program, payload)
+        if observed.output != parse_raw_oracle_output(payload):
+            raise PhysicsBenchmarkBlindnessIntegrityError(
+                "subject-neutral oracle changed the declared raw observations"
+            )
 
 
 def build_fixture_review_packet(
@@ -862,6 +1115,207 @@ def build_fixture_review_packet(
     )
 
 
+def build_pa3_launch_manifest(
+    *,
+    launch: CodexProcessLaunch,
+    semantic_argv: Sequence[str],
+    codex_executable: Path,
+    execution_config: PhysicsAuditorExecutionConfigV1,
+    binding_inputs: PA3LaunchBindingInputsV1,
+    projection_manifest: PhysicsAuditorProjectionManifestV1,
+    projection_root: Path,
+    prompt: bytes,
+    runtime_home: Path,
+    output_schema: Path,
+    bubblewrap_identity: BubblewrapBackendIdentity,
+    scorer_root: Path,
+) -> PA3LaunchManifestV1:
+    """Reconstruct the canonical manifest from the concrete PA-3 launch object."""
+    projection = _canonical_directory(projection_root, "PA-3 projection root")
+    runtime = _canonical_directory(runtime_home, "PA-3 runtime home")
+    scorer = _canonical_directory(scorer_root, "scorer-only root")
+    executable = _canonical_regular_file(codex_executable, "Codex executable")
+    schema = _canonical_regular_file(output_schema, "PA-3 output schema")
+    semantic = tuple(semantic_argv)
+    command = tuple(launch.command)
+    if (
+        not semantic
+        or semantic[0] != str(executable)
+        or binding_inputs.execution_config_sha256 != execution_config.canonical_sha256()
+        or binding_inputs.output_schema_sha256 != hashlib.sha256(schema.read_bytes()).hexdigest()
+        or binding_inputs.prompt_sha256 != hashlib.sha256(prompt).hexdigest()
+        or binding_inputs.workspace_identity_sha256
+        != projection_manifest.source_workspace_identity_sha256
+    ):
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "PA-3 semantic launch authority is contradictory"
+        )
+    try:
+        separator = command.index("--")
+    except ValueError as exc:
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "PA-3 launch lacks the Bubblewrap command separator"
+        ) from exc
+    if command.count("--") != 1 or separator < 1 or separator + 1 >= len(command):
+        raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 Bubblewrap argv is ambiguous")
+    if command[0] != bubblewrap_identity.canonical_bubblewrap_path:
+        raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 Bubblewrap identity changed")
+    bubblewrap = _canonical_regular_file(Path(command[0]), "Bubblewrap executable")
+    verify_scorer_root_excluded_from_bubblewrap_command(command, scorer_root=scorer)
+    verify_physics_auditor_projection(projection_manifest, projection)
+    if launch.cwd != Path("/"):
+        raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 subprocess cwd changed")
+    bubblewrap_cwd = _single_option_value(command[:separator], "--chdir")
+    isolated = command[separator + 1 :]
+    if (
+        isolated[0] != "/opt/ras/codex"
+        or _single_option_value(isolated, "--model") != execution_config.model
+        or f"model_reasoning_effort={execution_config.reasoning_effort}" not in isolated
+        or 'web_search="disabled"' not in isolated
+        or "sandbox_workspace_write.network_access=false" not in isolated
+        or "--ephemeral" not in isolated
+        or "resume" in isolated
+        or "--unshare-net" in command[:separator]
+    ):
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "PA-3 isolated argv changed model or execution policy"
+        )
+    mounts = _pa3_launch_mounts(command[:separator])
+    by_role = {item.role: item for item in mounts}
+    required_roles = {
+        "codex_executable",
+        "projected_workspace",
+        "action_output",
+        "output_schema",
+        "runtime_home",
+        "authentication",
+        "auditor_scratch",
+    }
+    if not required_roles.issubset(by_role):
+        raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 launch mount authority is incomplete")
+    if (
+        Path(by_role["codex_executable"].source) != executable
+        or Path(by_role["projected_workspace"].source) != projection
+        or Path(by_role["output_schema"].source) != schema
+        or Path(by_role["runtime_home"].source) != runtime
+        or by_role["projected_workspace"].permission != "read_only"
+        or by_role["action_output"].permission != "read_write"
+        or by_role["auditor_scratch"].permission != "read_write"
+    ):
+        raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 launch mount binding changed")
+    environment = dict(launch.environment)
+    if (
+        not environment
+        or not set(environment).issubset(_PA3_LAUNCH_ENVIRONMENT_NAMES)
+        or environment.get("HOME") != "/home/supervisor"
+        or environment.get("CODEX_HOME") != "/home/supervisor"
+        or environment.get("TMPDIR") != "/tmp"
+        or environment.get("TMP") != "/tmp"
+        or environment.get("TEMP") != "/tmp"
+    ):
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "PA-3 launch environment escaped its allowlist"
+        )
+    try:
+        with os.scandir(runtime) as entries:
+            if next(entries, None) is not None:
+                raise PhysicsBenchmarkBlindnessIntegrityError(
+                    "PA-3 runtime home is not empty at launch certification"
+                )
+    except OSError as exc:
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "PA-3 runtime home could not be inspected"
+        ) from exc
+    projected_files = tuple(
+        PA3LaunchProjectedObjectV1(
+            path=item.path,
+            byte_length=item.byte_length,
+            sha256=item.sha256,
+        )
+        for item in projection_manifest.objects
+        if item.kind == "regular"
+    )
+    return PA3LaunchManifestV1(
+        codex_executable=str(executable),
+        codex_executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        model=execution_config.model,
+        reasoning_effort=execution_config.reasoning_effort,
+        execution_config_sha256=binding_inputs.execution_config_sha256,
+        semantic_argv=semantic,
+        bubblewrap_argv=command,
+        bubblewrap_executable_sha256=hashlib.sha256(bubblewrap.read_bytes()).hexdigest(),
+        subprocess_cwd=str(launch.cwd),
+        bubblewrap_cwd=bubblewrap_cwd,
+        mounts=mounts,
+        environment=tuple(
+            PA3LaunchEnvironmentEntryV1(
+                name=name,
+                value_sha256=hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            )
+            for name, value in environment.items()
+        ),
+        environment_allowlist_profile=execution_config.environment_allowlist_profile,
+        projection_manifest_sha256=projection_manifest.canonical_sha256(),
+        projected_files=projected_files,
+        runtime_home_source=str(runtime),
+        runtime_home_manifest_sha256=_directory_manifest_sha256(runtime),
+        network_policy=execution_config.network_policy,
+        output_schema_sha256=binding_inputs.output_schema_sha256,
+        action_request_sha256=binding_inputs.action_request_sha256,
+        evidence_index_sha256=binding_inputs.evidence_index_sha256,
+        oracle_completion_proof_set_sha256=(
+            binding_inputs.oracle_completion_proof_set_sha256
+        ),
+        workspace_identity_sha256=binding_inputs.workspace_identity_sha256,
+        prompt_sha256=binding_inputs.prompt_sha256,
+        bubblewrap_backend_identity_sha256=hashlib.sha256(
+            canonical_json(bubblewrap_identity.to_dict())
+        ).hexdigest(),
+        bubblewrap_policy_sha256=(
+            PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256()
+        ),
+    )
+
+
+def _single_option_value(command: Sequence[str], option: str) -> str:
+    indexes = [index for index, item in enumerate(command) if item == option]
+    if len(indexes) != 1 or indexes[0] + 1 >= len(command):
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            f"PA-3 launch has an invalid {option} option"
+        )
+    return command[indexes[0] + 1]
+
+
+def _pa3_launch_mounts(command: Sequence[str]) -> tuple[PA3LaunchMountV1, ...]:
+    mounts: list[PA3LaunchMountV1] = []
+    for index, option in enumerate(command):
+        if option not in {"--bind", "--ro-bind", "--dev-bind"}:
+            continue
+        if index + 2 >= len(command):
+            raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 launch mount is truncated")
+        source, destination = command[index + 1 : index + 3]
+        if destination in _PA3_MOUNT_ROLES:
+            role = _PA3_MOUNT_ROLES[destination]
+        elif destination in {"/usr", "/bin", "/sbin", "/lib", "/lib64"}:
+            role = "system_runtime"
+        elif destination.startswith("/etc/"):
+            role = "system_configuration"
+        else:
+            raise PhysicsBenchmarkBlindnessIntegrityError(
+                "PA-3 launch contains an unclassified bind mount"
+            )
+        mounts.append(
+            PA3LaunchMountV1(
+                option=cast(Any, option),
+                source=source,
+                destination=destination,
+                permission="read_only" if option == "--ro-bind" else "read_write",
+                role=cast(Any, role),
+            )
+        )
+    return tuple(mounts)
+
+
 def issue_blindness_certificate(
     *,
     catalog: PhysicsBlindFixtureCatalogV1,
@@ -872,6 +1326,13 @@ def issue_blindness_certificate(
     projection_root: Path,
     prompt: bytes,
     runtime_home: Path,
+    launch: CodexProcessLaunch,
+    semantic_argv: Sequence[str],
+    codex_executable: Path,
+    execution_config: PhysicsAuditorExecutionConfigV1,
+    binding_inputs: PA3LaunchBindingInputsV1,
+    output_schema: Path,
+    bubblewrap_identity: BubblewrapBackendIdentity,
 ) -> BlindnessCertificateV1:
     """Complete every blindness check before any model-launch attempt."""
     root = _canonical_directory(repository_root, "repository root")
@@ -879,6 +1340,10 @@ def issue_blindness_certificate(
     visible_root = _resolve_below(root, catalog.auditor_visible_root, kind="directory")
     _validate_root_separation(visible_root, scorer_root)
     variants = tuple(item for item in pair.variants if item.variant_id == variant_id)
+    if catalog.pair(pair.case_id) != pair:
+        raise PhysicsBenchmarkBlindnessInputError(
+            "blind launch pair is not the exact catalog authority"
+        )
     if len(variants) != 1:
         raise PhysicsBenchmarkBlindnessInputError("neutral pair variant is unavailable")
     variant = variants[0]
@@ -904,22 +1369,31 @@ def issue_blindness_certificate(
         visible_manifest,
         excluded_oracles=set(pair.oracle_files),
     )
-    runtime = _canonical_directory(runtime_home, "PA-3 runtime home")
-    try:
-        if any(os.scandir(runtime)):
-            raise PhysicsBenchmarkBlindnessIntegrityError(
-                "PA-3 runtime home is not empty at blindness certification"
-            )
-    except OSError as exc:
-        raise PhysicsBenchmarkBlindnessIntegrityError("PA-3 runtime home is unavailable") from exc
+    launch_manifest = build_pa3_launch_manifest(
+        launch=launch,
+        semantic_argv=semantic_argv,
+        codex_executable=codex_executable,
+        execution_config=execution_config,
+        binding_inputs=binding_inputs,
+        projection_manifest=projection_manifest,
+        projection_root=projection_root,
+        prompt=prompt,
+        runtime_home=runtime_home,
+        output_schema=output_schema,
+        bubblewrap_identity=bubblewrap_identity,
+        scorer_root=scorer_root,
+    )
+    launch_manifest_sha256 = launch_manifest.canonical_sha256()
     scorer_manifest_sha256 = _directory_manifest_sha256(scorer_root)
     exclusion = canonical_json(
         {
             "bubblewrap_policy_sha256": PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256(),
+            "pa3_launch_manifest_sha256": launch_manifest_sha256,
             "projection_manifest_sha256": projection_manifest.canonical_sha256(),
             "scorer_root": catalog.scorer_only_root,
             "scorer_root_manifest_sha256": scorer_manifest_sha256,
-            "source_workspace_mount": "absent",
+            "scorer_root_mount": launch_manifest.scorer_root_mount,
+            "source_workspace_mount": launch_manifest.source_workspace_mount,
         }
     )
     neutral = canonical_json(
@@ -946,9 +1420,54 @@ def issue_blindness_certificate(
         review_receipt_sha256=receipt.receipt_sha256,
         reviewed_visible_manifest_sha256=receipt.reviewed_visible_manifest_sha256,
         reviewed_scorer_authority_sha256=receipt.reviewed_scorer_authority_sha256,
+        pa3_launch_manifest_sha256=launch_manifest_sha256,
+        launch_manifest=launch_manifest,
         bubblewrap_policy_sha256=PHYSICS_AUDITOR_BUBBLEWRAP_POLICY_V1.canonical_sha256(),
-        runtime_home_empty_sha256=hashlib.sha256(b"").hexdigest(),
+        runtime_home_empty_sha256=launch_manifest.runtime_home_manifest_sha256,
     )
+
+
+def verify_certified_pa3_launch(
+    certificate: BlindnessCertificateV1,
+    *,
+    catalog: PhysicsBlindFixtureCatalogV1,
+    pair: BlindPairAuthorityV1,
+    variant_id: str,
+    repository_root: Path,
+    projection_manifest: PhysicsAuditorProjectionManifestV1,
+    projection_root: Path,
+    prompt: bytes,
+    runtime_home: Path,
+    launch: CodexProcessLaunch,
+    semantic_argv: Sequence[str],
+    codex_executable: Path,
+    execution_config: PhysicsAuditorExecutionConfigV1,
+    binding_inputs: PA3LaunchBindingInputsV1,
+    output_schema: Path,
+    bubblewrap_identity: BubblewrapBackendIdentity,
+) -> None:
+    """Reconstruct all certified authority immediately before the actual exec."""
+    observed = issue_blindness_certificate(
+        catalog=catalog,
+        pair=pair,
+        variant_id=variant_id,
+        repository_root=repository_root,
+        projection_manifest=projection_manifest,
+        projection_root=projection_root,
+        prompt=prompt,
+        runtime_home=runtime_home,
+        launch=launch,
+        semantic_argv=semantic_argv,
+        codex_executable=codex_executable,
+        execution_config=execution_config,
+        binding_inputs=binding_inputs,
+        output_schema=output_schema,
+        bubblewrap_identity=bubblewrap_identity,
+    )
+    if observed != certificate:
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "actual PA-3 launch differs from its blindness certificate"
+        )
 
 
 def persist_blindness_certificate(certificate: BlindnessCertificateV1, path: Path) -> None:
@@ -984,6 +1503,14 @@ def persist_blindness_certificate(certificate: BlindnessCertificateV1, path: Pat
         raise PhysicsBenchmarkBlindnessIntegrityError(
             "blindness certificate could not be persisted"
         ) from exc
+
+
+def load_blindness_certificate(path: Path) -> BlindnessCertificateV1:
+    """Reload exact persisted prelaunch authority for the final exec boundary."""
+    return cast(
+        BlindnessCertificateV1,
+        _load_json_model(path, BlindnessCertificateV1, "blindness certificate"),
+    )
 
 
 def verify_scorer_root_excluded_from_bubblewrap_command(
@@ -1097,6 +1624,272 @@ def parse_raw_oracle_output(raw: bytes) -> RawOracleOutputV1:
         return RawOracleOutputV1.model_validate(value)
     except ValidationError as exc:
         raise PhysicsBenchmarkBlindnessInputError("raw oracle output schema is invalid") from exc
+
+
+def execute_subject_neutral_raw_oracle(
+    program: bytes,
+    payload: bytes,
+    *,
+    bubblewrap_executable: Path = DEFAULT_NEUTRAL_ORACLE_BUBBLEWRAP,
+    python_executable: Path = DEFAULT_NEUTRAL_ORACLE_PYTHON,
+) -> SubjectNeutralRawOracleExecutionV1:
+    """Execute raw normalization with no subject-bearing process input or host mount."""
+    if not isinstance(program, bytes) or not isinstance(payload, bytes):
+        raise PhysicsBenchmarkBlindnessInputError(
+            "subject-neutral oracle accepts only sealed program and payload bytes"
+        )
+    if not program or len(program) > MAX_NEUTRAL_ORACLE_BYTES:
+        raise PhysicsBenchmarkBlindnessInputError("generic oracle program is empty or oversized")
+    if not payload or len(payload) > MAX_NEUTRAL_ORACLE_BYTES:
+        raise PhysicsBenchmarkBlindnessInputError("generic oracle payload is empty or oversized")
+    if re.search(rb"(?i)(?:case|task)_[0-9]{3}", payload):
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "declared oracle payload contains a subject identity"
+        )
+    validate_generic_raw_oracle_program(program)
+    parse_raw_oracle_output(payload)
+    bwrap = _trusted_neutral_oracle_executable(
+        bubblewrap_executable,
+        expected_name="bwrap",
+    )
+    python = _trusted_neutral_oracle_executable(
+        python_executable,
+        expected_name="python",
+    )
+    program_sha256 = hashlib.sha256(program).hexdigest()
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
+    with tempfile.TemporaryDirectory(prefix="ras-neutral-oracle-") as temporary:
+        staging = Path(temporary)
+        staged_program = staging / "program.py"
+        staged_payload = staging / "payload.json"
+        _write_private_neutral_oracle_file(staged_program, program)
+        _write_private_neutral_oracle_file(staged_payload, payload)
+        command, isolation_manifest = _subject_neutral_oracle_command(
+            bwrap=bwrap,
+            python=python,
+            staging=staging,
+            program=staged_program,
+            payload=staged_payload,
+            program_sha256=program_sha256,
+            payload_sha256=payload_sha256,
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=Path("/"),
+                env={},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+                close_fds=True,
+                timeout=NEUTRAL_ORACLE_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise PhysicsBenchmarkBlindnessIntegrityError(
+                "subject-neutral oracle isolation could not be executed"
+            ) from exc
+        if (
+            completed.returncode != 0
+            or len(completed.stdout) > MAX_NEUTRAL_ORACLE_OUTPUT_BYTES
+            or len(completed.stderr) > MAX_NEUTRAL_ORACLE_OUTPUT_BYTES
+        ):
+            raise PhysicsBenchmarkBlindnessIntegrityError(
+                "subject-neutral oracle execution failed closed"
+            )
+        output = parse_raw_oracle_output(completed.stdout)
+    return SubjectNeutralRawOracleExecutionV1(
+        program_sha256=program_sha256,
+        payload_sha256=payload_sha256,
+        isolation_manifest_sha256=hashlib.sha256(
+            canonical_json(isolation_manifest)
+        ).hexdigest(),
+        output=output,
+    )
+
+
+def _trusted_neutral_oracle_executable(path: Path, *, expected_name: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        status = resolved.lstat()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PhysicsBenchmarkBlindnessInputError(
+            "subject-neutral oracle runtime is unavailable"
+        ) from exc
+    trusted_roots = {Path("/usr/bin").resolve(strict=True), Path("/bin").resolve(strict=True)}
+    if (
+        resolved.parent not in trusted_roots
+        or not stat.S_ISREG(status.st_mode)
+        or not os.access(resolved, os.X_OK)
+        or (expected_name == "bwrap" and resolved.name != "bwrap")
+        or (expected_name == "python" and not re.fullmatch(r"python[0-9]+\.[0-9]+", resolved.name))
+    ):
+        raise PhysicsBenchmarkBlindnessInputError(
+            "subject-neutral oracle runtime is not a trusted system executable"
+        )
+    return resolved
+
+
+def _write_private_neutral_oracle_file(path: Path, content: bytes) -> None:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o400,
+        )
+        try:
+            offset = 0
+            while offset < len(content):
+                offset += os.write(descriptor, content[offset:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "subject-neutral oracle staging failed"
+        ) from exc
+
+
+def _subject_neutral_oracle_command(
+    *,
+    bwrap: Path,
+    python: Path,
+    staging: Path,
+    program: Path,
+    payload: Path,
+    program_sha256: str,
+    payload_sha256: str,
+) -> tuple[tuple[str, ...], dict[str, object]]:
+    version = python.name.removeprefix("python")
+    multiarch_name = {
+        "x86_64": "x86_64-linux-gnu",
+        "aarch64": "aarch64-linux-gnu",
+    }.get(platform.machine())
+    loader_destination = {
+        "x86_64": Path("/lib64/ld-linux-x86-64.so.2"),
+        "aarch64": Path("/lib/ld-linux-aarch64.so.1"),
+    }.get(platform.machine())
+    if multiarch_name is None or loader_destination is None:
+        raise PhysicsBenchmarkBlindnessInputError(
+            "subject-neutral oracle architecture is unsupported"
+        )
+    stdlib = Path(f"/usr/lib/python{version}")
+    multiarch = Path("/usr/lib") / multiarch_name
+    try:
+        loader = loader_destination.resolve(strict=True)
+        staged_root = staging.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PhysicsBenchmarkBlindnessInputError(
+            "subject-neutral oracle runtime could not be resolved"
+        ) from exc
+    if (
+        not stdlib.is_dir()
+        or not multiarch.is_dir()
+        or program.parent != staging
+        or payload.parent != staging
+        or staging != staged_root
+        or any(path.is_symlink() for path in (staging, program, payload))
+        or hashlib.sha256(program.read_bytes()).hexdigest() != program_sha256
+        or hashlib.sha256(payload.read_bytes()).hexdigest() != payload_sha256
+    ):
+        raise PhysicsBenchmarkBlindnessIntegrityError(
+            "subject-neutral oracle staging identity changed"
+        )
+    environment = {
+        "HOME": "/nonexistent",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "TMPDIR": NEUTRAL_ORACLE_CWD,
+    }
+    command: list[str] = [
+        str(bwrap),
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+    ]
+    for name, value in sorted(environment.items()):
+        command.extend(("--setenv", name, value))
+    command.extend(
+        (
+            "--dir",
+            "/usr",
+            "--dir",
+            "/usr/bin",
+            "--dir",
+            "/usr/lib",
+            "--dir",
+            f"/usr/lib/{multiarch_name}",
+            "--dir",
+            "/lib",
+            "--dir",
+            "/lib64",
+            "--dir",
+            "/oracle",
+            "--dir",
+            "/input",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            NEUTRAL_ORACLE_CWD,
+            "--ro-bind",
+            str(python),
+            str(python),
+            "--ro-bind",
+            str(stdlib),
+            str(stdlib),
+            "--ro-bind",
+            str(multiarch),
+            str(multiarch),
+            "--ro-bind",
+            str(loader),
+            str(loader_destination),
+            "--ro-bind",
+            str(program),
+            NEUTRAL_ORACLE_PROGRAM_PATH,
+            "--ro-bind",
+            str(payload),
+            NEUTRAL_ORACLE_PAYLOAD_PATH,
+            "--chdir",
+            NEUTRAL_ORACLE_CWD,
+            "--",
+            str(python),
+            "-I",
+            "-S",
+            "-B",
+            NEUTRAL_ORACLE_PROGRAM_PATH,
+            NEUTRAL_ORACLE_PAYLOAD_PATH,
+        )
+    )
+    isolation_manifest: dict[str, object] = {
+        "schema_version": 1,
+        "policy": "subject_neutral_bytes_only_bubblewrap_v1",
+        "program_sha256": program_sha256,
+        "payload_sha256": payload_sha256,
+        "inner_argv": [
+            str(python),
+            "-I",
+            "-S",
+            "-B",
+            NEUTRAL_ORACLE_PROGRAM_PATH,
+            NEUTRAL_ORACLE_PAYLOAD_PATH,
+        ],
+        "cwd": NEUTRAL_ORACLE_CWD,
+        "environment": environment,
+        "network": "disabled_by_private_unshare_all_namespace",
+        "private_proc": True,
+        "mounted_inputs": [NEUTRAL_ORACLE_PROGRAM_PATH, NEUTRAL_ORACLE_PAYLOAD_PATH],
+        "host_workspace_mounted": False,
+        "catalog_or_scorer_mounted": False,
+        "subject_identity_inputs": [],
+    }
+    return tuple(command), isolation_manifest
 
 
 def read_exact_git_blob(repository: Path, commit: str, relative: str) -> bytes:
@@ -1487,6 +2280,24 @@ def _canonical_directory(path: Path, label: str) -> Path:
         raise PhysicsBenchmarkBlindnessInputError(f"{label} is not a canonical directory")
     if resolved == Path("/proc") or resolved.is_relative_to(Path("/proc")):
         raise PhysicsBenchmarkBlindnessInputError(f"{label} cannot use procfs")
+    return resolved
+
+
+def _canonical_regular_file(path: Path, label: str) -> Path:
+    if ".." in path.parts:
+        raise PhysicsBenchmarkBlindnessInputError(f"{label} contains parent traversal")
+    try:
+        absolute = Path(os.path.abspath(path))
+        resolved = path.resolve(strict=True)
+        status = resolved.lstat()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PhysicsBenchmarkBlindnessInputError(f"{label} is unavailable") from exc
+    if (
+        absolute != resolved
+        or not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+    ):
+        raise PhysicsBenchmarkBlindnessInputError(f"{label} is not a canonical regular file")
     return resolved
 
 
