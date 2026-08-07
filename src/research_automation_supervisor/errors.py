@@ -112,6 +112,18 @@ class PhysicsBenchmarkBlindnessIntegrityError(PhysicsBenchmarkBlindnessError):
     """Blind fixture bytes, approval authority, or an isolation binding changed."""
 
 
+class PhysicsBenchmarkScoringError(SupervisorError):
+    """Base class for PA-5C2 exact benchmark-scoring failures."""
+
+
+class PhysicsBenchmarkScoringInputError(PhysicsBenchmarkScoringError):
+    """An expected-run manifest, observed run, or scorer path is invalid."""
+
+
+class PhysicsBenchmarkScoringIntegrityError(PhysicsBenchmarkScoringError):
+    """A run identity, proof, report, source, or scorer authority was substituted."""
+
+
 class PhysicsOracleError(SupervisorError):
     """Base class for trusted, model-free physics-oracle execution errors."""
 

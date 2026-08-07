@@ -29,6 +29,11 @@ versioning while it remains pre-1.0.
 - PA-5C1-T closes the technical blindness boundary with bytes-only, subject-neutral
   Bubblewrap execution for generic raw oracles and an exact PA-3 launch manifest that
   is embedded in the blindness certificate and reconstructed immediately before exec.
+- PA-5C2 exact benchmark scoring with a self-hashed expected-run manifest, exact
+  expected/observed identity-set equality, independent PA-2/PA-3 and blindness-proof
+  re-verification, complete PA-5C1 launch-certificate binding, certified scorer-root
+  catalog/receipt resolution, proof-to-report semantic binding, and separate category,
+  severity, route, evidence, clean-case, malformed-report, and infrastructure metrics.
 - Physics Oracle Git diff inspection now uses a private copy of the sealed Git index,
   preventing read-only Git from refreshing authoritative `.git/index` stat-cache bytes
   while retaining raw-index and staged-manifest checks before and after collection.
@@ -38,8 +43,9 @@ versioning while it remains pre-1.0.
 - Package version 0.2.0, schema-version-1 ordinary workflow/campaign behavior,
   Codex-specific persisted action proof, existing journal semantic forms, and the
   authoritative historical campaign record remain unchanged.
-- Physics Auditor scoring, benchmark orchestration, real model sessions, and PA-1
-  through PA-5A semantics remain unchanged and outside PA-5C1.
+- Physics Auditor benchmark orchestration, real model sessions, and PA-1 through
+  PA-5A semantics remain unchanged. PA-5C2 adds scoring only; PA-5C1 fixture, receipt,
+  blindness, oracle-isolation, and launch authority are unchanged.
 
 ## [0.2.0] - 2026-07-31
 

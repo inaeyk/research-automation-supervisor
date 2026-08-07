@@ -62,6 +62,10 @@ only; no Physics Auditor benchmark or GL pilot is run. PA-4 is available only to
 explicit schema-version-2 physics substages; ordinary 0.2.0 schema-version-1 workflows
 are unchanged. Provider-neutral adapters, explicit parallel DAG campaigns, and later
 physics research profiles remain unavailable.
+The [PA-5C2 exact scorer](docs/physics_benchmark_exact_scoring.md) independently
+re-verifies completed PA-2/PA-3 artifacts and requires the full expected run-identity
+set to equal the observed set before it computes separate semantic metrics. It does
+not add orchestration, launch a benchmark, or change PA-5C1 scientific authority.
 The qualification evidence is recorded in the [PA-4 validation
 report](docs/validation/physics_auditor_pa4.md).
 
