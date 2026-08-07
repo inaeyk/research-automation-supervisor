@@ -1,0 +1,29 @@
+{
+  "measurements": [
+    {
+      "name": "a_xx",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": -0.875
+    },
+    {
+      "name": "a_zz",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": -0.375
+    },
+    {
+      "name": "a_ww",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": 0.625
+    },
+    {
+      "name": "hidden_ww_multiplicity",
+      "uncertainty": null,
+      "unit": "count",
+      "value": 2
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "732194a701392a57678f29f1232ac430973a5d1c889b459afd1acf8cd355baa5",
+  "receipt_id": "review_case_014_5a4eb904",
+  "subject_id": "case_014",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "5a4eb9047906f3959c4536639709e37c9ccb4216bcc1d6420cc31236ef2b8564",
+  "reviewed_scorer_authority_sha256": "738a5a8fb889c77788132f4294afa4c628bc00aff5238b420db31a241338d54f",
+  "decision": "approved",
+  "scientific_review": "A normalized gauge overlap of 0.999 means the candidate is nearly the declared gauge generator, so\nthe physical-mode interpretation is unresolved and require_human_review with high-severity\ngauge_constraint_ambiguity is correct. The 0.01-overlap variant is consistent with the bounded clean\nclaim. The visible contract reports only the general assessment rule and raw overlap.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

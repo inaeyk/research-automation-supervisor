@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "dcc35b79a47ebe072751a322bd476ae7e91c2621629c8e2e91ed0d4754a54a84",
+  "receipt_id": "review_case_006_19dc2d69",
+  "subject_id": "case_006",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "19dc2d69c04302e969bec9189719eef485b7805aa3b2a3b10ad63e8efabdef29",
+  "reviewed_scorer_authority_sha256": "c60ab99e237631073e2ac508db4490655e721f831b364b257c2b1a1819022443",
+  "decision": "approved",
+  "scientific_review": "The constant-velocity update is x_new = x + dt v. Variant 001 implements the dimensionally\nconsistent update and is clean. Variant 002 adds velocity directly to position, omits dt, and mixes\nunlike dimensions; high-severity dimensional_inconsistency with request_repair is correct. The pair\nis blind apart from the intended source and data difference.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

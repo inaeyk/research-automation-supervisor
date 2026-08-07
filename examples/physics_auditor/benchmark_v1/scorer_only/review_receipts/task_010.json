@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "0817bca8a973daaee39eebb2c2bbfb985058c9435168e6c253d469c766efed75",
+  "receipt_id": "review_task_010_aadd071f",
+  "subject_id": "task_010",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "aadd071f8683b532b771a2a4630ff4959a31b7f759ac1b18f42459483290b03c",
+  "reviewed_scorer_authority_sha256": "c8c74d6d9fa2f60cc15a5efaa41a85436e1cad835cd8cbc01e3522cb842df1c2",
+  "decision": "approved",
+  "scientific_review": "The exact conformal-algebra sources and comparison test cover determinant, inverse, trace, trace-\nfree projection, and index operations. The reported determinant error and trace-projection error are\nboth zero, consistent with the identity-metric/zero-tensor limit. The bounded assessment supports\npass.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

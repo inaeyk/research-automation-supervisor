@@ -100,6 +100,18 @@ class PhysicsAuditorIntegrityError(PhysicsAuditorStateError):
     """Physics Auditor evidence, output, workspace, or proof was substituted."""
 
 
+class PhysicsBenchmarkBlindnessError(SupervisorError):
+    """Base class for PA-5C1 blind-fixture qualification failures."""
+
+
+class PhysicsBenchmarkBlindnessInputError(PhysicsBenchmarkBlindnessError):
+    """A blind-fixture catalog, receipt, identifier, or path is invalid."""
+
+
+class PhysicsBenchmarkBlindnessIntegrityError(PhysicsBenchmarkBlindnessError):
+    """Blind fixture bytes, approval authority, or an isolation binding changed."""
+
+
 class PhysicsOracleError(SupervisorError):
     """Base class for trusted, model-free physics-oracle execution errors."""
 

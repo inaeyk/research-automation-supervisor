@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "9b1609d5f996d7c8dac5a3eb9caba33ff4bf2bc782dd7e49f021c4859196cc4c",
+  "receipt_id": "review_case_021_f33ac970",
+  "subject_id": "case_021",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "f33ac970a78d130618a35de4f069712ac47f3bf5f5674e66aec16142535cd5ee",
+  "reviewed_scorer_authority_sha256": "79ecdc1bec1db5fbdbe30843e31d2d2cfeb339baa390155dac15c794de32cb1e",
+  "decision": "approved",
+  "scientific_review": "A normalized residual 0.003 +/- 0.001 by itself does not establish a new physical instability\nwithout a declared mechanism and independent support. The seeded interpretation therefore requires\nhuman review for unsupported_physical_claim and new_physical_interpretation. Describing the same\ndatum only as a bounded residual measurement is acceptable. The paired visible evidence is neutral\nand the distinction lies in the candidate statement.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

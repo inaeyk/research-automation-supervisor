@@ -21,12 +21,19 @@ versioning while it remains pre-1.0.
   scratch manifests, canonical completion proofs, and isolated deterministic recovery.
 - Model-free `run-physics-oracle` developer/qualification command. Physics Auditor
   model execution and normal-workflow integration still do not exist.
+- PA-5C1 blind benchmark-fixture preparation with physically separate
+  auditor-visible and scorer-only roots, paired neutral synthetic fixtures, exact GL
+  source-blob verification, generic raw-measurement oracles, pre-launch blindness
+  certificates, and detached exact-manifest human-review authority. This stage does
+  not run a Physics Auditor benchmark or GL pilot.
 
 ### Preserved
 
 - Package version 0.2.0, schema-version-1 ordinary workflow/campaign behavior,
   Codex-specific persisted action proof, existing journal semantic forms, and the
   authoritative historical campaign record remain unchanged.
+- Physics Auditor scoring, benchmark orchestration, real model sessions, and PA-1
+  through PA-5A semantics remain unchanged and outside PA-5C1.
 
 ## [0.2.0] - 2026-07-31
 

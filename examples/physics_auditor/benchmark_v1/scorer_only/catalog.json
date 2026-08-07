@@ -1,0 +1,1297 @@
+{
+  "auditor_visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible",
+  "catalog_id": "physics_benchmark_blind_authority_v1",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "gl_source_commit": "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1",
+  "gl_tasks": [
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The exact locked background ledger is internally consistent.",
+      "expected_route": "pass",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": null,
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_001.json",
+      "required_categories": [],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 20934,
+          "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
+          "role": "locked_derivation",
+          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df"
+        }
+      ],
+      "task_id": "task_001",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The exact hidden-multiplicity trace calculation is consistent.",
+      "expected_route": "pass",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": null,
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_002.json",
+      "required_categories": [],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 5581,
+          "path": "code/BlackStringToy/ConformalCartoonAlgebra.hpp",
+          "role": "implementation",
+          "sha256": "c3a074745720c9bc9ca6c76294552b4b45439e9a3fb3d37ff4ac2f3f6d8a5e26"
+        },
+        {
+          "byte_length": 12177,
+          "path": "code/BlackStringToy/tests/Stage4ALTraceFreeCurvatureLapseBlockTest.cpp",
+          "role": "test",
+          "sha256": "ad20357be843f50859a086f433b64ae7fce68755c9f25c19ae7795349d5944b6"
+        },
+        {
+          "byte_length": 20934,
+          "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
+          "role": "locked_derivation",
+          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df"
+        }
+      ],
+      "task_id": "task_002",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The exact lapse source cancels only the declared drift.",
+      "expected_route": "pass",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": null,
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_003.json",
+      "required_categories": [],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 12514,
+          "path": "code/BlackStringToy/tests/Stage4AOCGRChomboComparisonBatch4GaugeTest.cpp",
+          "role": "test",
+          "sha256": "a05754b891bedef09953de004602791dce9eb7117b23cd93802b67aa721a33e4"
+        },
+        {
+          "byte_length": 20934,
+          "path": "docs/derivations/stage4AO_A_uniform_gp_background_residual.md",
+          "role": "locked_derivation",
+          "sha256": "a8536115e4488cb8b15e85c83b1fbf7b20282fe5d52c08c86380c398328b22df"
+        }
+      ],
+      "task_id": "task_003",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The exact hatted-connection implementation is consistent.",
+      "expected_route": "pass",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": null,
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_004.json",
+      "required_categories": [],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 8877,
+          "path": "code/BlackStringToy/CartoonHatGammaX.hpp",
+          "role": "implementation",
+          "sha256": "bd02989289435745f186bc9e14ce52e58ebb206d09c3df1a0605fcd867f22e3d"
+        },
+        {
+          "byte_length": 10178,
+          "path": "code/BlackStringToy/tests/Stage4ANHatGammaXTest.cpp",
+          "role": "test",
+          "sha256": "72a6e8bcc1ae7c640bc11612751b7e8f57047a7a76f1657eab805be89ac39b68"
+        },
+        {
+          "byte_length": 15946,
+          "path": "docs/derivations/stage4AM_hatGammaX_derivation.md",
+          "role": "locked_derivation",
+          "sha256": "331424a902d1e7f67d6cc4aae04f9f15f2668b5c1cc711eede7277e1e07aa95d"
+        }
+      ],
+      "task_id": "task_004",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The exact preflight satisfies its bounded numerical gates.",
+      "expected_route": "pass",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": null,
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_005.json",
+      "required_categories": [],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 20889,
+          "path": "code/BlackStringToy/Stage4AOGPDiscretePreflight.hpp",
+          "role": "implementation",
+          "sha256": "1c298b88e4b52c6d2778ab5dfd6347847b5527dc351edfb22bfb56b82e513f97"
+        },
+        {
+          "byte_length": 7198,
+          "path": "code/BlackStringToy/tests/Stage4AOBDiscreteOperatorPreflightTest.cpp",
+          "role": "test",
+          "sha256": "5e4928d4c74f57a9e94e1ee71a6eb242fa54ad5e67841a357438fd349d3d2221"
+        }
+      ],
+      "task_id": "task_005",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The physical label is not established by the constraint-heavy projection.",
+      "expected_route": "require_human_review",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": "high",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_006.json",
+      "required_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 153719,
+          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
+        }
+      ],
+      "task_id": "task_006",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The physical label is not established by the near-unit gauge overlap.",
+      "expected_route": "require_human_review",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": "high",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_007.json",
+      "required_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 153719,
+          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
+        }
+      ],
+      "task_id": "task_007",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The bulk claim is not established by a boundary-localized observation.",
+      "expected_route": "require_human_review",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": "high",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_008.json",
+      "required_categories": [
+        "new_physical_interpretation",
+        "unsupported_physical_claim"
+      ],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 153719,
+          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
+        }
+      ],
+      "task_id": "task_008",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The two nonexclusive indicators do not select a unique interpretation.",
+      "expected_route": "require_human_review",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": "high",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_009.json",
+      "required_categories": [
+        "gauge_constraint_ambiguity"
+      ],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 153719,
+          "path": "docs/derivations/stage4AO_C_frozen_gauge_spectral_gate.md",
+          "role": "locked_derivation",
+          "sha256": "2e3bad6782ba242d468cba82df92019e2dcad061fe7f8b6597a773b20ba9323b"
+        }
+      ],
+      "task_id": "task_009",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009"
+    },
+    {
+      "contract_file": "contract.yaml",
+      "expected_interpretation": "The exact bounded conformal algebra sources satisfy the declared checks.",
+      "expected_route": "pass",
+      "forbidden_categories": [
+        "report_integrity_error"
+      ],
+      "minimum_severity": null,
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_010.json",
+      "required_categories": [],
+      "schema_version": 1,
+      "source_blobs": [
+        {
+          "byte_length": 5581,
+          "path": "code/BlackStringToy/ConformalCartoonAlgebra.hpp",
+          "role": "implementation",
+          "sha256": "c3a074745720c9bc9ca6c76294552b4b45439e9a3fb3d37ff4ac2f3f6d8a5e26"
+        },
+        {
+          "byte_length": 45961,
+          "path": "code/BlackStringToy/tests/Stage4AOCGRChomboComparisonBatch1Test.cpp",
+          "role": "test",
+          "sha256": "1100e029143dd0c5f37fd0732a761d6688d21dbd253c886ef86b0721bb77979d"
+        }
+      ],
+      "task_id": "task_010",
+      "title_file": "title.txt",
+      "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010"
+    }
+  ],
+  "pairs": [
+    {
+      "case_id": "case_001",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_001",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_001.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The response slope is 1.5 instead of the declared value 2.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "violated_identity"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_002",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_002",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_002.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The implementation reverses the locked force sign.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "sign_or_normalization_error"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_003",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_003",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_003.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The Gaussian normalization factor is omitted.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "sign_or_normalization_error"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_004",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_004",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_004.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001"
+        },
+        {
+          "diagnosis": "The cylindrical metric factor r squared is omitted.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "tensor_or_index_error"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_005",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_005",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_005.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001"
+        },
+        {
+          "diagnosis": "The timelike component is copied without the lowering sign.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "tensor_or_index_error"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_006",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_006",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_006.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001"
+        },
+        {
+          "diagnosis": "The update omits the time increment and adds unlike dimensions.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "dimensional_inconsistency"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_007",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_007",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_007.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001"
+        },
+        {
+          "diagnosis": "The declared trace-free tensor has nonzero metric trace.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "violated_identity"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_008",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_008",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_008.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001"
+        },
+        {
+          "diagnosis": "Differentiation of the half-quadratic potential retains an extra factor two.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "violated_identity"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_009",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_009",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_009_v2.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001"
+        },
+        {
+          "acceptable_alternative_categories": [
+            "tensor_or_index_error",
+            "violated_identity"
+          ],
+          "diagnosis": "The spherical-coordinate 2 f-prime over r contribution is omitted.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "failed_limiting_case"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_010",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_010",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_010.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001"
+        },
+        {
+          "diagnosis": "The cell width is omitted from the quadrature.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "continuum_discrete_mismatch"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_011",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_011",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_011.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001"
+        },
+        {
+          "diagnosis": "The centered-stencil denominator omits a factor two.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "continuum_discrete_mismatch"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_012",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_012",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_012.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001"
+        },
+        {
+          "diagnosis": "Three same-norm resolutions yield order near 0.74, not second order.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "insufficient_numerical_evidence"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_013",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_013",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_013.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001"
+        },
+        {
+          "diagnosis": "The physical label conflicts with a constraint-dominated projection.",
+          "expected_route": "require_human_review",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "gauge_constraint_ambiguity"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_014",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_014",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_014.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The physical label is unresolved because the candidate nearly equals the gauge generator.",
+          "expected_route": "require_human_review",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "gauge_constraint_ambiguity"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_015",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_015",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_015.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The claimed bulk behavior is dominated by the declared boundary layer.",
+          "expected_route": "require_human_review",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "new_physical_interpretation",
+            "unsupported_physical_claim"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_016",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_016",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_016.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "Matched-window growth exponents disagree by more than ten combined standard deviations.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "insufficient_numerical_evidence"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_017",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_017",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_017.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001"
+        },
+        {
+          "diagnosis": "The alternative form has an extra factor one-half.",
+          "expected_route": "request_repair",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "continuum_discrete_mismatch"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_018",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_018",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_018_v2.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001"
+        },
+        {
+          "diagnosis": "Required independent observations are unavailable; the zero-input value is explicitly source-derived.",
+          "expected_route": "block_insufficient_evidence",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "missing_required_evidence"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_019",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_019",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_019.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The candidate requests a change to locked physical convention authority.",
+          "expected_route": "require_human_review",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "convention_change_requested"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_020",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_020",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_020.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001"
+        },
+        {
+          "diagnosis": "Independent omega-squared estimates disagree in sign by many combined uncertainties.",
+          "expected_route": "require_human_review",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "conflicting_evidence"
+          ],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002"
+        }
+      ]
+    },
+    {
+      "case_id": "case_021",
+      "contract_file": "contract.yaml",
+      "oracle_files": [
+        "raw_measurement_oracle.py"
+      ],
+      "pair_id": "pair_021",
+      "raw_observation_files": [
+        "observations.json"
+      ],
+      "receipt_path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_021.json",
+      "schema_version": 1,
+      "title_file": "title.txt",
+      "variable_files": [
+        "implementation.py",
+        "observations.json"
+      ],
+      "variants": [
+        {
+          "diagnosis": "A small residual is promoted to a new physical interpretation without mechanism or independent support.",
+          "expected_route": "require_human_review",
+          "fixture_label": "defective",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": "high",
+          "required_categories": [
+            "new_physical_interpretation",
+            "unsupported_physical_claim"
+          ],
+          "variant_id": "variant_001",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001"
+        },
+        {
+          "diagnosis": "The declared physical identity and raw observations are consistent.",
+          "expected_route": "pass",
+          "fixture_label": "clean",
+          "forbidden_categories": [
+            "report_integrity_error"
+          ],
+          "minimum_severity": null,
+          "required_categories": [],
+          "variant_id": "variant_002",
+          "visible_root": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "scorer_only_root": "examples/physics_auditor/benchmark_v1/scorer_only"
+}

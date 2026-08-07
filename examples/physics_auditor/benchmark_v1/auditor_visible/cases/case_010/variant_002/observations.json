@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "integral",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 4.0
+    }
+  ],
+  "schema_version": 1
+}

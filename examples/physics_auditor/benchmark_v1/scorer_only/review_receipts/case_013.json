@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "24681147c694a13e159065a41df62798af0ecb7a856da59ae6940daa1a62d1d2",
+  "receipt_id": "review_case_013_8976c4ac",
+  "subject_id": "case_013",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "8976c4ac5fe779bc7bcb542b990c2f972fc869e31173643a5df21f185b3450a9",
+  "reviewed_scorer_authority_sha256": "b0d2a705aef07946cf959cb061f19ee635a567cd8edd6499f8ff39208e7ee5d1",
+  "decision": "approved",
+  "scientific_review": "Variant 001 has physical and constraint projection fractions 0.95 and 0.05 and is consistent with\nthe bounded physical-candidate claim. Variant 002 has fractions 0.08 and 0.92, so the physical label\nconflicts with a constraint-dominated projection. Because this concerns interpretation of a mode\nrather than a local algebraic repair, require_human_review with gauge_constraint_ambiguity and high\nseverity is justified. The fractions sum to one and the visible material does not state the\nclassification.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

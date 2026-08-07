@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "norm_sq_at_r2",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 4.0
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "31a65e2759d27073162ec7ba871dac3ddcc08384fac674b0ec32c19387c5b2ae",
+  "receipt_id": "review_task_008_2538052b",
+  "subject_id": "task_008",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "2538052b90fdcb2201ea6f4088b8a87d1bdbbeef4bd1d7979782f4ac2eb79af4",
+  "reviewed_scorer_authority_sha256": "6025f621d9b1143e3491df3b1a64033a7e696758a230082ac9207d301f3cc9ec",
+  "decision": "approved",
+  "scientific_review": "The candidate is labelled a bulk instability while 0.96 of the measured support lies in the declared\nboundary layer and only 0.04 in the interior. The bulk interpretation is unsupported by the supplied\nlocalization evidence. require_human_review with high-severity unsupported_physical_claim and\nnew_physical_interpretation is correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

@@ -1,0 +1,3 @@
+PHYSICAL_FRACTION = 0.95
+CONSTRAINT_FRACTION = 0.05
+CLAIM = "physical candidate"

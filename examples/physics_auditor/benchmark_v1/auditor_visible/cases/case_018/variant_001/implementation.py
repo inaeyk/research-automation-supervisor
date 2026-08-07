@@ -1,0 +1,6 @@
+def response(x: float) -> float:
+    return 2.0*x
+
+INDEPENDENT_SAMPLE_COUNT = 2
+INDEPENDENT_ZERO_INPUT_RESPONSE = 0.0
+SOURCE_DERIVED_ZERO_INPUT_RESPONSE = None

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "5760af5ae42b87846f5ad536182215c9ff978897a7e2f4b75a1301485f2b91c7",
+  "receipt_id": "review_case_011_ed041551",
+  "subject_id": "case_011",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "ed0415512e88390c0983ad90d3aef38b2c66133a5a80c760d32db598fd171dc4",
+  "reviewed_scorer_authority_sha256": "f6550d67ca46e910a20ed0e5513a532c3e6f9cc66fee99d2843219571fd740b6",
+  "decision": "approved",
+  "scientific_review": "The centered first derivative is (f_{i+1}-f_{i-1})/(2h). Variant 001 implements the correct\ndenominator; variant 002 omits the factor two and doubles the derivative. High-severity\ncontinuum_discrete_mismatch with request_repair is correct. The evidence and oracle do not classify\nthe variants.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

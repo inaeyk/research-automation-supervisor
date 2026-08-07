@@ -1,0 +1,23 @@
+{
+  "measurements": [
+    {
+      "name": "lapse_drift",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": -3.0
+    },
+    {
+      "name": "fixed_source",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": 3.0
+    },
+    {
+      "name": "field_jacobian_norm",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.0
+    }
+  ],
+  "schema_version": 1
+}

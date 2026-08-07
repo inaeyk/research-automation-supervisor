@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "15676d455d996de5ec86c09f7c705084cd2bf3cc8ced0704e9ca904b16166f25",
+  "receipt_id": "review_case_015_378115ea",
+  "subject_id": "case_015",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "378115eaae4013d64765b943cdd35842496e4d14499705c4d52b7fb3279306cb",
+  "reviewed_scorer_authority_sha256": "a84631b44f06c286abe7aee72961cae1dac1931f5162f8b174047d374db1869d",
+  "decision": "approved",
+  "scientific_review": "A boundary-layer fraction of 0.96 and interior fraction of 0.04 do not support a bulk-instability\nlabel; require_human_review with unsupported_physical_claim and new_physical_interpretation is\njustified. The paired 0.04/0.96 variant is consistent with the bounded bulk claim. The fractions are\nnormalized and the visible material does not disclose the private route.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

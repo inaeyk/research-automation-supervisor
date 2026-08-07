@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "bed14257cb5460e6e2f41e14a5e6aaa6c2335a1d91963f620ffd6353ce9f8900",
+  "receipt_id": "review_task_009_988b3b18",
+  "subject_id": "task_009",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "988b3b18130123f361b46b3175480c325b28ac2910476e3c78532921b94135dd",
+  "reviewed_scorer_authority_sha256": "a397f587efa873decb040bd0648518fbd256b8338b8447ca25e5b33207578e4d",
+  "decision": "approved",
+  "scientific_review": "The supplied physical and constraint indicators, 0.63 and 0.58, are explicitly nonexclusive and do\nnot select a unique interpretation. A resolved-physical-mode claim is therefore not established.\nrequire_human_review with high-severity gauge_constraint_ambiguity is the correct fail-closed route.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

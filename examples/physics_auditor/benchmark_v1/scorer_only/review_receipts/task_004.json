@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "084e94164195b35d8fb4166321bef0703e931d5220c8a9e25f5745741169f068",
+  "receipt_id": "review_task_004_c11b341e",
+  "subject_id": "task_004",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "c11b341e5b0868e65149b876222da6735fb997cb4c0ac30d48065952135db714",
+  "reviewed_scorer_authority_sha256": "aa35a8fae9a33f808db539712e368345a61005696bb641ae65fcfbcede403d13",
+  "decision": "approved",
+  "scientific_review": "The projected derivation and implementation include the two hidden-direction contributions to the\nhatted connection. For flat conformal data with zero encoded Z, the reported hatted Gamma^x is zero,\nas required. The bounded source assessment is internally consistent and pass is correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

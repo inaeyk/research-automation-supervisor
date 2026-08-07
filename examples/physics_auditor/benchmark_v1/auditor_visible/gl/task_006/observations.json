@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "constraint_projection_fraction",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.92
+    },
+    {
+      "name": "physical_projection_fraction",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.08
+    }
+  ],
+  "schema_version": 1
+}

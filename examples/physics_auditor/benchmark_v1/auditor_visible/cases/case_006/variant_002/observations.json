@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "position_after_step",
+      "uncertainty": null,
+      "unit": "m",
+      "value": 4.0
+    }
+  ],
+  "schema_version": 1
+}

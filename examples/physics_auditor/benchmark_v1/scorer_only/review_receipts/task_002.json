@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "f36c1dc39f0120dedcd26d3938d3b33c29f1ae6917c095d56e7b93263a596e3d",
+  "receipt_id": "review_task_002_9988dd25",
+  "subject_id": "task_002",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "9988dd252bb4917db0f9781a4b7e313614c2855dd3f56dd96648ed6d1bfb0b46",
+  "reviewed_scorer_authority_sha256": "744d13578803e8d878ffba8371f2efaa82ab2340b6b3f71382fbc15b50fcdd82",
+  "decision": "approved",
+  "scientific_review": "With two hidden ww copies, the four-dimensional spatial trace is (-7/8 - 3/8 + 2*5/8) lambda = 0.\nThe supplied components and multiplicity therefore satisfy the trace-free identity. The source and\ntest blobs support the same hidden-direction accounting, so pass is correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

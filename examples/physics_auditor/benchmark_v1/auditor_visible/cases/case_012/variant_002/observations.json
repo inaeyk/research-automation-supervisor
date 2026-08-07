@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "coarse_medium_ratio",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 1.6666666667
+    },
+    {
+      "name": "medium_fine_ratio",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 1.6551724138
+    }
+  ],
+  "schema_version": 1
+}

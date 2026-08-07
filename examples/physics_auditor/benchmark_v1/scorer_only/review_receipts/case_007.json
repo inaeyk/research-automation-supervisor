@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "fda68c0690879a1168638c6cd8fedba3d3f23ebd8169263d8896af652fbd8e8a",
+  "receipt_id": "review_case_007_3ff24cda",
+  "subject_id": "case_007",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "3ff24cda231813df9fcd510dead5c11782b9e07276fc5c9c31f66ab0eb8f9a6f",
+  "reviewed_scorer_authority_sha256": "326816181ff4abb3c47df314684810cabb98b2e7464e84355b0d01afb415fead",
+  "decision": "approved",
+  "scientific_review": "The declared trace-free diagonal tensor must satisfy T_xx + T_yy + T_zz = 0. Variant 001 has\ncomponents (2,-1,-1) and zero trace; variant 002 has (2,-1,0) and trace 1. The defective variant\ndirectly violates the identity, so high-severity violated_identity and request_repair are correct.\nThe visible contract and oracle remain neutral.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

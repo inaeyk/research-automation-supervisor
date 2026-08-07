@@ -1,0 +1,68 @@
+schema_version: 1
+profile: physics_implementation
+conventions:
+  - id: declared_convention
+    value: Exact source snapshot 7d04b5b9882dcd476c1457b8d711ac7b5520b2c1
+    authority: task_locked
+assumptions:
+  - id: bounded_scope
+    statement: This is a bounded fixture assessment and authorizes no discovery or publication claim.
+required_identities:
+  - id: primary_identity
+    statement: Assess the exact background ledger and distinguish the live-lapse and frozen geometric residual quantities.
+    required_evidence_kinds: [document, numerical]
+    oracle_ids: [raw_measurement_oracle]
+limiting_cases:
+  - id: control_limit
+    statement: Report the declared uniform-background residual values without adding a mode interpretation.
+    required_evidence_kinds: [numerical]
+    oracle_ids: [raw_measurement_oracle]
+evidence:
+  - id: fixture_title
+    kind: document
+    description: Declared auditor-visible evidence.
+    path: title.txt
+    required_for: [primary_identity]
+  - id: case_note
+    kind: document
+    description: Declared auditor-visible evidence.
+    path: evidence.md
+    required_for: [primary_identity]
+  - id: candidate_source
+    kind: artifact
+    description: Declared auditor-visible evidence.
+    path: implementation.py
+    required_for: [primary_identity]
+  - id: raw_measurements
+    kind: numerical
+    description: Declared auditor-visible evidence.
+    path: observations.json
+    required_for: [primary_identity]
+  - id: source_001
+    kind: derivation
+    description: Declared auditor-visible evidence.
+    path: source/docs/derivations/stage4AO_A_uniform_gp_background_residual.md
+    required_for: [primary_identity]
+oracles:
+  - id: raw_measurement_oracle
+    kind: numerical
+    reference: raw_measurement_oracle
+    statement: Normalize and return declared scalar measurements without classification.
+    check_ids: [primary_identity, control_limit]
+    required: true
+forbidden_claims:
+  - id: no_discovery_claim
+    statement: Do not present this bounded fixture as a new physical discovery.
+human_gate:
+  required_for:
+    - convention_change
+    - new_physical_interpretation
+    - unresolved_gauge_constraint_ambiguity
+audit_policy:
+  schema_version: 1
+  insufficient_required_evidence: block
+  conflicting_required_evidence: human_review
+  medium_severity: request_repair
+  low_severity: allow_pass
+  informational_severity: allow_pass
+auditor_role_ref: physics_auditor

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "31cb82ff13542772d5e2872c10162858ba63c13ccbb78465c5954b80899979ef",
+  "receipt_id": "review_case_018_v2_41220f98",
+  "subject_id": "case_018",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "41220f985ce104490f83f85a527cb71b02097a7d12f56a3c096dfdb57568af1d",
+  "reviewed_scorer_authority_sha256": "c24cc7368212dd2f7e91172739fb47b149842b4b3193154aab7ff91ea7b4a1e0",
+  "decision": "approved",
+  "scientific_review": "The repaired pair now distinguishes independent observations from source-derived values\nmechanically and without revealing which variant is seeded. Variant_001 declares two independent\nsamples, supplies an independent zero-input response of 0, and has no source-derived substitute, so\nthe evidence requirement is satisfied and pass is correct. Variant_002 declares zero independent\nsamples, has no independent zero-input observation, and labels the available zero-input value as\nsource-derived, so it lacks the required independent evidence. block_insufficient_evidence with\nhigh-severity missing_required_evidence is therefore scientifically and mechanically justified.\nThe shared schema, null fields, provenance names, and neutral contract make the distinction\ndecidable without embedding the private expected route.",
+  "issued_at": "2026-08-06T11:36:00Z"
+}

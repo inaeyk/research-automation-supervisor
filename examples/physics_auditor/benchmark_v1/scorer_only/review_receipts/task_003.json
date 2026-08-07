@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "7f252c557ebf67b40f42ee338fbe6c5410c1061dc9c320ab83c28383fdf5cae6",
+  "receipt_id": "review_task_003_0ead0f5f",
+  "subject_id": "task_003",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "0ead0f5f9f068d23a11c59d7955f66120bfcf9eee914a3f049c277de05b126e2",
+  "reviewed_scorer_authority_sha256": "fb8bdbb92893189a5b55dd2ea03793da6a2f65a3bf2c1fe3cc23b8f6a205e835",
+  "decision": "approved",
+  "scientific_review": "The locked live lapse drift is -3 lambda and the fixed field-independent source is +3 lambda, so it\ncancels only the zeroth-order drift. A field-independent source has zero Jacobian with respect to\nevolved fields, matching the reported field_jacobian_norm = 0. The source evidence supports these\nclaims; pass is correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

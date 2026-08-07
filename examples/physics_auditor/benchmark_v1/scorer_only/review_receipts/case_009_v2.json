@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "6d5c353a522627d663b63cace6cefa44bf207f19aae6ea73f5d49afc2ed46737",
+  "receipt_id": "review_case_009_v2_963050f3",
+  "subject_id": "case_009",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "963050f38aef88d5ad21da951e396bf3eb29e6969b515a99533eb0ef74555b3a",
+  "reviewed_scorer_authority_sha256": "01337f582505303a9c079782813810af8f79234e9e512f8b447bee271855c311",
+  "decision": "approved",
+  "scientific_review": "The repaired pair now tests both the positive-radius spherical Laplacian identity and the regular\norigin branch. For f(r)=r^2, f'(2)=4 and f''(2)=2, so the full expression gives\n2 + 2(4)/2 = 6, while the seeded positive-radius implementation gives only 2. Both variants\nexplicitly return 3 f''(0)=6 at r=0 and provide matching origin observations, so the former clean\nvariant is now well defined at the required limit. Pass is correct for variant_001, and\nrequest_repair with high severity is correct for variant_002. The accepted alternatives\ntensor_or_index_error and violated_identity ensure that scientifically accurate descriptions of the\nomitted geometric term are scoreable. The paired title, contract, filenames, oracle, observation\nschema, and origin treatment remain neutral, so the seeded variant is not disclosed.",
+  "issued_at": "2026-08-06T11:36:00Z"
+}

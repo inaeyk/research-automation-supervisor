@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "d4f4a67a2c4b2e800d5e330cf28a90e1f2ab5656d879dfe75cb6da04ca80271b",
+  "receipt_id": "review_case_020_39626bb7",
+  "subject_id": "case_020",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "39626bb7f3f88ce798cc580046440791727e1aa4e0ef6a3bf9e762c800f11e9a",
+  "reviewed_scorer_authority_sha256": "cb044b9362caeda5b37716aaba87e25b183143a40d3895a8b9f8a5991a946be6",
+  "decision": "approved",
+  "scientific_review": "The clean analytic and fitted omega-squared estimates, 1.00 +/- 0.02 and 0.99 +/- 0.03 s^-2, are\nstatistically compatible and positive. The seeded estimates, 1.00 +/- 0.02 and -0.20 +/- 0.03 s^-2,\ndiffer by about 33 combined standard deviations and even disagree in sign, so a shared oscillator\ninterpretation is unresolved. require_human_review with high-severity conflicting_evidence is\nscientifically correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

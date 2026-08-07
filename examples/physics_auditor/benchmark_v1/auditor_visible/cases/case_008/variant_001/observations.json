@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "force_at_x2_k3",
+      "uncertainty": null,
+      "unit": "N",
+      "value": -6.0
+    }
+  ],
+  "schema_version": 1
+}

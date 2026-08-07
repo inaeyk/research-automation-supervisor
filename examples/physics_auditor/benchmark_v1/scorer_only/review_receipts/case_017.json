@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "914587722dee2db16a357f9745a260a081e361c9d6fcd619f2ae6eb8a063f0f4",
+  "receipt_id": "review_case_017_ea975e96",
+  "subject_id": "case_017",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "ea975e96324568080c1f264ef2602184be935d8baaee5115c11aeaae8abe0aee",
+  "reviewed_scorer_authority_sha256": "4828fc08bc3e3bd73a3c0a4727a6ebe4dfdbc282b7485d62c08f46b86ae42006",
+  "decision": "approved",
+  "scientific_review": "The form 0.5(right-left)/h is algebraically identical to (right-left)/(2h), so variant 001 is a\nlegitimate alternative implementation and must pass. Variant 002 uses 0.25(right-left)/h and\ncontains an extra factor one-half, so high-severity continuum_discrete_mismatch and request_repair\nare correct. This case appropriately tests false rejection of equivalent code.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

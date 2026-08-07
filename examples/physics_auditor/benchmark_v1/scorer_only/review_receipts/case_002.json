@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "9519a1da31ff5ba031387cedd8303d91b7e84f694f66e07e688cb7ab226a5387",
+  "receipt_id": "review_case_002_e983fadd",
+  "subject_id": "case_002",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "e983fadde8562cd50ae1cfa0b390d9d2d0ea06f96b2ec90b04632499c44a5394",
+  "reviewed_scorer_authority_sha256": "a03e696717bd7f53680082894ccb2d626a52810f0e55deef117accf6ad8e0552",
+  "decision": "approved",
+  "scientific_review": "With the locked convention of positive applied force and unit inertial mass, acceleration must have\nthe same sign as force. Variant 001 returns -force and reports -2 m/s^2 at force 2, so\nsign_or_normalization_error, high severity, and request_repair are correct. Variant 002 returns\nforce and is clean. The paired visible material does not disclose which variant is seeded.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

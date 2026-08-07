@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "physical_fraction",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.95
+    },
+    {
+      "name": "constraint_fraction",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.05
+    }
+  ],
+  "schema_version": 1
+}

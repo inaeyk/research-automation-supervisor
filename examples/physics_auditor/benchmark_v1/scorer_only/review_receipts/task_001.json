@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "6cf11b4e33e5913f735f142dd833e386115d1808737dcafe5f5780dea7f522f5",
+  "receipt_id": "review_task_001_5f2ad161",
+  "subject_id": "task_001",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "5f2ad1619aa1bfcb2c0a480d496f9f1f66a0a4ae1ef66f81c9dcff01d92b53d4",
+  "reviewed_scorer_authority_sha256": "e6b9ac49a9b18bea44f86309cecee57d9b3c7d41ae9e9e77f7cb15f67251a84b",
+  "decision": "approved",
+  "scientific_review": "The locked GP ledger distinguishes a live moving-puncture lapse residual of -3 lambda from the\nfrozen geometric residual, which vanishes. The projected source states the same convention and does\nnot authorize a mode interpretation. The raw values are internally consistent, so pass is correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

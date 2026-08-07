@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "response_at_x3",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 4.5
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,23 @@
+{
+  "measurements": [
+    {
+      "name": "independent_sample_count",
+      "uncertainty": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "name": "independent_zero_input_response",
+      "uncertainty": null,
+      "unit": "1",
+      "value": null
+    },
+    {
+      "name": "source_derived_zero_input_response",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.0
+    }
+  ],
+  "schema_version": 1
+}

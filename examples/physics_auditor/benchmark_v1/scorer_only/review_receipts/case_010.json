@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "24e10d783e801bc2d650e54acd208a4eca44761d4c92719d4452ec1798d002b9",
+  "receipt_id": "review_case_010_44ca7284",
+  "subject_id": "case_010",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "44ca728401f76e5885d76a24c897dafcaa3563941aa046b7fc5611dc3c0d38aa",
+  "reviewed_scorer_authority_sha256": "51946cd25e48c4501f0f88b2045a29acfb7977dabec3676e4ac877917457b858",
+  "decision": "approved",
+  "scientific_review": "The discrete quadrature approximation is sum_i f_i dx. Variant 001 includes dx and gives the\ndeclared integral; variant 002 omits dx and returns the unscaled sum. This is a direct\ncontinuum_discrete_mismatch of high severity and request_repair is correct. The clean and seeded\nvariants otherwise share neutral visible authority.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

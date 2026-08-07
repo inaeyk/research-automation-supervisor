@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "density_at_origin",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.3989422804014327
+    }
+  ],
+  "schema_version": 1
+}

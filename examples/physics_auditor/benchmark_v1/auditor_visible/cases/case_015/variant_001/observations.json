@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "boundary_fraction",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.96
+    },
+    {
+      "name": "interior_fraction",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.04
+    }
+  ],
+  "schema_version": 1
+}

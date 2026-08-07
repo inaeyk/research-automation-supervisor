@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "5d439296536448c82cc6215b35c4ed0097ac305545a4a51db1347a3a32c3451b",
+  "receipt_id": "review_case_005_0285a226",
+  "subject_id": "case_005",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "0285a22643ced3b70eff0dd5793fde1033d959d1623f91f53c8f49633746c551",
+  "reviewed_scorer_authority_sha256": "ed0706a3643c1cdcd6e2ae53377983d220f76e348045057ad2eee450874fdf50",
+  "decision": "approved",
+  "scientific_review": "Under the locked Lorentzian sign convention, lowering the timelike component gives V_0 = -V^0.\nVariant 001 applies the minus sign and is clean; variant 002 copies the component unchanged and is\ndefective. A high-severity tensor_or_index_error and request_repair are justified. The visible\nmaterials do not reveal the seeded variant.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

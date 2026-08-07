@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "analytic_omega_squared",
+      "uncertainty": 0.02,
+      "unit": "1/s^2",
+      "value": 1.0
+    },
+    {
+      "name": "fitted_omega_squared",
+      "uncertainty": 0.03,
+      "unit": "1/s^2",
+      "value": -0.2
+    }
+  ],
+  "schema_version": 1
+}

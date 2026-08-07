@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "live_lapse_residual",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": -3.0
+    },
+    {
+      "name": "frozen_geometric_residual",
+      "uncertainty": null,
+      "unit": "lambda",
+      "value": 0.0
+    }
+  ],
+  "schema_version": 1
+}

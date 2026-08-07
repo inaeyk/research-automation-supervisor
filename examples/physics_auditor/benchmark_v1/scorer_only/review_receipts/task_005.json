@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "0bcd91c32c2de90303e358ece86435ba56661b95675b00d822ca47553cefab43",
+  "receipt_id": "review_task_005_b6fe306e",
+  "subject_id": "task_005",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "b6fe306e1a65e17efd87144d0a53796325e2f2d0c3aa7848890dd87ffb12c45f",
+  "reviewed_scorer_authority_sha256": "f3b823540cf8ce41216e679dd3323ef58bd4b058ef81daab9127bd0e7f9cb743",
+  "decision": "approved",
+  "scientific_review": "The source test requires both consecutive residual-convergence ratios to exceed 3.4 and the fine\nhatted-Gamma residual to be below 1e-3. The supplied values 3.61, 3.54, and 8e-4 satisfy those exact\nbounded gates without extrapolation. The pass authority is correct.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

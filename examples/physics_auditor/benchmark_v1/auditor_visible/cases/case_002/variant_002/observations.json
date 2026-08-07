@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "acceleration_at_force_2",
+      "uncertainty": null,
+      "unit": "m/s^2",
+      "value": 2.0
+    }
+  ],
+  "schema_version": 1
+}

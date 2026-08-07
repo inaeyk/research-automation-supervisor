@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "hidden_multiplicity",
+      "uncertainty": null,
+      "unit": "count",
+      "value": 2
+    },
+    {
+      "name": "flat_hat_gamma_x",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.0
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "9fade97a428e8246a7f32c36a150097b01955397c55217039945f9ead305e438",
+  "receipt_id": "review_case_003_32f90caf",
+  "subject_id": "case_003",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "32f90caf9e3795f75180d8629abe132a7fb273e1d5d9b7ac32a9ecc0b63b6a17",
+  "reviewed_scorer_authority_sha256": "947c1566461eaafefeb8b3dbd4a1516dad333a6c9c91ecb5e20faa626eea276f",
+  "decision": "approved",
+  "scientific_review": "The normalized Gaussian density requires the factor 1/(sqrt(2 pi) sigma). Variant 001 omits that\nfactor and gives 1 at x = 0, sigma = 1 instead of 1/sqrt(2 pi) = 0.3989422804; request_repair with a\nhigh-severity normalization finding is correct. Variant 002 implements the normalized expression and\npasses the stated control value. The visible materials are neutral.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

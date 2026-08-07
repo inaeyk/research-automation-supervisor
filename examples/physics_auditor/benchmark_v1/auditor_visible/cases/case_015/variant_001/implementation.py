@@ -1,0 +1,3 @@
+BOUNDARY_FRACTION = 0.96
+INTERIOR_FRACTION = 0.04
+CLAIM = "bulk instability"

@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "determinant_error",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.0
+    },
+    {
+      "name": "trace_projection_error",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.0
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "laplacian_of_r_squared_at_r0",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 6.0
+    },
+    {
+      "name": "laplacian_of_r_squared_at_r2",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 2.0
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "e55dd6ff257d81bf61e77787a6e16de344fa7b237440a3abaa9dfa7cf3e4840c",
+  "receipt_id": "review_case_001_98cc48ee",
+  "subject_id": "case_001",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "98cc48ee7f41279f3a74acde84d84e4941a806fc586092b77093eaba272e1469",
+  "reviewed_scorer_authority_sha256": "2dc00d7014e558b15733b2ede30f2c4d18a41ce38cdb5f79445508dbc6da9db2",
+  "decision": "approved",
+  "scientific_review": "The declared law is y = 2x. Variant 001 implements y = 1.5x and gives y(3) = 4.5, so it\nunambiguously violates the locked identity and is appropriately routed to request_repair with high\nseverity. Variant 002 implements y = 2x and gives y(3) = 6, so pass is appropriate. The title,\ncontract, evidence wording, and generic raw-measurement oracle are neutral and paired across\nvariants; the defect must be inferred from source and data.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

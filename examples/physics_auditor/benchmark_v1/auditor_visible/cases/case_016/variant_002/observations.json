@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "l2_growth_rate",
+      "uncertainty": 0.02,
+      "unit": "1/s",
+      "value": 0.2
+    },
+    {
+      "name": "linf_growth_rate",
+      "uncertainty": 0.02,
+      "unit": "1/s",
+      "value": 0.21
+    }
+  ],
+  "schema_version": 1
+}

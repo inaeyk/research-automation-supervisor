@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "lowered_component",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 2.0
+    }
+  ],
+  "schema_version": 1
+}

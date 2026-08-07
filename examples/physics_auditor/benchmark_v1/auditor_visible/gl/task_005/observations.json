@@ -1,0 +1,23 @@
+{
+  "measurements": [
+    {
+      "name": "coarse_medium_ratio",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 3.61
+    },
+    {
+      "name": "medium_fine_ratio",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 3.54
+    },
+    {
+      "name": "fine_hat_gamma_residual",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.0008
+    }
+  ],
+  "schema_version": 1
+}

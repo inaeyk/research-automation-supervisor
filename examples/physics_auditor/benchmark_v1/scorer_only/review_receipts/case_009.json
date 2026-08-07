@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "65e97bb8eae844d67c28ae851022ab54f6daa16114d16da29ef5ddb62d09cc0a",
+  "receipt_id": "review_case_009_2f5464f3",
+  "subject_id": "case_009",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "2f5464f3448b862da5ab16b840d6a17da1ab374de931f789e4404b6f2fe032c0",
+  "reviewed_scorer_authority_sha256": "5edc1bee3ea4fbfb8a2dce12107feba89b9e1702400666a8a0b62c37084d8634",
+  "decision": "revise",
+  "scientific_review": "The seeded omission of the 2 f'(r)/r term is a real defect for r > 0, but the nominally clean\nimplementation evaluates f'' + 2f'/r without any r = 0 regularization even though the contract\nexplicitly requires the regular-even limit 3 f''(0). As written, the clean variant is undefined at\nthe required limit and cannot validly receive pass. Revise both variants to define and test the r =\n0 branch, add a raw control measurement at r = 0, and allow violated_identity or\ntensor_or_index_error as acceptable alternatives to failed_limiting_case for the omitted geometric\nterm.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

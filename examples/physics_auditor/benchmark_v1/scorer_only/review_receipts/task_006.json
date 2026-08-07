@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "receipt_sha256": "a28e044bad97636624f7e71f4f30137f9d049a91d54d049fb80f1e271d51417a",
+  "receipt_id": "review_task_006_b8c4b91e",
+  "subject_id": "task_006",
+  "reviewer_id": "inaeyk",
+  "reviewer_kind": "human",
+  "fixture_author_ids": [
+    "research_automation_fixture_team_v1"
+  ],
+  "reviewed_visible_manifest_sha256": "b8c4b91e70f59f4859085419e237fa2a9379828774789890bd21b1a18a94f311",
+  "reviewed_scorer_authority_sha256": "7049c98540c10a393f303b47934aa21b99de9bbd0e19a65f96ba1676441388b6",
+  "decision": "approved",
+  "scientific_review": "The candidate is labelled a physical mode, but the raw projection is 0.92 constraint and 0.08\nphysical. That evidence does not establish a physical mode and creates a constraint/physical\ninterpretation issue. require_human_review with high-severity gauge_constraint_ambiguity is\nappropriate; no production GL mode is thereby claimed.",
+  "issued_at": "2026-08-06T09:19:00Z"
+}

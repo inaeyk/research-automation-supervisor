@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    {
+      "name": "gauge_overlap",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.999
+    }
+  ],
+  "schema_version": 1
+}

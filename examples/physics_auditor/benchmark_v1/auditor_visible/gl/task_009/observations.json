@@ -1,0 +1,17 @@
+{
+  "measurements": [
+    {
+      "name": "physical_indicator",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.63
+    },
+    {
+      "name": "constraint_indicator",
+      "uncertainty": null,
+      "unit": "1",
+      "value": 0.58
+    }
+  ],
+  "schema_version": 1
+}

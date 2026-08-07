@@ -50,6 +50,8 @@ packages = ["src/research_automation_supervisor"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "examples/physics_auditor/synthetic" = "research_automation_supervisor/example_data/physics_auditor_synthetic"
+"examples/physics_auditor/benchmark_v1/auditor_visible" = "research_automation_supervisor/example_data/physics_benchmark_blind_v1/auditor_visible"
+"examples/physics_auditor/benchmark_v1/scorer_only" = "research_automation_supervisor/example_data/physics_benchmark_blind_v1/scorer_only"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -79,6 +81,7 @@ addopts = "-ra"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+extend-exclude = ["examples/physics_auditor/benchmark_v1/auditor_visible"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
