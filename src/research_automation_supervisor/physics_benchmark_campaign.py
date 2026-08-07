@@ -46,9 +46,9 @@ from research_automation_supervisor.physics_benchmark_blindness import (
 from research_automation_supervisor.physics_benchmark_campaign_models import (
     CampaignAggregateReceiptV1,
     CampaignChildAuthorityV1,
-    CampaignScoringArtifactsV1,
     CampaignScorerActionStartV1,
     CampaignScorerResultReceiptV1,
+    CampaignScoringArtifactsV1,
     CampaignTerminalChildV1,
     PhysicsBenchmarkCampaignJournalEntryV1,
     PhysicsBenchmarkCampaignManifestV1,
@@ -1410,21 +1410,20 @@ def _verify_durable_artifact_rebinding(context: _CampaignContext) -> None:
     for path, event_type in event_for_path.items():
         exists = path.exists()
         expected_exists = path == manifest_path or state_presence[path]
-        entry = lifecycle_entries.get(event_type)
-        if exists != expected_exists or (exists and entry is None):
+        lifecycle_entry = lifecycle_entries.get(event_type)
+        if exists != expected_exists or (exists and lifecycle_entry is None):
             raise PhysicsBenchmarkCampaignStateError(
                 f"campaign artifact is orphaned or missing: {path.name}"
             )
         if not exists:
-            if entry is not None:
+            if lifecycle_entry is not None:
                 raise PhysicsBenchmarkCampaignStateError(
                     f"campaign journal claims a missing artifact: {path.name}"
                 )
             continue
+        assert lifecycle_entry is not None
         current_sha256 = sha256_regular_file(path)
-        if cast(PhysicsBenchmarkCampaignJournalEntryV1, entry).artifact_hashes.get(
-            str(path)
-        ) != current_sha256:
+        if lifecycle_entry.artifact_hashes.get(str(path)) != current_sha256:
             raise PhysicsBenchmarkCampaignStateError(
                 f"campaign artifact hash contradicts its journal transition: {path.name}"
             )
@@ -1435,7 +1434,9 @@ def _verify_durable_artifact_rebinding(context: _CampaignContext) -> None:
             metadata = scoring_directory.lstat()
             actual = set(scoring_directory.iterdir())
         except OSError as exc:
-            raise PhysicsBenchmarkCampaignStateError("scorer action directory is unavailable") from exc
+            raise PhysicsBenchmarkCampaignStateError(
+                "scorer action directory is unavailable"
+            ) from exc
         if scoring_directory.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
             raise PhysicsBenchmarkCampaignStateError("scorer action directory was substituted")
         allowed = {path for path in (scorer_action_path, scorer_result_path) if path.exists()}
