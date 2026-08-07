@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeVar, cast
+from typing import Any, Literal, Protocol, TypedDict, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -44,8 +44,11 @@ from research_automation_supervisor.physics_benchmark_blindness import (
     load_blind_fixture_catalog,
 )
 from research_automation_supervisor.physics_benchmark_campaign_models import (
+    CampaignAggregateReceiptV1,
     CampaignChildAuthorityV1,
     CampaignScoringArtifactsV1,
+    CampaignScorerActionStartV1,
+    CampaignScorerResultReceiptV1,
     CampaignTerminalChildV1,
     PhysicsBenchmarkCampaignJournalEntryV1,
     PhysicsBenchmarkCampaignManifestV1,
@@ -101,6 +104,8 @@ CHILD_RUNS_DIRECTORY = "child-runs"
 ACTIONS_DIRECTORY = "actions"
 TERMINAL_DIRECTORY = "terminal-observations"
 EXPECTED_RUNS_FILE = "expected-pa5c2-runs-v1.json"
+SCORER_ACTION_FILE = "actions/scoring/scorer-action-start-v1.json"
+SCORER_RESULT_FILE = "actions/scoring/scorer-result-v1.json"
 AGGREGATE_FILE = "aggregate-pa5c2-v1.json"
 ACTION_TREE_FILE = "campaign-action-tree-v1.json"
 COMPLETION_RECEIPT_FILE = "campaign-completion-v1.json"
@@ -109,6 +114,17 @@ _TERMINAL_CHILD_STATUSES = frozenset(
     {"completed", "checkpoint_paused", "infrastructure_stopped", "failed", "aborted"}
 )
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+class _ManifestStateAuthority(TypedDict):
+    campaign_id: str
+    manifest_sha256: str
+    repository_root: str
+    scorer_catalog_path: str
+    catalog_id: Literal["physics_benchmark_blind_authority_v1"]
+    catalog_sha256: str
+    expected_child_set_sha256: str
+    scorer_authority_sha256: str
 
 
 @dataclass(frozen=True)
@@ -241,9 +257,9 @@ def create_physics_benchmark_campaign(
             error_message="campaign journal could not be initialized",
         )
         now = _utc_string(services.utc_now())
+        authority = _manifest_state_authority(manifest)
         state = PhysicsBenchmarkCampaignStateV1(
-            campaign_id=manifest.campaign_id,
-            manifest_sha256=manifest.manifest_sha256,
+            **authority,
             status="running",
             reason_code="campaign_initialized",
             journal_sequence=0,
@@ -257,7 +273,11 @@ def create_physics_benchmark_campaign(
             context,
             "campaign_initialized",
             _action_id("initialize", manifest.manifest_sha256),
-            {"status": "running", "reason_code": "campaign_initialized"},
+            {
+                **authority,
+                "status": "running",
+                "reason_code": "campaign_initialized",
+            },
             {str(root / MANIFEST_FILE): sha256_regular_file(root / MANIFEST_FILE)},
         )
         with _campaign_lock(root, services.utc_now):
@@ -276,9 +296,11 @@ def resume_physics_benchmark_campaign(
     root = _resolve_campaign_directory(run_directory)
     with _campaign_lock(root, services.utc_now):
         manifest = _load_manifest(root)
-        catalog = _load_current_catalog(manifest)
         state = _load_reconciled_state(root, persist=True)
+        _verify_manifest_state_binding(root, manifest, state)
+        catalog = _load_current_catalog(manifest)
         context = _CampaignContext(root, manifest, catalog, state, services)
+        _verify_durable_artifact_rebinding(context)
         if state.status == "completed":
             _validate_completed(context)
             return context.state
@@ -303,9 +325,11 @@ def physics_benchmark_campaign_status(
     """Read, reconcile, and verify one campaign without mutation."""
     root = _resolve_campaign_directory(run_directory)
     manifest = _load_manifest(root)
-    catalog = _load_current_catalog(manifest)
     state = _load_reconciled_state(root, persist=False)
+    _verify_manifest_state_binding(root, manifest, state)
+    catalog = _load_current_catalog(manifest)
     context = _CampaignContext(root, manifest, catalog, state, services)
+    _verify_durable_artifact_rebinding(context)
     if state.status == "completed":
         _validate_completed(context)
     return context.state
@@ -399,6 +423,8 @@ def _freeze_manifest(
 
 
 def _drive(context: _CampaignContext) -> PhysicsBenchmarkCampaignStateV1:
+    _verify_manifest_state_binding(context.run_directory, context.manifest, context.state)
+    _verify_durable_artifact_rebinding(context)
     for index, child in enumerate(context.manifest.children):
         if child.child_run_id not in context.state.registered_child_run_ids:
             context.services.checkpoint(f"before_child_registration:{child.child_run_id}")
@@ -557,6 +583,16 @@ def _drive(context: _CampaignContext) -> PhysicsBenchmarkCampaignStateV1:
     _, issue = _discover_exact_children(context, require_complete=True)
     if issue is not None:
         return _route(context, "infrastructure_blocked", issue, None)
+    if (
+        context.state.scorer_action_id is not None
+        and context.state.scorer_result_sha256 is None
+    ):
+        return _route(
+            context,
+            "infrastructure_blocked",
+            "ambiguous_partial_scorer_action",
+            None,
+        )
     if context.state.status != "ready_to_aggregate":
         context.state = _event(
             context,
@@ -762,67 +798,148 @@ def _execute_recovery(
 def _aggregate_and_finalize(
     context: _CampaignContext,
 ) -> PhysicsBenchmarkCampaignStateV1:
+    _verify_durable_artifact_rebinding(context)
     rebound = _rebind_all_terminal_children(context)
     identities = tuple(item.scoring_identity for item in rebound)
     expected = issue_expected_run_manifest(context.catalog, identities)
     observed = tuple(_to_observed(item) for item in rebound)
-    aggregate_seed = hashlib.sha256(
-        canonical_json(
-            {
-                "campaign_manifest_sha256": context.manifest.manifest_sha256,
-                "expected_run_manifest_sha256": expected.manifest_sha256,
-            }
-        )
-    ).hexdigest()
-    action_id = f"aggregate-{aggregate_seed[:32]}"
     expected_path = context.run_directory / EXPECTED_RUNS_FILE
+    scorer_action_path = context.run_directory / SCORER_ACTION_FILE
+    scorer_result_path = context.run_directory / SCORER_RESULT_FILE
     aggregate_path = context.run_directory / AGGREGATE_FILE
-    _write_once_or_verify_json(
-        expected_path,
-        expected.model_dump(mode="json"),
-        "expected PA-5C2 run manifest",
-    )
-    if aggregate_path.exists():
-        report = _load_model(aggregate_path, ExactBenchmarkScoreReportV1)
-        if (
-            report.expected_run_manifest_sha256 != expected.manifest_sha256
-            or report.catalog_sha256 != context.manifest.catalog_sha256
-        ):
-            raise PhysicsBenchmarkCampaignStateError("durable aggregate identity changed")
-    else:
+    scorer_action = _expected_scorer_action(context, expected)
+    action_started_now = context.state.scorer_action_id is None
+    if action_started_now:
         context.services.checkpoint("aggregation:before_pa5c2_scoring")
+        _write_once_or_verify_json(
+            expected_path,
+            expected.model_dump(mode="json"),
+            "expected PA-5C2 run manifest",
+        )
+        _write_once_or_verify_json(
+            scorer_action_path,
+            scorer_action.model_dump(mode="json"),
+            "scorer action-start receipt",
+        )
+        expected_file_sha = sha256_regular_file(expected_path)
+        scorer_action_file_sha = sha256_regular_file(scorer_action_path)
+        context.state = _event(
+            context,
+            "campaign_scorer_action_started",
+            scorer_action.action_id,
+            {
+                "expected_run_manifest_path": str(expected_path),
+                "expected_run_manifest_sha256": expected.manifest_sha256,
+                "scorer_action_id": scorer_action.action_id,
+                "scorer_action_path": str(scorer_action_path),
+                "scorer_action_sha256": scorer_action_file_sha,
+            },
+            {
+                str(expected_path): expected_file_sha,
+                str(scorer_action_path): scorer_action_file_sha,
+            },
+        )
+        context.services.checkpoint("aggregation:after_scorer_action_start_persisted")
+    else:
+        durable_action = _load_model(scorer_action_path, CampaignScorerActionStartV1)
+        durable_expected = _load_model(expected_path, ExactBenchmarkExpectedRunsV1)
+        if durable_action != scorer_action or durable_expected != expected:
+            raise PhysicsBenchmarkCampaignStateError("durable scorer action identity changed")
+
+    if context.state.scorer_result_sha256 is None:
+        if not action_started_now:
+            raise PhysicsBenchmarkCampaignStateError("scorer action has ambiguous completion")
         report = context.services.scorer(
             expected,
             observed,
             catalog_path=Path(context.manifest.scorer_catalog_path),
             repository_root=context.repository_root,
         )
-        context.services.checkpoint("aggregation:after_scoring_before_durable_write")
+        context.services.checkpoint("aggregation:after_scorer_computation_before_result_persistence")
+        receipt = CampaignScorerResultReceiptV1(
+            action_id=scorer_action.action_id,
+            campaign_id=context.manifest.campaign_id,
+            campaign_manifest_sha256=context.manifest.manifest_sha256,
+            scorer_action_start_sha256=sha256_regular_file(scorer_action_path),
+            expected_run_manifest_sha256=expected.manifest_sha256,
+            scorer_authority_sha256=context.state.scorer_authority_sha256,
+            result_sha256=report.canonical_sha256(),
+            result=report,
+        )
+        _write_once_or_verify_json(
+            scorer_result_path,
+            receipt.model_dump(mode="json"),
+            "scorer result receipt",
+        )
+        result_file_sha = sha256_regular_file(scorer_result_path)
+        context.state = _event(
+            context,
+            "campaign_scorer_result_persisted",
+            scorer_action.action_id,
+            {
+                "scorer_result_path": str(scorer_result_path),
+                "scorer_result_sha256": result_file_sha,
+                "scorer_result_semantic_sha256": receipt.result_sha256,
+            },
+            {str(scorer_result_path): result_file_sha},
+        )
+        context.services.checkpoint("aggregation:after_scorer_result_durable_before_aggregate")
+    else:
+        receipt = _load_model(scorer_result_path, CampaignScorerResultReceiptV1)
+        _verify_scorer_result_receipt(context, scorer_action, receipt)
+        report = receipt.result
+
+    _verify_durable_artifact_rebinding(context)
+    aggregate_seed = hashlib.sha256(
+        canonical_json(
+            {
+                "scorer_action_id": scorer_action.action_id,
+                "scorer_result_sha256": context.state.scorer_result_sha256,
+                "scorer_result_semantic_sha256": context.state.scorer_result_semantic_sha256,
+            }
+        )
+    ).hexdigest()
+    aggregate_action_id = f"aggregate-{aggregate_seed[:32]}"
+    if context.state.aggregate_result_sha256 is None:
+        aggregate_receipt = CampaignAggregateReceiptV1(
+            action_id=aggregate_action_id,
+            campaign_id=context.manifest.campaign_id,
+            campaign_manifest_sha256=context.manifest.manifest_sha256,
+            scorer_action_id=scorer_action.action_id,
+            scorer_result_receipt_sha256=cast(str, context.state.scorer_result_sha256),
+            scorer_result_semantic_sha256=cast(
+                str, context.state.scorer_result_semantic_sha256
+            ),
+            expected_run_manifest_sha256=expected.manifest_sha256,
+            result=report,
+        )
         _write_once_or_verify_json(
             aggregate_path,
-            report.model_dump(mode="json"),
+            aggregate_receipt.model_dump(mode="json"),
             "PA-5C2 aggregate result",
         )
-    context.services.checkpoint("aggregation:after_aggregate_durable_write_before_completion")
-    aggregate_sha = sha256_regular_file(aggregate_path)
-    expected_sha = sha256_regular_file(expected_path)
-    if context.state.aggregate_result_sha256 is None:
+        aggregate_sha = sha256_regular_file(aggregate_path)
         context.state = _event(
             context,
             "campaign_aggregate_persisted",
-            action_id,
+            aggregate_action_id,
             {
-                "expected_run_manifest_path": str(expected_path),
-                "expected_run_manifest_sha256": expected.manifest_sha256,
-                "aggregate_action_id": action_id,
+                "aggregate_action_id": aggregate_action_id,
                 "aggregate_result_path": str(aggregate_path),
                 "aggregate_result_sha256": aggregate_sha,
             },
-            {str(expected_path): expected_sha, str(aggregate_path): aggregate_sha},
+            {str(aggregate_path): aggregate_sha},
         )
-    elif (
+    else:
+        aggregate_receipt = _load_model(aggregate_path, CampaignAggregateReceiptV1)
+        aggregate_sha = sha256_regular_file(aggregate_path)
+        if aggregate_receipt.result != report:
+            raise PhysicsBenchmarkCampaignStateError("durable aggregate result changed")
+    context.services.checkpoint("aggregation:after_aggregate_durable_write_before_completion")
+    if (
         context.state.expected_run_manifest_sha256 != expected.manifest_sha256
-        or context.state.aggregate_action_id != action_id
+        or context.state.scorer_action_id != scorer_action.action_id
+        or context.state.aggregate_action_id != aggregate_action_id
         or context.state.aggregate_result_sha256 != aggregate_sha
     ):
         raise PhysicsBenchmarkCampaignStateError("campaign aggregate state changed")
@@ -833,12 +950,27 @@ def _finalize_campaign(
     context: _CampaignContext,
     report: ExactBenchmarkScoreReportV1,
 ) -> PhysicsBenchmarkCampaignStateV1:
+    _verify_durable_artifact_rebinding(context)
     action_tree_path = context.run_directory / ACTION_TREE_FILE
     completion_path = context.run_directory / COMPLETION_RECEIPT_FILE
-    context.services.checkpoint("finalization:before_action_tree")
     action_tree = _build_action_tree(context)
-    _write_once_or_verify_json(action_tree_path, action_tree, "campaign action tree")
-    action_tree_sha = sha256_regular_file(action_tree_path)
+    if context.state.action_tree_sha256 is None:
+        context.services.checkpoint("finalization:before_action_tree")
+        _write_once_or_verify_json(action_tree_path, action_tree, "campaign action tree")
+        action_tree_sha = sha256_regular_file(action_tree_path)
+        context.state = _event(
+            context,
+            "campaign_action_tree_persisted",
+            _action_id("action-tree", action_tree_sha),
+            {
+                "action_tree_path": str(action_tree_path),
+                "action_tree_sha256": action_tree_sha,
+            },
+            {str(action_tree_path): action_tree_sha},
+        )
+    else:
+        _write_once_or_verify_json(action_tree_path, action_tree, "campaign action tree")
+        action_tree_sha = sha256_regular_file(action_tree_path)
     context.services.checkpoint("finalization:after_action_tree")
     completion = {
         "schema_version": 1,
@@ -848,14 +980,33 @@ def _finalize_campaign(
         "aggregate_result_sha256": context.state.aggregate_result_sha256,
         "aggregate_semantic_sha256": report.canonical_sha256(),
         "expected_run_manifest_sha256": context.state.expected_run_manifest_sha256,
+        "scorer_action_id": context.state.scorer_action_id,
+        "scorer_action_sha256": context.state.scorer_action_sha256,
+        "scorer_result_sha256": context.state.scorer_result_sha256,
+        "scorer_result_semantic_sha256": context.state.scorer_result_semantic_sha256,
         "action_tree_sha256": action_tree_sha,
         "exact_child_bijection": True,
         "all_pa5c2_proofs_verified": True,
     }
-    context.services.checkpoint("finalization:before_completion_receipt")
-    _write_once_or_verify_json(completion_path, completion, "campaign completion receipt")
-    completion_sha = sha256_regular_file(completion_path)
+    if context.state.completion_receipt_sha256 is None:
+        context.services.checkpoint("finalization:before_completion_receipt")
+        _write_once_or_verify_json(completion_path, completion, "campaign completion receipt")
+        completion_sha = sha256_regular_file(completion_path)
+        context.state = _event(
+            context,
+            "campaign_completion_receipt_persisted",
+            _action_id("completion-receipt", completion_sha),
+            {
+                "completion_receipt_path": str(completion_path),
+                "completion_receipt_sha256": completion_sha,
+            },
+            {str(completion_path): completion_sha},
+        )
+    else:
+        _write_once_or_verify_json(completion_path, completion, "campaign completion receipt")
+        completion_sha = sha256_regular_file(completion_path)
     context.services.checkpoint("finalization:after_completion_receipt_before_state")
+    _verify_durable_artifact_rebinding(context)
     if context.state.status != "completed":
         context.state = _event(
             context,
@@ -865,15 +1016,8 @@ def _finalize_campaign(
                 "status": "completed",
                 "reason_code": "campaign_completed",
                 "blocking_child_run_id": None,
-                "action_tree_path": str(action_tree_path),
-                "action_tree_sha256": action_tree_sha,
-                "completion_receipt_path": str(completion_path),
-                "completion_receipt_sha256": completion_sha,
             },
-            {
-                str(action_tree_path): action_tree_sha,
-                str(completion_path): completion_sha,
-            },
+            {},
         )
     return context.state
 
@@ -1083,6 +1227,298 @@ def _plan_authority_issue(
     return None if all(values) else "child_recovery_plan_substituted"
 
 
+def _manifest_state_authority(
+    manifest: PhysicsBenchmarkCampaignManifestV1,
+) -> _ManifestStateAuthority:
+    child_set_sha256 = hashlib.sha256(
+        canonical_json([item.model_dump(mode="json") for item in manifest.children])
+    ).hexdigest()
+    scorer_authority_sha256 = hashlib.sha256(
+        canonical_json(
+            {
+                "delegated_entrypoint": "pa5c2_score_exact_physics_benchmark",
+                "scorer_catalog_path": manifest.scorer_catalog_path,
+                "catalog_id": manifest.catalog_id,
+                "catalog_sha256": manifest.catalog_sha256,
+            }
+        )
+    ).hexdigest()
+    return {
+        "campaign_id": manifest.campaign_id,
+        "manifest_sha256": manifest.manifest_sha256,
+        "repository_root": manifest.repository_root,
+        "scorer_catalog_path": manifest.scorer_catalog_path,
+        "catalog_id": manifest.catalog_id,
+        "catalog_sha256": manifest.catalog_sha256,
+        "expected_child_set_sha256": child_set_sha256,
+        "scorer_authority_sha256": scorer_authority_sha256,
+    }
+
+
+def _verify_manifest_state_binding(
+    run_directory: Path,
+    manifest: PhysicsBenchmarkCampaignManifestV1,
+    state: PhysicsBenchmarkCampaignStateV1,
+) -> None:
+    authority = _manifest_state_authority(manifest)
+    if any(getattr(state, key) != value for key, value in authority.items()):
+        raise PhysicsBenchmarkCampaignStateError(
+            "durable campaign state contradicts the frozen manifest"
+        )
+    entries = _read_campaign_journal(run_directory)
+    if not entries:
+        raise PhysicsBenchmarkCampaignStateError("campaign manifest lacks its origin transition")
+    origin = entries[0]
+    manifest_path = run_directory / MANIFEST_FILE
+    manifest_file_sha256 = sha256_regular_file(manifest_path)
+    if (
+        origin.event_type != "campaign_initialized"
+        or origin.action_id != _action_id("initialize", manifest.manifest_sha256)
+        or origin.state_updates.get("campaign_id") != manifest.campaign_id
+        or origin.state_updates.get("manifest_sha256") != manifest.manifest_sha256
+        or origin.artifact_hashes != {str(manifest_path): manifest_file_sha256}
+    ):
+        raise PhysicsBenchmarkCampaignStateError(
+            "campaign manifest is not bound to its original journal transition"
+        )
+    for key, expected in authority.items():
+        if origin.state_updates.get(key) != expected:
+            raise PhysicsBenchmarkCampaignStateError(
+                "campaign origin authority contradicts the frozen manifest"
+            )
+        if any(
+            key in entry.state_updates and entry.state_updates[key] != expected
+            for entry in entries[1:]
+        ):
+            raise PhysicsBenchmarkCampaignStateError(
+                "campaign journal attempted to replace frozen manifest authority"
+            )
+
+
+def _expected_scorer_action(
+    context: _CampaignContext,
+    expected: ExactBenchmarkExpectedRunsV1,
+) -> CampaignScorerActionStartV1:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "campaign_id": context.manifest.campaign_id,
+        "campaign_manifest_sha256": context.manifest.manifest_sha256,
+        "repository_root": context.manifest.repository_root,
+        "expected_child_set_sha256": context.state.expected_child_set_sha256,
+        "expected_child_authority_sha256": sorted(
+            item.canonical_sha256() for item in context.manifest.children
+        ),
+        "expected_pa5c2_input_identity_sha256": sorted(
+            item.canonical_sha256() for item in expected.run_identities
+        ),
+        "expected_run_manifest_sha256": expected.manifest_sha256,
+        "catalog_id": context.manifest.catalog_id,
+        "catalog_sha256": context.manifest.catalog_sha256,
+        "scorer_authority_sha256": context.state.scorer_authority_sha256,
+    }
+    digest = hashlib.sha256(canonical_json(payload)).hexdigest()
+    return CampaignScorerActionStartV1.model_validate(
+        {**payload, "action_id": f"score-{digest[:48]}"}
+    )
+
+
+def _verify_scorer_result_receipt(
+    context: _CampaignContext,
+    action: CampaignScorerActionStartV1,
+    receipt: CampaignScorerResultReceiptV1,
+) -> None:
+    expected = (
+        receipt.action_id == action.action_id,
+        receipt.campaign_id == context.manifest.campaign_id,
+        receipt.campaign_manifest_sha256 == context.manifest.manifest_sha256,
+        receipt.scorer_action_start_sha256 == context.state.scorer_action_sha256,
+        receipt.expected_run_manifest_sha256 == action.expected_run_manifest_sha256,
+        receipt.scorer_authority_sha256 == context.state.scorer_authority_sha256,
+        receipt.result_sha256 == context.state.scorer_result_semantic_sha256,
+        receipt.result.catalog_sha256 == context.manifest.catalog_sha256,
+    )
+    if not all(expected):
+        raise PhysicsBenchmarkCampaignStateError("scorer result receipt was substituted")
+
+
+def _read_campaign_journal(
+    run_directory: Path,
+) -> tuple[PhysicsBenchmarkCampaignJournalEntryV1, ...]:
+    raw_entries = read_hashed_journal(
+        run_directory / JOURNAL_FILE,
+        error_factory=PhysicsBenchmarkCampaignStateError,
+        malformed_message="campaign journal is malformed",
+    )
+    entries: list[PhysicsBenchmarkCampaignJournalEntryV1] = []
+    for value in raw_entries:
+        try:
+            entries.append(PhysicsBenchmarkCampaignJournalEntryV1.model_validate(value))
+        except ValidationError as exc:
+            raise PhysicsBenchmarkCampaignStateError("campaign journal entry is invalid") from exc
+    return tuple(entries)
+
+
+def _verify_durable_artifact_rebinding(context: _CampaignContext) -> None:
+    """Reject every unexplained or stale scorer/finalization artifact."""
+    entries = _read_campaign_journal(context.run_directory)
+    manifest_path = context.run_directory / MANIFEST_FILE
+    expected_path = context.run_directory / EXPECTED_RUNS_FILE
+    scorer_action_path = context.run_directory / SCORER_ACTION_FILE
+    scorer_result_path = context.run_directory / SCORER_RESULT_FILE
+    aggregate_path = context.run_directory / AGGREGATE_FILE
+    action_tree_path = context.run_directory / ACTION_TREE_FILE
+    completion_path = context.run_directory / COMPLETION_RECEIPT_FILE
+    paths = {
+        "campaign_initialized": (manifest_path,),
+        "campaign_scorer_action_started": (expected_path, scorer_action_path),
+        "campaign_scorer_result_persisted": (scorer_result_path,),
+        "campaign_aggregate_persisted": (aggregate_path,),
+        "campaign_action_tree_persisted": (action_tree_path,),
+        "campaign_completion_receipt_persisted": (completion_path,),
+        "campaign_completed": (),
+    }
+    lifecycle_entries: dict[str, PhysicsBenchmarkCampaignJournalEntryV1] = {}
+    for entry in entries:
+        expected_paths = paths.get(entry.event_type)
+        if expected_paths is None:
+            continue
+        if entry.event_type in lifecycle_entries:
+            raise PhysicsBenchmarkCampaignStateError("campaign lifecycle transition was duplicated")
+        lifecycle_entries[entry.event_type] = entry
+        if set(entry.artifact_hashes) != {str(path) for path in expected_paths}:
+            raise PhysicsBenchmarkCampaignStateError(
+                "campaign lifecycle transition has unexplained artifact bindings"
+            )
+
+    state_presence = {
+        expected_path: context.state.scorer_action_id is not None,
+        scorer_action_path: context.state.scorer_action_id is not None,
+        scorer_result_path: context.state.scorer_result_sha256 is not None,
+        aggregate_path: context.state.aggregate_result_sha256 is not None,
+        action_tree_path: context.state.action_tree_sha256 is not None,
+        completion_path: context.state.completion_receipt_sha256 is not None,
+    }
+    event_for_path = {
+        manifest_path: "campaign_initialized",
+        expected_path: "campaign_scorer_action_started",
+        scorer_action_path: "campaign_scorer_action_started",
+        scorer_result_path: "campaign_scorer_result_persisted",
+        aggregate_path: "campaign_aggregate_persisted",
+        action_tree_path: "campaign_action_tree_persisted",
+        completion_path: "campaign_completion_receipt_persisted",
+    }
+    for path, event_type in event_for_path.items():
+        exists = path.exists()
+        expected_exists = path == manifest_path or state_presence[path]
+        entry = lifecycle_entries.get(event_type)
+        if exists != expected_exists or (exists and entry is None):
+            raise PhysicsBenchmarkCampaignStateError(
+                f"campaign artifact is orphaned or missing: {path.name}"
+            )
+        if not exists:
+            if entry is not None:
+                raise PhysicsBenchmarkCampaignStateError(
+                    f"campaign journal claims a missing artifact: {path.name}"
+                )
+            continue
+        current_sha256 = sha256_regular_file(path)
+        if cast(PhysicsBenchmarkCampaignJournalEntryV1, entry).artifact_hashes.get(
+            str(path)
+        ) != current_sha256:
+            raise PhysicsBenchmarkCampaignStateError(
+                f"campaign artifact hash contradicts its journal transition: {path.name}"
+            )
+
+    scoring_directory = scorer_action_path.parent
+    if scoring_directory.exists():
+        try:
+            metadata = scoring_directory.lstat()
+            actual = set(scoring_directory.iterdir())
+        except OSError as exc:
+            raise PhysicsBenchmarkCampaignStateError("scorer action directory is unavailable") from exc
+        if scoring_directory.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise PhysicsBenchmarkCampaignStateError("scorer action directory was substituted")
+        allowed = {path for path in (scorer_action_path, scorer_result_path) if path.exists()}
+        if actual != allowed:
+            raise PhysicsBenchmarkCampaignStateError("unjournaled scorer action artifact exists")
+
+    if context.state.scorer_action_id is not None:
+        expected_manifest = _load_model(expected_path, ExactBenchmarkExpectedRunsV1)
+        action = _load_model(scorer_action_path, CampaignScorerActionStartV1)
+        if (
+            context.state.expected_run_manifest_path != str(expected_path)
+            or context.state.expected_run_manifest_sha256 != expected_manifest.manifest_sha256
+            or context.state.scorer_action_path != str(scorer_action_path)
+            or context.state.scorer_action_sha256 != sha256_regular_file(scorer_action_path)
+            or context.state.scorer_action_id != action.action_id
+            or action != _expected_scorer_action(context, expected_manifest)
+        ):
+            raise PhysicsBenchmarkCampaignStateError("scorer action did not rebind exactly")
+        action_entry = lifecycle_entries["campaign_scorer_action_started"]
+        if action_entry.action_id != action.action_id:
+            raise PhysicsBenchmarkCampaignStateError("scorer action journal identity changed")
+        if context.state.scorer_result_sha256 is not None:
+            result = _load_model(scorer_result_path, CampaignScorerResultReceiptV1)
+            _verify_scorer_result_receipt(context, action, result)
+            if (
+                context.state.scorer_result_path != str(scorer_result_path)
+                or context.state.scorer_result_sha256 != sha256_regular_file(scorer_result_path)
+                or lifecycle_entries["campaign_scorer_result_persisted"].action_id
+                != action.action_id
+            ):
+                raise PhysicsBenchmarkCampaignStateError("scorer result did not rebind exactly")
+            if context.state.aggregate_result_sha256 is not None:
+                aggregate = _load_model(aggregate_path, CampaignAggregateReceiptV1)
+                if (
+                    context.state.aggregate_result_path != str(aggregate_path)
+                    or context.state.aggregate_result_sha256
+                    != sha256_regular_file(aggregate_path)
+                    or aggregate.action_id != context.state.aggregate_action_id
+                    or aggregate.campaign_id != context.manifest.campaign_id
+                    or aggregate.campaign_manifest_sha256
+                    != context.manifest.manifest_sha256
+                    or aggregate.scorer_action_id != action.action_id
+                    or aggregate.scorer_result_receipt_sha256
+                    != context.state.scorer_result_sha256
+                    or aggregate.scorer_result_semantic_sha256 != result.result_sha256
+                    or aggregate.expected_run_manifest_sha256
+                    != expected_manifest.manifest_sha256
+                    or aggregate.result != result.result
+                    or lifecycle_entries["campaign_aggregate_persisted"].action_id
+                    != context.state.aggregate_action_id
+                ):
+                    raise PhysicsBenchmarkCampaignStateError("aggregate did not rebind exactly")
+
+    if context.state.action_tree_sha256 is not None:
+        tree = _load_json_object(action_tree_path)
+        if (
+            context.state.action_tree_path != str(action_tree_path)
+            or context.state.action_tree_sha256 != sha256_regular_file(action_tree_path)
+            or tree.get("campaign_id") != context.manifest.campaign_id
+            or tree.get("campaign_manifest_sha256") != context.manifest.manifest_sha256
+            or tree.get("scorer_action_id") != context.state.scorer_action_id
+            or tree.get("scorer_result_sha256") != context.state.scorer_result_sha256
+        ):
+            raise PhysicsBenchmarkCampaignStateError("campaign action tree did not rebind exactly")
+    if context.state.completion_receipt_sha256 is not None:
+        completion = _load_json_object(completion_path)
+        if (
+            context.state.completion_receipt_path != str(completion_path)
+            or context.state.completion_receipt_sha256 != sha256_regular_file(completion_path)
+            or completion.get("campaign_id") != context.manifest.campaign_id
+            or completion.get("campaign_manifest_sha256") != context.manifest.manifest_sha256
+            or completion.get("scorer_action_id") != context.state.scorer_action_id
+            or completion.get("scorer_result_sha256") != context.state.scorer_result_sha256
+            or completion.get("aggregate_action_id") != context.state.aggregate_action_id
+            or completion.get("aggregate_result_sha256")
+            != context.state.aggregate_result_sha256
+            or completion.get("action_tree_sha256") != context.state.action_tree_sha256
+        ):
+            raise PhysicsBenchmarkCampaignStateError(
+                "campaign completion receipt did not rebind exactly"
+            )
+
+
 def _verify_frozen_manifest_authority(context: _CampaignContext) -> None:
     if context.catalog.canonical_sha256() != context.manifest.catalog_sha256:
         raise PhysicsBenchmarkCampaignInputError("campaign scorer catalog changed")
@@ -1172,6 +1608,10 @@ def _build_action_tree(context: _CampaignContext) -> dict[str, object]:
         "terminal_child_identity_sha256": [
             item.canonical_sha256() for item in context.state.terminal_children
         ],
+        "scorer_action_id": context.state.scorer_action_id,
+        "scorer_action_sha256": context.state.scorer_action_sha256,
+        "scorer_result_sha256": context.state.scorer_result_sha256,
+        "scorer_result_semantic_sha256": context.state.scorer_result_semantic_sha256,
         "aggregate_action_id": context.state.aggregate_action_id,
         "aggregate_result_sha256": context.state.aggregate_result_sha256,
         "records": records,
@@ -1179,12 +1619,16 @@ def _build_action_tree(context: _CampaignContext) -> dict[str, object]:
 
 
 def _validate_completed(context: _CampaignContext) -> None:
+    _verify_manifest_state_binding(context.run_directory, context.manifest, context.state)
+    _verify_durable_artifact_rebinding(context)
     _verify_frozen_manifest_authority(context)
     rebound = _rebind_all_terminal_children(context)
     if len(rebound) != len(context.manifest.children):
         raise PhysicsBenchmarkCampaignStateError("completed child set is incomplete")
     paths = (
         context.state.expected_run_manifest_path,
+        context.state.scorer_action_path,
+        context.state.scorer_result_path,
         context.state.aggregate_result_path,
         context.state.action_tree_path,
         context.state.completion_receipt_path,
@@ -1192,13 +1636,22 @@ def _validate_completed(context: _CampaignContext) -> None:
     if any(path is None for path in paths):
         raise PhysicsBenchmarkCampaignStateError("completed campaign files are unavailable")
     expected = _load_model(Path(cast(str, paths[0])), ExactBenchmarkExpectedRunsV1)
-    report = _load_model(Path(cast(str, paths[1])), ExactBenchmarkScoreReportV1)
+    action = _load_model(Path(cast(str, paths[1])), CampaignScorerActionStartV1)
+    result = _load_model(Path(cast(str, paths[2])), CampaignScorerResultReceiptV1)
+    aggregate = _load_model(Path(cast(str, paths[3])), CampaignAggregateReceiptV1)
+    report = aggregate.result
+    _verify_scorer_result_receipt(context, action, result)
     if (
         expected.manifest_sha256 != context.state.expected_run_manifest_sha256
+        or action.action_id != context.state.scorer_action_id
+        or result.result != report
+        or aggregate.campaign_manifest_sha256 != context.manifest.manifest_sha256
         or report.expected_run_manifest_sha256 != expected.manifest_sha256
-        or sha256_regular_file(Path(cast(str, paths[1]))) != context.state.aggregate_result_sha256
-        or sha256_regular_file(Path(cast(str, paths[2]))) != context.state.action_tree_sha256
-        or sha256_regular_file(Path(cast(str, paths[3]))) != context.state.completion_receipt_sha256
+        or sha256_regular_file(Path(cast(str, paths[3])))
+        != context.state.aggregate_result_sha256
+        or sha256_regular_file(Path(cast(str, paths[4]))) != context.state.action_tree_sha256
+        or sha256_regular_file(Path(cast(str, paths[5])))
+        != context.state.completion_receipt_sha256
     ):
         raise PhysicsBenchmarkCampaignStateError("completed campaign receipts changed")
 
@@ -1251,16 +1704,8 @@ def _load_reconciled_state(
     run_directory: Path, *, persist: bool
 ) -> PhysicsBenchmarkCampaignStateV1:
     state = _load_model(run_directory / STATE_FILE, PhysicsBenchmarkCampaignStateV1)
-    entries = read_hashed_journal(
-        run_directory / JOURNAL_FILE,
-        error_factory=PhysicsBenchmarkCampaignStateError,
-        malformed_message="campaign journal is malformed",
-    )
-    for entry in entries:
-        try:
-            PhysicsBenchmarkCampaignJournalEntryV1.model_validate(entry)
-        except ValidationError as exc:
-            raise PhysicsBenchmarkCampaignStateError("campaign journal entry is invalid") from exc
+    typed_entries = _read_campaign_journal(run_directory)
+    entries = [item.model_dump(mode="json") for item in typed_entries]
     reconciled = reconcile_model_snapshot(
         state,
         entries,
@@ -1274,7 +1719,12 @@ def _load_reconciled_state(
 
 
 def _load_manifest(run_directory: Path) -> PhysicsBenchmarkCampaignManifestV1:
-    manifest = _load_model(run_directory / MANIFEST_FILE, PhysicsBenchmarkCampaignManifestV1)
+    manifest_path = run_directory / MANIFEST_FILE
+    try:
+        sha256_regular_file(manifest_path)
+    except WorkflowStateError as exc:
+        raise PhysicsBenchmarkCampaignStateError("campaign manifest was substituted") from exc
+    manifest = _load_model(manifest_path, PhysicsBenchmarkCampaignManifestV1)
     if manifest.child_runs_directory != str(run_directory / CHILD_RUNS_DIRECTORY):
         raise PhysicsBenchmarkCampaignStateError("campaign child root was substituted")
     return manifest
@@ -1355,9 +1805,17 @@ def _persist_state(run_directory: Path, state: PhysicsBenchmarkCampaignStateV1) 
 
 def _load_model(path: Path, model: type[ModelT]) -> ModelT:
     try:
+        sha256_regular_file(path)
         value = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
         return model.model_validate(value)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+        WorkflowStateError,
+    ) as exc:
         raise PhysicsBenchmarkCampaignStateError(f"invalid campaign artifact: {path.name}") from exc
 
 
@@ -1367,8 +1825,15 @@ def _validate_journal_entry(value: Mapping[str, object]) -> None:
 
 def _load_json_object(path: Path) -> dict[str, object]:
     try:
+        sha256_regular_file(path)
         value = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        WorkflowStateError,
+    ) as exc:
         raise PhysicsBenchmarkCampaignStateError("campaign action record is invalid") from exc
     if not isinstance(value, dict):
         raise PhysicsBenchmarkCampaignStateError("campaign action record is invalid")

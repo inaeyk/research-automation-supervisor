@@ -520,6 +520,7 @@ def test_complete_campaign_has_exact_bijection_and_idempotent_finalization(
         "after_child_terminal_before_campaign_observation",
         "after_all_children_terminal_before_scoring",
         "aggregation:before_pa5c2_scoring",
+        "aggregation:after_scorer_result_durable_before_aggregate",
         "aggregation:after_aggregate_durable_write_before_completion",
         "finalization:after_completion_receipt_before_state",
     ],
@@ -546,6 +547,181 @@ def test_campaign_crash_boundaries_resume_without_duplicate_actions(
     assert gateway.scorer_count == 1
     assert len(list((run_directory / "actions/launches").glob("*.json"))) == 2
     assert len(list((run_directory / "terminal-observations").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize(
+    ("boundary", "scorer_count"),
+    [
+        ("aggregation:after_scorer_action_start_persisted", 0),
+        ("aggregation:after_scorer_computation_before_result_persistence", 1),
+    ],
+)
+def test_ambiguous_scorer_boundaries_fail_closed_without_reinvocation(
+    tmp_path: Path,
+    boundary: str,
+    scorer_count: int,
+) -> None:
+    gateway = FakeGateway()
+    crash = CrashAt(boundary)
+    run_directory = tmp_path / "campaign"
+    with pytest.raises(RuntimeError, match="injected campaign crash"):
+        create_physics_benchmark_campaign(
+            "ambiguous-scorer-campaign",
+            _requests(tmp_path / "inputs", 1),
+            run_directory=run_directory,
+            catalog_path=CATALOG_PATH,
+            repository_root=ROOT,
+            services=gateway.services(crash),
+        )
+
+    assert gateway.scorer_count == scorer_count
+    first = resume_physics_benchmark_campaign(run_directory, services=gateway.services())
+    journal_before = (run_directory / "campaign-journal-v1.jsonl").read_bytes()
+    second = resume_physics_benchmark_campaign(run_directory, services=gateway.services())
+    journal_after = (run_directory / "campaign-journal-v1.jsonl").read_bytes()
+
+    assert first.status == "infrastructure_blocked"
+    assert first.reason_code == "ambiguous_partial_scorer_action"
+    assert second == first
+    assert journal_after == journal_before
+    assert gateway.scorer_count == scorer_count
+    assert not (run_directory / "aggregate-pa5c2-v1.json").exists()
+
+
+def test_durable_scorer_result_is_reused_across_repeated_resume(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    crash = CrashAt("aggregation:after_scorer_result_durable_before_aggregate")
+    run_directory = tmp_path / "campaign"
+    with pytest.raises(RuntimeError, match="injected campaign crash"):
+        create_physics_benchmark_campaign(
+            "durable-result-campaign",
+            _requests(tmp_path / "inputs", 1),
+            run_directory=run_directory,
+            catalog_path=CATALOG_PATH,
+            repository_root=ROOT,
+            services=gateway.services(crash),
+        )
+
+    result_before = (run_directory / "actions/scoring/scorer-result-v1.json").read_bytes()
+    first = resume_physics_benchmark_campaign(run_directory, services=gateway.services())
+    second = resume_physics_benchmark_campaign(run_directory, services=gateway.services())
+
+    assert first.status == "completed"
+    assert second == first
+    assert gateway.scorer_count == 1
+    assert (run_directory / "actions/scoring/scorer-result-v1.json").read_bytes() == result_before
+
+
+def test_valid_manifest_substitution_is_rejected_before_any_action(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    run_directory = tmp_path / "campaign"
+    with pytest.raises(RuntimeError, match="injected campaign crash"):
+        create_physics_benchmark_campaign(
+            "manifest-origin-campaign",
+            _requests(tmp_path / "inputs", 1),
+            run_directory=run_directory,
+            catalog_path=CATALOG_PATH,
+            repository_root=ROOT,
+            services=gateway.services(CrashAt("before_child_registration")),
+        )
+    manifest_path = run_directory / "campaign-manifest-v1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["campaign_id"] = "substituted-valid-campaign"
+    for child in manifest["children"]:
+        child["campaign_id"] = manifest["campaign_id"]
+    payload = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    manifest["manifest_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(PhysicsBenchmarkCampaignStateError):
+        resume_physics_benchmark_campaign(run_directory, services=gateway.services())
+    assert gateway.launch_count == 0
+    assert gateway.scorer_count == 0
+
+
+@pytest.mark.parametrize("field", ["manifest_sha256", "campaign_id"])
+def test_durable_state_manifest_identity_substitution_is_rejected(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    gateway = FakeGateway()
+    run_directory = tmp_path / "campaign"
+    with pytest.raises(RuntimeError, match="injected campaign crash"):
+        create_physics_benchmark_campaign(
+            "state-origin-campaign",
+            _requests(tmp_path / "inputs", 1),
+            run_directory=run_directory,
+            catalog_path=CATALOG_PATH,
+            repository_root=ROOT,
+            services=gateway.services(CrashAt("before_child_registration")),
+        )
+    state_path = run_directory / "campaign-state-v1.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state[field] = "0" * 64 if field == "manifest_sha256" else "substituted-campaign"
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(PhysicsBenchmarkCampaignStateError):
+        resume_physics_benchmark_campaign(run_directory, services=gateway.services())
+    assert gateway.launch_count == 0
+    assert gateway.scorer_count == 0
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "label"),
+    [
+        ("actions/scoring/scorer-action-start-v1.json", "scorer action"),
+        ("aggregate-pa5c2-v1.json", "aggregate"),
+    ],
+)
+def test_cross_campaign_scorer_and_aggregate_substitution_fail_closed(
+    tmp_path: Path,
+    relative_path: str,
+    label: str,
+) -> None:
+    first_gateway = FakeGateway()
+    second_gateway = FakeGateway()
+    first_directory, _ = _run(tmp_path / "first", first_gateway, count=1)
+    second_directory, _ = _run(tmp_path / "second", second_gateway, count=1)
+    target = first_directory / relative_path
+    target.write_bytes((second_directory / relative_path).read_bytes())
+
+    with pytest.raises(PhysicsBenchmarkCampaignStateError, match="hash|rebind|substituted"):
+        resume_physics_benchmark_campaign(first_directory, services=first_gateway.services())
+    assert first_gateway.scorer_count == 1, label
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "aggregate-pa5c2-v1.json",
+        "actions/scoring/scorer-result-v1.json",
+    ],
+)
+def test_unjournaled_orphan_aggregate_and_scorer_result_fail_closed(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    source_gateway = FakeGateway()
+    source_directory, _ = _run(tmp_path / "source", source_gateway, count=1)
+    target_gateway = FakeGateway()
+    target_directory = tmp_path / "target/campaign"
+    with pytest.raises(RuntimeError, match="injected campaign crash"):
+        create_physics_benchmark_campaign(
+            "orphan-target-campaign",
+            _requests(tmp_path / "target/inputs", 1),
+            run_directory=target_directory,
+            catalog_path=CATALOG_PATH,
+            repository_root=ROOT,
+            services=target_gateway.services(CrashAt("before_child_registration")),
+        )
+    orphan = target_directory / relative_path
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes((source_directory / relative_path).read_bytes())
+
+    with pytest.raises(PhysicsBenchmarkCampaignStateError, match="orphaned|unjournaled"):
+        resume_physics_benchmark_campaign(target_directory, services=target_gateway.services())
+    assert target_gateway.launch_count == 0
+    assert target_gateway.scorer_count == 0
 
 
 def test_interrupted_child_recovery_is_observed_not_reimplemented(tmp_path: Path) -> None:

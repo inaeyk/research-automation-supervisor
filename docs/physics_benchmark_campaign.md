@@ -22,6 +22,13 @@ Case/variant/repetition keys, child IDs, run tokens, run directories, and worksp
 must be unique. The PA-4 substage ID must equal the benchmark case ID. These rules
 make the expected child set immutable before any launch.
 
+Every load first validates the manifest self-hash and then requires the state and
+origin journal transition to repeat exactly the manifest's campaign ID, manifest
+digest, repository root, scorer catalog path/ID/digest, derived scorer authority,
+and canonical complete-child-set digest. A different valid manifest is not a new
+authority for an existing directory. Manifest replacement and matching edits to the
+state snapshot therefore fail before recovery, launch, scoring, or finalization.
+
 ## Delegation boundary
 
 The child adapter calls only `run_substage` to create an ordinary schema-version-2
@@ -67,20 +74,31 @@ result is never a completed campaign.
 Its append-only journal is hash chained and reconciles a state snapshot that was
 interrupted after journal fsync.
 
-Registration, launch intent, recovery delegation, terminal observation, aggregate,
-action-tree, and completion records have deterministic IDs. A launch intent is
+Registration, launch intent, recovery delegation, terminal observation, scorer,
+aggregate, action-tree, and completion records have deterministic IDs. A launch intent is
 durable before entering PA-4. If its expected child directory is absent after that
 point, the campaign treats launch state as ambiguous and does not relaunch. If the
 directory exists, all launch/process/proof decisions are delegated to PA-5A.
-Repeated deterministic PA-5C2 evaluation denotes the same pure scoring action; only
-one aggregate identity and durable result can exist.
 
-The expected PA-5C2 manifest and aggregate are atomically replaced and fsynced. The
-action tree and completion receipt are then atomically replaced and fsynced. Finally,
-the hash-chained `completed` transition and state snapshot are committed last. Thus a
-completed state is the commit marker for all prior files. Resume after an interrupted
-finalization verifies or completes the same bytes; resume after completion is
-read-only and returns the same semantic campaign result.
+Before entering PA-5C2, the campaign atomically persists and journals one scorer
+action-start receipt. Its deterministic identity binds the campaign and manifest,
+repository and scorer authority, complete child-authority set, complete PA-5C2 input
+identity set, and expected-run manifest. Once this receipt exists, the scorer is
+never invoked again. On success, the exact score report and its canonical result
+hash are embedded together in one atomically persisted and journaled result receipt.
+A verified result receipt is reused byte-for-byte. A start receipt without a
+verified result is an ambiguous scorer boundary and routes
+`infrastructure_blocked`; zero duplicate scorer actions takes precedence over
+automatic recovery.
+
+The expected PA-5C2 manifest, scorer receipts, aggregate, action tree, and completion
+receipt are each atomically replaced, fsynced, and bound by the exact hash in their
+own journal transition before the next lifecycle step. Before aggregation or
+finalization, the campaign inventories these fixed paths and rejects missing,
+unjournaled, stale, substituted, cross-campaign, or wrong-hash artifacts without
+deleting or adopting them. Finally, the hash-chained `completed` transition and state
+snapshot are committed last. Thus a completed state is the commit marker for all
+prior files, and repeated resume is read-only and returns the same semantic result.
 
 PA-5C3 does not provide parallel scheduling and does not run the real benchmark or GL
 pilot.

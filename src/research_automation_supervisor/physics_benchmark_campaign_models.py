@@ -10,6 +10,7 @@ from pydantic import BeforeValidator, Field, field_validator, model_validator
 from research_automation_supervisor.durable_state import canonical_json
 from research_automation_supervisor.physics_benchmark_scoring import (
     ExactBenchmarkRunIdentityV1,
+    ExactBenchmarkScoreReportV1,
 )
 from research_automation_supervisor.physics_models import PhysicsCanonicalModel
 from research_automation_supervisor.physics_oracle_models import Sha256
@@ -36,7 +37,11 @@ CampaignEventTypeV1: TypeAlias = Literal[
     "child_terminal_observed",
     "campaign_status_routed",
     "campaign_ready_to_aggregate",
+    "campaign_scorer_action_started",
+    "campaign_scorer_result_persisted",
     "campaign_aggregate_persisted",
+    "campaign_action_tree_persisted",
+    "campaign_completion_receipt_persisted",
     "campaign_completed",
 ]
 
@@ -148,12 +153,101 @@ class CampaignTerminalChildV1(PhysicsCanonicalModel):
     scoring_artifacts: CampaignScoringArtifactsV1
 
 
+class CampaignScorerActionStartV1(PhysicsCanonicalModel):
+    """Durable exactly-once intent for one complete PA-5C2 scoring action."""
+
+    schema_version: Literal[1] = 1
+    action_id: Identifier
+    campaign_id: Identifier
+    campaign_manifest_sha256: Sha256
+    repository_root: str
+    expected_child_set_sha256: Sha256
+    expected_child_authority_sha256: Annotated[
+        tuple[Sha256, ...], BeforeValidator(_freeze_sequence), Field(min_length=1)
+    ]
+    expected_pa5c2_input_identity_sha256: Annotated[
+        tuple[Sha256, ...], BeforeValidator(_freeze_sequence), Field(min_length=1)
+    ]
+    expected_run_manifest_sha256: Sha256
+    catalog_id: Literal["physics_benchmark_blind_authority_v1"]
+    catalog_sha256: Sha256
+    scorer_authority_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_action_identity(self) -> CampaignScorerActionStartV1:
+        child_hashes = tuple(sorted(self.expected_child_authority_sha256))
+        input_hashes = tuple(sorted(self.expected_pa5c2_input_identity_sha256))
+        object.__setattr__(self, "expected_child_authority_sha256", child_hashes)
+        object.__setattr__(self, "expected_pa5c2_input_identity_sha256", input_hashes)
+        if len(child_hashes) != len(set(child_hashes)):
+            raise ValueError("scorer action contains duplicate child authorities")
+        if len(input_hashes) != len(set(input_hashes)):
+            raise ValueError("scorer action contains duplicate PA-5C2 input identities")
+        payload = self.model_dump(mode="json", exclude={"action_id"})
+        expected = f"score-{hashlib.sha256(canonical_json(payload)).hexdigest()[:48]}"
+        if self.action_id != expected:
+            raise ValueError("scorer action ID is invalid")
+        return self
+
+
+class CampaignScorerResultReceiptV1(PhysicsCanonicalModel):
+    """Atomically persisted exact scorer result and its action binding."""
+
+    schema_version: Literal[1] = 1
+    action_id: Identifier
+    campaign_id: Identifier
+    campaign_manifest_sha256: Sha256
+    scorer_action_start_sha256: Sha256
+    expected_run_manifest_sha256: Sha256
+    scorer_authority_sha256: Sha256
+    result_sha256: Sha256
+    result: ExactBenchmarkScoreReportV1
+
+    @model_validator(mode="after")
+    def validate_result_identity(self) -> CampaignScorerResultReceiptV1:
+        if self.result.expected_run_manifest_sha256 != self.expected_run_manifest_sha256:
+            raise ValueError("scorer result contradicts its expected-run manifest")
+        if self.result_sha256 != self.result.canonical_sha256():
+            raise ValueError("scorer result digest is invalid")
+        return self
+
+
+class CampaignAggregateReceiptV1(PhysicsCanonicalModel):
+    """Campaign-bound publication of the exact stored PA-5C2 result."""
+
+    schema_version: Literal[1] = 1
+    action_id: Identifier
+    campaign_id: Identifier
+    campaign_manifest_sha256: Sha256
+    scorer_action_id: Identifier
+    scorer_result_receipt_sha256: Sha256
+    scorer_result_semantic_sha256: Sha256
+    expected_run_manifest_sha256: Sha256
+    result: ExactBenchmarkScoreReportV1
+
+    @model_validator(mode="after")
+    def validate_aggregate_identity(self) -> CampaignAggregateReceiptV1:
+        if (
+            self.result.canonical_sha256() != self.scorer_result_semantic_sha256
+            or self.result.expected_run_manifest_sha256
+            != self.expected_run_manifest_sha256
+        ):
+            raise ValueError("campaign aggregate contradicts its scorer result")
+        return self
+
+
 class PhysicsBenchmarkCampaignStateV1(PhysicsCanonicalModel):
     """Journal-reconcilable campaign snapshot; completion is the final commit marker."""
 
     schema_version: Literal[1] = 1
     campaign_id: Identifier
     manifest_sha256: Sha256
+    repository_root: str
+    scorer_catalog_path: str
+    catalog_id: Literal["physics_benchmark_blind_authority_v1"]
+    catalog_sha256: Sha256
+    expected_child_set_sha256: Sha256
+    scorer_authority_sha256: Sha256
     status: PhysicsBenchmarkCampaignStatusV1
     registered_child_run_ids: Annotated[
         tuple[Identifier, ...], BeforeValidator(_freeze_sequence)
@@ -168,6 +262,12 @@ class PhysicsBenchmarkCampaignStateV1(PhysicsCanonicalModel):
     reason_code: Identifier
     expected_run_manifest_path: str | None = None
     expected_run_manifest_sha256: Sha256 | None = None
+    scorer_action_id: Identifier | None = None
+    scorer_action_path: str | None = None
+    scorer_action_sha256: Sha256 | None = None
+    scorer_result_path: str | None = None
+    scorer_result_sha256: Sha256 | None = None
+    scorer_result_semantic_sha256: Sha256 | None = None
     aggregate_action_id: Identifier | None = None
     aggregate_result_path: str | None = None
     aggregate_result_sha256: Sha256 | None = None
@@ -209,34 +309,66 @@ class PhysicsBenchmarkCampaignStateV1(PhysicsCanonicalModel):
 
     @model_validator(mode="after")
     def validate_completion_shape(self) -> PhysicsBenchmarkCampaignStateV1:
-        aggregate = (
+        scorer_action = (
             self.expected_run_manifest_path,
             self.expected_run_manifest_sha256,
+            self.scorer_action_id,
+            self.scorer_action_path,
+            self.scorer_action_sha256,
+        )
+        scorer_result = (
+            self.scorer_result_path,
+            self.scorer_result_sha256,
+            self.scorer_result_semantic_sha256,
+        )
+        aggregate = (
             self.aggregate_action_id,
             self.aggregate_result_path,
             self.aggregate_result_sha256,
         )
-        final = (
+        action_tree = (
             self.action_tree_path,
             self.action_tree_sha256,
+        )
+        completion = (
             self.completion_receipt_path,
             self.completion_receipt_sha256,
         )
-        if any(value is not None for value in aggregate) and not all(
+        for label, values in (
+            ("scorer action", scorer_action),
+            ("scorer result", scorer_result),
+            ("aggregate", aggregate),
+            ("action tree", action_tree),
+            ("completion receipt", completion),
+        ):
+            if any(value is not None for value in values) and not all(
+                value is not None for value in values
+            ):
+                raise ValueError(f"campaign {label} identity must be atomic")
+        if all(value is not None for value in scorer_result) and not all(
+            value is not None for value in scorer_action
+        ):
+            raise ValueError("campaign scorer result lacks its action intent")
+        if all(value is not None for value in aggregate) and not all(
+            value is not None for value in scorer_result
+        ):
+            raise ValueError("campaign aggregate lacks its scorer result")
+        if all(value is not None for value in action_tree) and not all(
             value is not None for value in aggregate
         ):
-            raise ValueError("campaign aggregate identity must be atomic")
-        if any(value is not None for value in final) and not all(
-            value is not None for value in final
+            raise ValueError("campaign action tree lacks its aggregate")
+        if all(value is not None for value in completion) and not all(
+            value is not None for value in action_tree
         ):
-            raise ValueError("campaign final receipt identity must be atomic")
+            raise ValueError("campaign completion receipt lacks its action tree")
         if self.status == "completed" and not (
-            all(value is not None for value in aggregate)
-            and all(value is not None for value in final)
+            all(value is not None for value in scorer_action)
+            and all(value is not None for value in scorer_result)
+            and all(value is not None for value in aggregate)
+            and all(value is not None for value in action_tree)
+            and all(value is not None for value in completion)
         ):
             raise ValueError("completed campaign lacks its aggregate or completion receipts")
-        if self.status != "completed" and any(value is not None for value in final):
-            raise ValueError("non-completed campaign cannot claim final completion receipts")
         if self.status == "ready_to_aggregate" and self.blocking_child_run_id is not None:
             raise ValueError("aggregation-ready campaign cannot be blocked on a child")
         return self
