@@ -66,6 +66,10 @@ The [PA-5C2 exact scorer](docs/physics_benchmark_exact_scoring.md) independently
 re-verifies completed PA-2/PA-3 artifacts and requires the full expected run-identity
 set to equal the observed set before it computes separate semantic metrics. It does
 not add orchestration, launch a benchmark, or change PA-5C1 scientific authority.
+The thin [PA-5C3 benchmark campaign](docs/physics_benchmark_campaign.md) freezes the
+complete child set, creates ordinary PA-4 children, delegates interrupted-child
+recovery to PA-5A, and finalizes only an exact PA-5C2-verified aggregate. It has no
+direct PA-2, PA-3, or model-session surface and does not enable parallel scheduling.
 The qualification evidence is recorded in the [PA-4 validation
 report](docs/validation/physics_auditor_pa4.md).
 

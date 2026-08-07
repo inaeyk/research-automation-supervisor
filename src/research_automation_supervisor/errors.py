@@ -124,6 +124,22 @@ class PhysicsBenchmarkScoringIntegrityError(PhysicsBenchmarkScoringError):
     """A run identity, proof, report, source, or scorer authority was substituted."""
 
 
+class PhysicsBenchmarkCampaignError(SupervisorError):
+    """Base class for PA-5C3 campaign orchestration failures."""
+
+
+class PhysicsBenchmarkCampaignInputError(PhysicsBenchmarkCampaignError):
+    """A campaign manifest, child authority, or campaign path is invalid."""
+
+
+class PhysicsBenchmarkCampaignStateError(PhysicsBenchmarkCampaignError):
+    """Durable campaign state, action evidence, or child binding is inconsistent."""
+
+
+class PhysicsBenchmarkCampaignLockError(PhysicsBenchmarkCampaignError):
+    """A campaign cannot be locked safely for mutation."""
+
+
 class PhysicsOracleError(SupervisorError):
     """Base class for trusted, model-free physics-oracle execution errors."""
 
