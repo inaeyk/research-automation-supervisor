@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 
@@ -47,11 +48,24 @@ def _hostile_repository(root: Path, marker: Path) -> Path:
         ("diff.hostile.textconv", f"sh -c 'touch {marker}; cat \"$1\"' --"),
         ("credential.helper", helper),
         ("alias.hostile", f"!sh -c 'touch {marker}'"),
+        ("protocol.ext.allow", "always"),
     )
     git(repository, "add", ".gitattributes", ".hostile-hooks/post-checkout")
     git(repository, "commit", "-q", "-m", "hostile repository controls")
     for key, value in configs:
         git(repository, "config", key, value)
+    included = root / "hostile-included.gitconfig"
+    included.write_text(
+        f"[credential]\n\thelper = !touch {marker}\n[core]\n\tfsmonitor = !touch {marker}\n",
+        encoding="utf-8",
+    )
+    git(repository, "config", "include.path", str(included))
+    git(
+        repository,
+        "config",
+        f"includeIf.gitdir:{repository}/.path",
+        str(included),
+    )
     return repository
 
 
@@ -71,7 +85,7 @@ def _intent(root: Path, repository: Path):  # type: ignore[no-untyped-def]
     )
     authority = root / "authority"
     reference = freeze_launch_intent(request, authority)
-    return authority, load_launch_intent(authority, reference.launch_token)
+    return authority, load_launch_intent(authority, reference.launch_intent_id)
 
 
 def test_hostile_repository_programs_never_execute_before_bubblewrap(tmp_path: Path) -> None:
@@ -83,6 +97,10 @@ def test_hostile_repository_programs_never_execute_before_bubblewrap(tmp_path: P
     prepared, receipt = prepare_repository(intent, preparation_root=tmp_path / "preparation")
     assert Path(prepared.prepared_workspace).is_dir()
     assert not marker.exists()
+    snapshot_config = (Path(prepared.prepared_workspace) / ".git/config").read_text()
+    assert "include" not in snapshot_config
+    assert "filter" not in snapshot_config
+    assert "remote" not in snapshot_config
     assert receipt.checkout_outside_isolation is False
     assert receipt.allowed_clone_protocol == "existing_folder"
     pre_isolation = [
@@ -193,3 +211,80 @@ def test_sterile_environment_ignores_host_global_git_configuration(
     assert requested.requested_commit == git(repository, "rev-parse", "HEAD")
     assert not marker.exists()
     assert os.environ["HOME"] == str(home)
+
+
+def test_repository_path_replacement_between_preview_and_start_fails_closed(
+    tmp_path: Path,
+) -> None:
+    repository = create_repository(tmp_path)
+    requested = inspect_requested_repository(
+        "existing_folder", str(repository), sterile_root=tmp_path / "sterile"
+    )
+    moved = tmp_path / "original-moved"
+    repository.rename(moved)
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    replacement = create_repository(replacement_root)
+    replacement.rename(repository)
+    request = CampaignLaunchRequestV1(
+        preview_id="preview-" + "f" * 24,
+        client_start_key_sha256="e" * 64,
+        human_name="Path replacement",
+        repository=requested,
+        research_contract=FrozenInputFileV1.from_bytes("contract.md", b"contract\n"),
+        research_plan=FrozenInputFileV1.from_bytes("plan.md", b"plan\n"),
+        initial_task=FrozenInputFileV1.from_bytes("task.md", b"task\n"),
+        requested_settings=CampaignProfileSettingsV1(),
+    )
+    with pytest.raises(QualifiedCampaignInputError, match="replaced after preview"):
+        freeze_launch_intent(request, tmp_path / "authority")
+
+
+def test_repository_path_swap_during_descriptor_import_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = create_repository(tmp_path)
+    _, intent = _intent(tmp_path, repository)
+    import research_automation_supervisor.safe_git as safe_git_module
+
+    original_run = safe_git_module._run_isolated
+    swapped = False
+
+    def swapping_run(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            moved = tmp_path / "swapped-original"
+            repository.rename(moved)
+            replacement_root = tmp_path / "swap-replacement"
+            replacement_root.mkdir()
+            create_repository(replacement_root).rename(repository)
+        original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(safe_git_module, "_run_isolated", swapping_run)
+    with pytest.raises(QualifiedCampaignInputError, match="changed during"):
+        prepare_repository(intent, preparation_root=tmp_path / "second-preparation")
+
+
+def test_production_git_invocations_are_mechanically_confined_to_safe_git() -> None:
+    production = (
+        Path("src/research_automation_supervisor/custodian.py"),
+        Path("src/research_automation_supervisor/custodian_bootstrap.py"),
+        Path("src/research_automation_supervisor/core_authority_service.py"),
+        Path("src/research_automation_supervisor/custodian_models.py"),
+        Path("src/research_automation_supervisor/prelaunch_authority.py"),
+        Path("src/research_automation_supervisor/qualified_campaign.py"),
+        Path("src/research_automation_supervisor/qualified_runner.py"),
+    )
+    for path in production:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        string_literals = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        assert "/usr/bin/git" not in string_literals, path
+        assert "git" not in string_literals, path
+    bootstrap = Path("scripts/custodian-bootstrap.sh").read_text(encoding="utf-8")
+    assert "git -C" not in bootstrap

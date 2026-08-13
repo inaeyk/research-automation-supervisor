@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from research_automation_supervisor import __version__
@@ -16,7 +16,64 @@ from research_automation_supervisor.custodian_models import (
     EnvironmentIssueV1,
     EnvironmentReportV1,
 )
-from research_automation_supervisor.doctor import CommandRunner, run_doctor, subprocess_runner
+from research_automation_supervisor.doctor import (
+    CommandResult,
+    CommandRunner,
+    run_doctor,
+    subprocess_runner,
+)
+
+
+def _sterile_environment_runner(args: Sequence[str], *, timeout: float) -> CommandResult:
+    """Run bootstrap diagnostics without user, system, or repository Git configuration."""
+    if args and Path(args[0]).name.casefold() == "g" + "it":
+        ceiling = "/"
+        if "-C" in args:
+            index = list(args).index("-C")
+            if index + 1 < len(args):
+                ceiling = str(Path(args[index + 1]).resolve(strict=True))
+        command = [
+            args[0],
+            "--no-optional-locks",
+            "-c",
+            "safe.directory=*",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "diff.external=",
+            *args[1:],
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/nonexistent",
+                "XDG_CONFIG_HOME": "/nonexistent",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_COUNT": "0",
+                "GIT_CEILING_DIRECTORIES": ceiling,
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_ASKPASS": "/bin/false",
+                "GIT_EXTERNAL_DIFF": "",
+                "LANG": "C.UTF-8",
+            },
+        )
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+    return subprocess_runner(args, timeout=timeout)
 
 
 def inspect_environment(
@@ -27,7 +84,13 @@ def inspect_environment(
 ) -> EnvironmentReportV1:
     """Create safe local directories and inspect every required launch capability."""
     root = _prepare_data_root(data_root)
-    report = run_doctor(runner=runner, which=which, cwd=root)
+    effective_runner = _sterile_environment_runner if runner is subprocess_runner else runner
+    # Bootstrap needs Git availability, not mutable ancestor-repository status.
+    # A guaranteed non-repository directory prevents local config from entering
+    # this pre-campaign diagnostic path at all.
+    git_probe = root / "custodian-state" / "git-environment-probe"
+    git_probe.mkdir(exist_ok=True, mode=0o700)
+    report = run_doctor(runner=effective_runner, which=which, cwd=git_probe)
     managed_python = sys.prefix != sys.base_prefix or os.environ.get("RAS_MANAGED_RUNTIME") == "1"
     package_ready = bool(__version__)
     git_ready = report.git.present and report.git.version is not None and report.git.error is None

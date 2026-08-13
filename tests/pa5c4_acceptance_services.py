@@ -8,6 +8,13 @@ import os
 import zipfile
 from pathlib import Path
 
+from research_automation_supervisor.core_authority_models import (
+    CampaignLaunchReferenceV1,
+    CampaignLaunchRequestV1,
+    CampaignLaunchSummaryV1,
+    QualifiedLaunchMaterialV1,
+    RequestedRepositoryAuthorityV1,
+)
 from research_automation_supervisor.custodian import SubprocessQualifiedRunner
 from research_automation_supervisor.custodian_exchange import (
     load_human_action_request,
@@ -27,10 +34,13 @@ from research_automation_supervisor.custodian_models import (
 )
 from research_automation_supervisor.durable_state import atomic_write_json
 from research_automation_supervisor.prelaunch_authority import (
-    load_launch_intent,
-    seal_frozen_campaign_input,
+    consume_start_intent_for_qualified_launch,
+    create_start_intent,
+    get_start_intent,
+    list_operator_campaigns,
+    verify_start_intent,
 )
-from research_automation_supervisor.safe_git import prepare_repository
+from research_automation_supervisor.safe_git import inspect_requested_repository
 
 
 class DeterministicEnvironment:
@@ -90,47 +100,93 @@ class DeterministicEnvironment:
 class DeterministicCampaignRunner(SubprocessQualifiedRunner):
     """Persistent fake PA-4/5A/5C3 service behind production Custodian ingress."""
 
+    def configure_core_storage(self, root: Path) -> None:
+        self.core_root = root / "authority"
+        self.snapshot_root = root / "snapshots"
+
+    def inspect_repository(
+        self, source_kind: str, locator: str
+    ) -> RequestedRepositoryAuthorityV1:
+        return inspect_requested_repository(  # type: ignore[arg-type]
+            source_kind,
+            locator,
+            sterile_root=self.snapshot_root / "preview-sterile",
+        )
+
+    def create_start_intent(
+        self, request: CampaignLaunchRequestV1
+    ) -> CampaignLaunchReferenceV1:
+        return create_start_intent(request, self.core_root, self.snapshot_root)
+
+    def get_start_intent(self, launch_intent_id: str) -> CampaignLaunchSummaryV1:
+        return get_start_intent(self.core_root, launch_intent_id)
+
+    def list_operator_campaigns(self) -> tuple[CampaignLaunchSummaryV1, ...]:
+        return list_operator_campaigns(self.core_root)
+
+    def verify_start_intent(
+        self,
+        launch_intent_id: str,
+        *,
+        expected_campaign_public_id: str,
+        expected_intent_sha256: str | None = None,
+        expected_bundle_sha256: str | None = None,
+    ) -> CampaignLaunchSummaryV1:
+        return verify_start_intent(
+            self.core_root,
+            launch_intent_id,
+            expected_campaign_public_id=expected_campaign_public_id,
+            expected_intent_sha256=expected_intent_sha256,
+            expected_bundle_sha256=expected_bundle_sha256,
+        )
+
+    def consume_start_intent_for_qualified_launch(
+        self, launch_intent_id: str, *, expected_campaign_public_id: str
+    ) -> QualifiedLaunchMaterialV1:
+        return consume_start_intent_for_qualified_launch(
+            self.core_root,
+            launch_intent_id,
+            expected_campaign_public_id=expected_campaign_public_id,
+        )
+
     def launch_start(
         self,
-        launch_token: str,
-        launch_authority_root: Path,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         log: Path,
     ) -> int:
         del exchange, log
-        intent = load_launch_intent(
-            launch_authority_root,
-            launch_token,
-            expected_campaign_public_id=authority.name,
+        material = self.consume_start_intent_for_qualified_launch(
+            launch_intent_id,
+            expected_campaign_public_id=campaign_public_id,
         )
-        repository, receipt = prepare_repository(
-            intent,
-            preparation_root=launch_authority_root.parent / "repository-preparation",
-        )
-        frozen = seal_frozen_campaign_input(
-            launch_authority_root,
-            intent,
-            repository,
-            receipt.receipt_sha256,
-        )
+        bundle = material.input_bundle
         authority.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._write_state(
             authority,
             {
                 "phase": "recoverable_interruption",
-                "campaign_public_id": intent.campaign_public_id,
-                "human_name": intent.human_name,
-                "repository": intent.repository.source_display,
-                "bundle_sha256": frozen.input_bundle.bundle_sha256,
-                "launch_intent_sha256": intent.intent_sha256,
-                "prepared_workspace": repository.prepared_workspace,
+                "campaign_public_id": material.campaign_public_id,
+                "human_name": bundle.human_name,
+                "repository": bundle.repository.source_display,
+                "bundle_sha256": bundle.bundle_sha256,
+                "launch_intent_sha256": material.launch_intent_sha256,
+                "prepared_workspace": bundle.repository.prepared_workspace,
             },
         )
         return os.getpid()
 
-    def launch_resume(self, authority: Path, exchange: Path, log: Path) -> int:
-        del log
+    def launch_resume(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        log: Path,
+    ) -> int:
+        del launch_intent_id, campaign_public_id, log
         state = self._state(authority)
         if state["phase"] == "recoverable_interruption":
             campaign = str(state["campaign_public_id"])
@@ -177,12 +233,14 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
 
     def launch_response(
         self,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         request_sha256: str,
         log: Path,
     ) -> int:
-        del log
+        del launch_intent_id, campaign_public_id, log
         state = self._state(authority)
         campaign = str(state["campaign_public_id"])
         paths = prepare_operator_exchange(exchange, campaign)
@@ -200,8 +258,14 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
         self._write_state(authority, state)
         return os.getpid()
 
-    def status(self, authority: Path, exchange: Path) -> OperatorCampaignProjectionV1:
-        del exchange
+    def status(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> OperatorCampaignProjectionV1:
+        del launch_intent_id, campaign_public_id, exchange
         state = self._state(authority)
         common: dict[str, object] = {
             "campaign_public_id": state["campaign_public_id"],
@@ -261,8 +325,15 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
             }
         )
 
-    def artifact(self, authority: Path, exchange: Path, token: str) -> tuple[str, bytes]:
-        del exchange
+    def artifact(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        token: str,
+    ) -> tuple[str, bytes]:
+        del launch_intent_id, campaign_public_id, exchange
         state = self._state(authority)
         intent = str(state["launch_intent_sha256"])
         if token == self._token(intent, "evidence"):
@@ -274,8 +345,15 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
             )
         raise RuntimeError("qualification artifact is not allowlisted")
 
-    def export(self, authority: Path, exchange: Path, destination: Path) -> Path:
-        del exchange
+    def export(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        destination: Path,
+    ) -> Path:
+        del launch_intent_id, campaign_public_id, exchange
         if self._state(authority)["phase"] != "completed":
             raise RuntimeError("qualification campaign is not complete")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -283,8 +361,14 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
             archive.writestr("final-report.md", "# Final report\n\nVerified completion.\n")
         return destination
 
-    def repository(self, authority: Path, exchange: Path) -> Path:
-        del exchange
+    def repository(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> Path:
+        del launch_intent_id, campaign_public_id, exchange
         return Path(str(self._state(authority)["prepared_workspace"]))
 
     @staticmethod

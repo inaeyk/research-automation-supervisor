@@ -14,13 +14,13 @@ import re
 import shutil
 import stat
 import subprocess
-import tempfile
 import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from research_automation_supervisor.core_authority_client import CoreAuthorityClient
 from research_automation_supervisor.custodian_errors import (
     QualifiedCampaignInputError,
     QualifiedCampaignStateError,
@@ -49,11 +49,6 @@ from research_automation_supervisor.errors import (
     ReplayCampaignError,
     WorkflowError,
 )
-from research_automation_supervisor.prelaunch_authority import (
-    load_frozen_campaign_input,
-    load_launch_intent,
-    seal_frozen_campaign_input,
-)
 from research_automation_supervisor.replay_campaign_engine import (
     ReplayCampaignServices,
     replay_campaign_status,
@@ -61,7 +56,7 @@ from research_automation_supervisor.replay_campaign_engine import (
     run_replay_campaign,
 )
 from research_automation_supervisor.replay_campaign_models import ReplayCampaignState
-from research_automation_supervisor.safe_git import prepare_repository
+from research_automation_supervisor.safe_git import safe_git_archive_sha256, safe_git_text
 from research_automation_supervisor.workflow_engine import substage_status
 from research_automation_supervisor.workflow_integrity import sha256_regular_file
 from research_automation_supervisor.workflow_recovery import (
@@ -77,42 +72,23 @@ MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 
 
 def start_qualified_launch(
-    launch_token: str,
-    launch_authority_root: Path,
+    launch_intent_id: str,
+    core: CoreAuthorityClient,
     *,
+    expected_campaign_public_id: str,
     authority_directory: Path,
     exchange_root: Path,
 ) -> OperatorCampaignProjectionV1:
-    """Reload core-frozen Start authority, prepare Git safely, then enter PA-5C3."""
-    intent = load_launch_intent(launch_authority_root, launch_token)
-    expected_authority = authority_directory.parent / intent.campaign_public_id
+    """Consume only core-frozen launch material, then enter unchanged PA-5C3."""
+    material = core.consume_start_intent_for_qualified_launch(
+        launch_intent_id,
+        expected_campaign_public_id=expected_campaign_public_id,
+    )
+    expected_authority = authority_directory.parent / material.campaign_public_id
     if authority_directory != expected_authority:
         raise QualifiedCampaignInputError("qualified campaign authority belongs elsewhere")
-    frozen = load_frozen_campaign_input(launch_authority_root, intent)
-    if frozen is None:
-        preparation_root = launch_authority_root.parent / "repository-preparation"
-        repository, receipt = prepare_repository(intent, preparation_root=preparation_root)
-        frozen = seal_frozen_campaign_input(
-            launch_authority_root,
-            intent,
-            repository,
-            receipt.receipt_sha256,
-        )
-    frozen_path = launch_authority_root / "frozen-inputs" / f"{intent.intent_sha256}.json"
-    # start_qualified_campaign accepts the historical bundle shape, so pass its
-    # exact nested bundle through a core-owned immutable staging file.
-    bundle_path = launch_authority_root / "bundles" / f"{intent.intent_sha256}.json"
-    if not bundle_path.exists():
-        bundle_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _write_once(bundle_path, render_json_bytes(frozen.input_bundle.model_dump(mode="json")))
-    else:
-        observed = load_campaign_input_bundle(bundle_path)
-        if observed != frozen.input_bundle:
-            raise QualifiedCampaignInputError("core frozen campaign bundle was replaced")
-    if not frozen_path.is_file():
-        raise QualifiedCampaignInputError("frozen campaign input is unavailable")
-    return start_qualified_campaign(
-        bundle_path,
+    return _start_qualified_bundle(
+        material.input_bundle,
         authority_directory=authority_directory,
         exchange_root=exchange_root,
     )
@@ -148,16 +124,21 @@ class QualifiedCampaignLocatorV1(BaseModel):
     prepared_workspace: str
 
 
-def start_qualified_campaign(
-    bundle_path: Path,
+def _start_qualified_bundle(
+    bundle: CampaignInputBundleV1,
     *,
     authority_directory: Path,
     exchange_root: Path,
 ) -> OperatorCampaignProjectionV1:
-    """Freeze core inputs and synchronously invoke the qualified visible campaign."""
-    bundle = load_campaign_input_bundle(bundle_path)
+    """Internal bundle ingress; the installed runner never exposes a pathname."""
     authority = _authority_path(authority_directory)
     if authority.exists():
+        existing = load_campaign_input_bundle(authority / BUNDLE_FILE)
+        if (
+            existing.campaign_public_id != bundle.campaign_public_id
+            or existing.bundle_sha256 != bundle.bundle_sha256
+        ):
+            raise QualifiedCampaignInputError("existing campaign Start binding was substituted")
         return qualified_campaign_status(
             authority_directory=authority,
             exchange_root=exchange_root,
@@ -198,6 +179,22 @@ def start_qualified_campaign(
         if isinstance(exc, (ReplayCampaignError, WorkflowError)):
             raise QualifiedCampaignStateError(str(exc)) from exc
         raise
+
+
+def verify_qualified_campaign_binding(
+    authority_directory: Path,
+    *,
+    expected_campaign_public_id: str,
+    expected_bundle_sha256: str,
+) -> None:
+    """Bind every later operation back to the core-owned immutable Start."""
+    authority = _existing_authority_path(authority_directory)
+    bundle = load_campaign_input_bundle(authority / BUNDLE_FILE)
+    if (
+        bundle.campaign_public_id != expected_campaign_public_id
+        or bundle.bundle_sha256 != expected_bundle_sha256
+    ):
+        raise QualifiedCampaignInputError("qualified campaign Start binding was substituted")
 
 
 def qualified_campaign_status(
@@ -1078,54 +1075,11 @@ def _load_locator(authority: Path, bundle: CampaignInputBundleV1) -> QualifiedCa
 
 
 def _git(workspace: Path, *arguments: str) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(workspace), *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise QualifiedCampaignInputError("prepared repository could not be verified") from exc
-    if completed.returncode != 0:
-        raise QualifiedCampaignInputError("prepared repository could not be verified")
-    return completed.stdout.strip()
+    return safe_git_text(workspace, *arguments)
 
 
 def _git_archive_sha256(workspace: Path, authority: Path) -> str:
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=authority, prefix=".baseline-", delete=False
-        ) as handle:
-            temporary = Path(handle.name)
-        completed = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(workspace),
-                "archive",
-                "--format=tar",
-                f"--output={temporary}",
-                "HEAD",
-            ],
-            check=False,
-            capture_output=True,
-            timeout=120,
-        )
-        if completed.returncode != 0:
-            raise OSError
-        digest = sha256_regular_file(temporary)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise QualifiedCampaignInputError(
-            "repository baseline archive could not be verified"
-        ) from exc
-    finally:
-        if "temporary" in locals():
-            temporary.unlink(missing_ok=True)
-    return digest
+    return safe_git_archive_sha256(workspace, authority)
 
 
 def _write_once(path: Path, content: bytes) -> None:

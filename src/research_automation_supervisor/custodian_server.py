@@ -25,6 +25,7 @@ from typing import ClassVar
 from pydantic import ValidationError
 
 from research_automation_supervisor import __version__
+from research_automation_supervisor.core_authority_client import DEFAULT_CORE_SOCKET
 from research_automation_supervisor.custodian import (
     CampaignCustodian,
     WizardSubmissionV1,
@@ -344,11 +345,12 @@ def serve(
     port: int = 8765,
     open_browser: bool = False,
     readiness_instance: str | None = None,
+    core_socket: Path = DEFAULT_CORE_SOCKET,
     custodian: CampaignCustodian | None = None,
 ) -> None:
     if host != "127.0.0.1":
         raise ValueError("Campaign Custodian may bind only to 127.0.0.1")
-    active_custodian = custodian or CampaignCustodian(data_root)
+    active_custodian = custodian or CampaignCustodian(data_root, core_socket=core_socket)
     session_secret = secrets.token_urlsafe(32)
     server = CustodianHTTPServer(
         (host, port),
@@ -391,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open-browser", action="store_true")
     parser.add_argument("--readiness-instance")
+    parser.add_argument("--core-socket", type=Path, default=DEFAULT_CORE_SOCKET)
     args = parser.parse_args(argv)
     log_root = args.data_dir / "custodian-state"
     log_root.mkdir(parents=True, exist_ok=True)
@@ -406,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             open_browser=args.open_browser,
             readiness_instance=args.readiness_instance,
+            core_socket=args.core_socket,
         )
     except OSError:
         return 2

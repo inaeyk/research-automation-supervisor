@@ -3,18 +3,26 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from research_automation_supervisor.core_authority_models import (
+    CampaignLaunchReferenceV1,
+    CampaignLaunchRequestV1,
+    CampaignLaunchSummaryV1,
+    QualifiedLaunchMaterialV1,
+    RequestedRepositoryAuthorityV1,
+)
 from research_automation_supervisor.custodian_models import (
     CampaignResultSummaryV1,
     EnvironmentReportV1,
     OperatorCampaignProjectionV1,
 )
 from research_automation_supervisor.prelaunch_authority import (
-    CampaignLaunchReferenceV1,
-    CampaignLaunchRequestV1,
-    CampaignLaunchSummaryV1,
-    freeze_launch_intent,
-    load_launch_summary,
+    consume_start_intent_for_qualified_launch,
+    create_start_intent,
+    get_start_intent,
+    list_operator_campaigns,
+    verify_start_intent,
 )
+from research_automation_supervisor.safe_git import inspect_requested_repository
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -109,43 +117,89 @@ class FakeQualifiedRunner:
         self.resumed = 0
         self.responded = 0
         self.authenticated = 0
+        self.core_root: Path | None = None
+        self.snapshot_root: Path | None = None
 
-    def freeze_launch(
-        self, request: CampaignLaunchRequestV1, launch_authority_root: Path
-    ) -> CampaignLaunchReferenceV1:
-        return freeze_launch_intent(request, launch_authority_root)
+    def configure_core_storage(self, root: Path) -> None:
+        self.core_root = root / "authority"
+        self.snapshot_root = root / "snapshots"
 
-    def launch_summary(
+    def inspect_repository(
         self,
-        launch_token: str,
-        launch_authority_root: Path,
-        campaign_public_id: str,
-        launch_intent_sha256: str,
+        source_kind: str,
+        locator: str,
+    ) -> RequestedRepositoryAuthorityV1:
+        assert self.snapshot_root is not None
+        assert source_kind in {"existing_folder", "git_url"}
+        return inspect_requested_repository(  # type: ignore[arg-type]
+            source_kind,
+            locator,
+            sterile_root=self.snapshot_root / "preview-sterile",
+        )
+
+    def create_start_intent(self, request: CampaignLaunchRequestV1) -> CampaignLaunchReferenceV1:
+        assert self.core_root is not None and self.snapshot_root is not None
+        return create_start_intent(request, self.core_root, self.snapshot_root)
+
+    def get_start_intent(self, launch_intent_id: str) -> CampaignLaunchSummaryV1:
+        assert self.core_root is not None
+        return get_start_intent(self.core_root, launch_intent_id)
+
+    def list_operator_campaigns(self) -> tuple[CampaignLaunchSummaryV1, ...]:
+        assert self.core_root is not None
+        return list_operator_campaigns(self.core_root)
+
+    def verify_start_intent(
+        self,
+        launch_intent_id: str,
+        *,
+        expected_campaign_public_id: str,
+        expected_intent_sha256: str | None = None,
+        expected_bundle_sha256: str | None = None,
     ) -> CampaignLaunchSummaryV1:
-        return load_launch_summary(
-            launch_authority_root,
-            launch_token,
-            expected_campaign_public_id=campaign_public_id,
-            expected_intent_sha256=launch_intent_sha256,
+        assert self.core_root is not None
+        return verify_start_intent(
+            self.core_root,
+            launch_intent_id,
+            expected_campaign_public_id=expected_campaign_public_id,
+            expected_intent_sha256=expected_intent_sha256,
+            expected_bundle_sha256=expected_bundle_sha256,
+        )
+
+    def consume_start_intent_for_qualified_launch(
+        self, launch_intent_id: str, *, expected_campaign_public_id: str
+    ) -> QualifiedLaunchMaterialV1:
+        assert self.core_root is not None
+        return consume_start_intent_for_qualified_launch(
+            self.core_root,
+            launch_intent_id,
+            expected_campaign_public_id=expected_campaign_public_id,
         )
 
     def launch_start(
         self,
-        launch_token: str,
-        launch_authority_root: Path,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         log: Path,
     ) -> int:
-        del launch_token, launch_authority_root, exchange, log
+        del launch_intent_id, campaign_public_id, exchange, log
         self.started += 1
         authority.mkdir(parents=True, exist_ok=True)
         campaign_id = authority.name
         self.current = projection(campaign_id)
         return 910_001
 
-    def launch_resume(self, authority: Path, exchange: Path, log: Path) -> int:
-        del authority, exchange, log
+    def launch_resume(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        log: Path,
+    ) -> int:
+        del launch_intent_id, campaign_public_id, authority, exchange, log
         self.resumed += 1
         if self.current is not None:
             self.current = projection(self.current.campaign_public_id)
@@ -153,33 +207,61 @@ class FakeQualifiedRunner:
 
     def launch_response(
         self,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         request_sha256: str,
         log: Path,
     ) -> int:
-        del authority, exchange, request_sha256, log
+        del launch_intent_id, campaign_public_id, authority, exchange, request_sha256, log
         self.responded += 1
         assert self.current is not None
         self.current = projection(self.current.campaign_public_id, status="completed")
         return 910_003
 
-    def status(self, authority: Path, exchange: Path) -> OperatorCampaignProjectionV1:
-        del authority, exchange
+    def status(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> OperatorCampaignProjectionV1:
+        del launch_intent_id, campaign_public_id, authority, exchange
         assert self.current is not None
         return self.current
 
-    def artifact(self, authority: Path, exchange: Path, token: str) -> tuple[str, bytes]:
-        del authority, exchange, token
+    def artifact(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        token: str,
+    ) -> tuple[str, bytes]:
+        del launch_intent_id, campaign_public_id, authority, exchange, token
         return "text/plain; charset=utf-8", b"verified report\n"
 
-    def export(self, authority: Path, exchange: Path, destination: Path) -> Path:
-        del authority, exchange
+    def export(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        destination: Path,
+    ) -> Path:
+        del launch_intent_id, campaign_public_id, authority, exchange
         destination.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
         return destination
 
-    def repository(self, authority: Path, exchange: Path) -> Path:
-        del exchange
+    def repository(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> Path:
+        del launch_intent_id, campaign_public_id, exchange
         return authority.parent / "repository"
 
     def launch_authentication(self, log: Path) -> int:

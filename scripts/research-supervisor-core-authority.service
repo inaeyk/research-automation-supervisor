@@ -1,0 +1,34 @@
+[Unit]
+Description=Research Supervisor Core Authority Service
+After=local-fs.target
+
+[Service]
+Type=simple
+User=research-supervisor-core
+Group=research-supervisor-custodian
+EnvironmentFile=/etc/research-supervisor-core/service.env
+ExecStart=/opt/research-supervisor-core/venv/bin/research-supervisor-core-authority --socket /run/research-supervisor-core/authority.sock --authority-root /var/lib/research-supervisor-core/authority --snapshot-root /var/lib/research-supervisor-core/snapshots --operator-uid $OPERATOR_UID --socket-group research-supervisor-custodian
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/research-supervisor-core /run/research-supervisor-core
+RuntimeDirectory=research-supervisor-core
+RuntimeDirectoryMode=0750
+StateDirectory=research-supervisor-core
+StateDirectoryMode=0711
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

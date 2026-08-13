@@ -5,16 +5,16 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TextIO
 
-from research_automation_supervisor.errors import SupervisorError
-from research_automation_supervisor.prelaunch_authority import (
-    CampaignLaunchRequestV1,
-    freeze_launch_intent,
-    load_launch_summary,
+from research_automation_supervisor.core_authority_client import (
+    DEFAULT_CORE_SOCKET,
+    UnixCoreAuthorityClient,
 )
+from research_automation_supervisor.errors import SupervisorError
 from research_automation_supervisor.qualified_campaign import (
     apply_qualified_human_response,
     export_qualified_campaign_bundle,
@@ -23,12 +23,13 @@ from research_automation_supervisor.qualified_campaign import (
     read_qualified_safe_artifact,
     resume_qualified_campaign,
     run_qualified_authentication,
-    start_qualified_campaign,
     start_qualified_launch,
+    verify_qualified_campaign_binding,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
+    _seal_production_git_environment()
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "operation",
@@ -41,67 +42,47 @@ def main(argv: list[str] | None = None) -> int:
             "export",
             "repository",
             "authenticate",
-            "freeze",
-            "launch-summary",
         ),
     )
     parser.add_argument("--authority", type=Path)
     parser.add_argument("--exchange", type=Path)
-    parser.add_argument("--bundle", type=Path)
-    parser.add_argument("--launch-token")
-    parser.add_argument("--launch-authority-root", type=Path)
-    parser.add_argument("--request-json")
+    parser.add_argument("--launch-intent")
+    parser.add_argument("--core-socket", type=Path, default=DEFAULT_CORE_SOCKET)
     parser.add_argument("--expected-campaign")
-    parser.add_argument("--expected-intent")
     parser.add_argument("--request")
     parser.add_argument("--token")
     parser.add_argument("--destination", type=Path)
     try:
         args = parser.parse_args(argv)
-        if args.operation == "freeze":
-            if args.launch_authority_root is None or args.request_json is None:
-                parser.error("freeze requires launch authority and request")
-            request = CampaignLaunchRequestV1.model_validate_json(args.request_json)
-            reference = freeze_launch_intent(request, args.launch_authority_root)
-            _print_json(reference.model_dump(mode="json"))
-            return 0
-        if args.operation == "launch-summary":
-            if (
-                args.launch_authority_root is None
-                or args.launch_token is None
-                or args.expected_campaign is None
-                or args.expected_intent is None
-            ):
-                parser.error("launch-summary requires exact launch binding")
-            summary = load_launch_summary(
-                args.launch_authority_root,
-                args.launch_token,
-                expected_campaign_public_id=args.expected_campaign,
-                expected_intent_sha256=args.expected_intent,
-            )
-            _print_json(summary.model_dump(mode="json"))
-            return 0
         if args.operation == "authenticate":
             run_qualified_authentication()
             _print_json({"authenticated": True})
             return 0
         if args.authority is None or args.exchange is None:
             parser.error("campaign operations require --authority and --exchange")
+        if args.launch_intent is None or args.expected_campaign is None:
+            parser.error("campaign operations require one exact core launch intent")
+        core = UnixCoreAuthorityClient(args.core_socket)
         common = {"authority_directory": args.authority, "exchange_root": args.exchange}
         if args.operation == "start":
-            if args.launch_token is not None and args.launch_authority_root is not None:
-                result = start_qualified_launch(
-                    args.launch_token,
-                    args.launch_authority_root,
-                    **common,
-                )
-            elif args.bundle is not None:
-                # Retained only for the existing qualified-core regression surface.
-                result = start_qualified_campaign(args.bundle, **common)
-            else:
-                parser.error("start requires core launch authority")
+            result = start_qualified_launch(
+                args.launch_intent,
+                core,
+                expected_campaign_public_id=args.expected_campaign,
+                **common,
+            )
             _print_json(result.model_dump(mode="json"))
-        elif args.operation == "status":
+        else:
+            summary = core.verify_start_intent(
+                args.launch_intent,
+                expected_campaign_public_id=args.expected_campaign,
+            )
+            verify_qualified_campaign_binding(
+                args.authority,
+                expected_campaign_public_id=args.expected_campaign,
+                expected_bundle_sha256=summary.input_bundle_sha256,
+            )
+        if args.operation == "status":
             result = qualified_campaign_status(**common)
             _print_json(result.model_dump(mode="json"))
         elif args.operation == "resume":
@@ -127,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("export requires --destination")
             exported = export_qualified_campaign_bundle(destination=args.destination, **common)
             _print_json({"path": str(exported)})
-        else:
+        elif args.operation == "repository":
             repository_path = qualified_campaign_repository(**common)
             _print_json({"path": str(repository_path)})
     except SupervisorError as exc:
@@ -153,6 +134,48 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 4
     return 0
+
+
+def _seal_production_git_environment() -> None:
+    """Seal every legacy Git subprocess reachable from the installed runner."""
+    preserved = {key: os.environ[key] for key in ("CODEX_HOME",) if key in os.environ}
+    os.environ.clear()
+    os.environ.update(
+        {
+            **preserved,
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "XDG_CONFIG_HOME": "/nonexistent",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/bin/false",
+            "SSH_ASKPASS": "/bin/false",
+            "GIT_EXTERNAL_DIFF": "",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "LANG": "C.UTF-8",
+        }
+    )
+    sealed = (
+        ("safe.directory", "*"),
+        ("core.hooksPath", "/dev/null"),
+        ("core.fsmonitor", "false"),
+        ("core.attributesFile", "/dev/null"),
+        ("core.sshCommand", "/bin/false"),
+        ("credential.helper", ""),
+        ("diff.external", ""),
+        ("fetch.recurseSubmodules", "false"),
+        ("submodule.recurse", "false"),
+        ("protocol.ext.allow", "never"),
+        ("protocol.file.allow", "never"),
+        ("protocol.ssh.allow", "never"),
+        ("protocol.git.allow", "never"),
+    )
+    os.environ["GIT_CONFIG_COUNT"] = str(len(sealed))
+    for index, (key, value) in enumerate(sealed):
+        os.environ[f"GIT_CONFIG_KEY_{index}"] = key
+        os.environ[f"GIT_CONFIG_VALUE_{index}"] = value
 
 
 def _print_json(value: object, *, stream: TextIO = sys.stdout) -> None:

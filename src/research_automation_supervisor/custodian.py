@@ -20,10 +20,20 @@ import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, cast
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
+from research_automation_supervisor.core_authority_client import (
+    DEFAULT_CORE_SOCKET,
+    CoreAuthorityClient,
+    UnixCoreAuthorityClient,
+)
+from research_automation_supervisor.core_authority_models import (
+    CampaignLaunchRequestV1,
+    CampaignLaunchSummaryV1,
+    RequestedRepositoryAuthorityV1,
+)
 from research_automation_supervisor.custodian_bootstrap import inspect_environment
 from research_automation_supervisor.custodian_errors import (
     CustodianEnvironmentError,
@@ -49,13 +59,6 @@ from research_automation_supervisor.custodian_models import (
     OperatorCampaignProjectionV1,
 )
 from research_automation_supervisor.durable_state import atomic_write_json, render_json_bytes
-from research_automation_supervisor.prelaunch_authority import (
-    CampaignLaunchReferenceV1,
-    CampaignLaunchRequestV1,
-    CampaignLaunchSummaryV1,
-    RequestedRepositoryAuthorityV1,
-)
-from research_automation_supervisor.safe_git import inspect_requested_repository
 
 MAX_WIZARD_BODY_BYTES = 64 * 1024 * 1024
 _START_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{15,79}$")
@@ -88,40 +91,63 @@ class PreviewDraftV1(BaseModel):
 class QualifiedRunner(Protocol):
     """Only campaign-affecting capabilities available to the Custodian."""
 
-    def freeze_launch(
-        self, request: CampaignLaunchRequestV1, launch_authority_root: Path
-    ) -> CampaignLaunchReferenceV1: ...
-
-    def launch_summary(
-        self,
-        launch_token: str,
-        launch_authority_root: Path,
-        campaign_public_id: str,
-        launch_intent_sha256: str,
-    ) -> CampaignLaunchSummaryV1: ...
-
     def launch_start(
         self,
-        launch_token: str,
-        launch_authority_root: Path,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         log: Path,
     ) -> int: ...
 
-    def launch_resume(self, authority: Path, exchange: Path, log: Path) -> int: ...
-
-    def launch_response(
-        self, authority: Path, exchange: Path, request_sha256: str, log: Path
+    def launch_resume(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        log: Path,
     ) -> int: ...
 
-    def status(self, authority: Path, exchange: Path) -> OperatorCampaignProjectionV1: ...
+    def launch_response(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        request_sha256: str,
+        log: Path,
+    ) -> int: ...
 
-    def artifact(self, authority: Path, exchange: Path, token: str) -> tuple[str, bytes]: ...
+    def status(
+        self, launch_intent_id: str, campaign_public_id: str, authority: Path, exchange: Path
+    ) -> OperatorCampaignProjectionV1: ...
 
-    def export(self, authority: Path, exchange: Path, destination: Path) -> Path: ...
+    def artifact(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        token: str,
+    ) -> tuple[str, bytes]: ...
 
-    def repository(self, authority: Path, exchange: Path) -> Path: ...
+    def export(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        destination: Path,
+    ) -> Path: ...
+
+    def repository(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> Path: ...
 
     def launch_authentication(self, log: Path) -> int: ...
 
@@ -129,54 +155,19 @@ class QualifiedRunner(Protocol):
 class SubprocessQualifiedRunner:
     """Invoke only the qualified runner module, never any model or workflow directly."""
 
-    def freeze_launch(
-        self, request: CampaignLaunchRequestV1, launch_authority_root: Path
-    ) -> CampaignLaunchReferenceV1:
-        value = self._run_prelaunch_json(
-            "freeze",
-            launch_authority_root,
-            ("--request-json", request.model_dump_json()),
-        )
-        try:
-            return CampaignLaunchReferenceV1.model_validate(value)
-        except ValidationError as exc:
-            raise CustodianStateError(
-                "Qualified Start authority returned an invalid reference."
-            ) from exc
-
-    def launch_summary(
+    def __init__(
         self,
-        launch_token: str,
-        launch_authority_root: Path,
-        campaign_public_id: str,
-        launch_intent_sha256: str,
-    ) -> CampaignLaunchSummaryV1:
-        value = self._run_prelaunch_json(
-            "launch-summary",
-            launch_authority_root,
-            (
-                "--launch-token",
-                launch_token,
-                "--expected-campaign",
-                campaign_public_id,
-                "--expected-intent",
-                launch_intent_sha256,
-            ),
-        )
-        try:
-            return CampaignLaunchSummaryV1.model_validate(value)
-        except ValidationError as exc:
-            raise CustodianStateError(
-                "Frozen core launch authority returned invalid status."
-            ) from exc
-
-    def __init__(self, executable: str | None = None) -> None:
+        executable: str | None = None,
+        *,
+        core_socket: Path = DEFAULT_CORE_SOCKET,
+    ) -> None:
         self.executable = executable or sys.executable
+        self.core_socket = core_socket
 
     def launch_start(
         self,
-        launch_token: str,
-        launch_authority_root: Path,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         log: Path,
@@ -187,18 +178,33 @@ class SubprocessQualifiedRunner:
             exchange,
             log,
             (
-                "--launch-token",
-                launch_token,
-                "--launch-authority-root",
-                str(launch_authority_root),
+                "--launch-intent",
+                launch_intent_id,
+                "--expected-campaign",
+                campaign_public_id,
             ),
         )
 
-    def launch_resume(self, authority: Path, exchange: Path, log: Path) -> int:
-        return self._launch("resume", authority, exchange, log, ())
+    def launch_resume(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        log: Path,
+    ) -> int:
+        return self._launch(
+            "resume",
+            authority,
+            exchange,
+            log,
+            ("--launch-intent", launch_intent_id, "--expected-campaign", campaign_public_id),
+        )
 
     def launch_response(
         self,
+        launch_intent_id: str,
+        campaign_public_id: str,
         authority: Path,
         exchange: Path,
         request_sha256: str,
@@ -209,11 +215,29 @@ class SubprocessQualifiedRunner:
             authority,
             exchange,
             log,
-            ("--request", request_sha256),
+            (
+                "--launch-intent",
+                launch_intent_id,
+                "--expected-campaign",
+                campaign_public_id,
+                "--request",
+                request_sha256,
+            ),
         )
 
-    def status(self, authority: Path, exchange: Path) -> OperatorCampaignProjectionV1:
-        value = self._run_json("status", authority, exchange, ())
+    def status(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> OperatorCampaignProjectionV1:
+        value = self._run_json(
+            "status",
+            authority,
+            exchange,
+            ("--launch-intent", launch_intent_id, "--expected-campaign", campaign_public_id),
+        )
         try:
             return OperatorCampaignProjectionV1.model_validate(value)
         except ValidationError as exc:
@@ -221,8 +245,27 @@ class SubprocessQualifiedRunner:
                 "Qualified status returned an invalid safe projection."
             ) from exc
 
-    def artifact(self, authority: Path, exchange: Path, token: str) -> tuple[str, bytes]:
-        value = self._run_json("artifact", authority, exchange, ("--token", token))
+    def artifact(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        token: str,
+    ) -> tuple[str, bytes]:
+        value = self._run_json(
+            "artifact",
+            authority,
+            exchange,
+            (
+                "--launch-intent",
+                launch_intent_id,
+                "--expected-campaign",
+                campaign_public_id,
+                "--token",
+                token,
+            ),
+        )
         media_type = value.get("media_type")
         content_base64 = value.get("content_base64")
         if not isinstance(media_type, str) or not isinstance(content_base64, str):
@@ -233,20 +276,45 @@ class SubprocessQualifiedRunner:
             raise CustodianStateError("Qualified result was invalid.") from exc
         return media_type, content
 
-    def export(self, authority: Path, exchange: Path, destination: Path) -> Path:
+    def export(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+        destination: Path,
+    ) -> Path:
         value = self._run_json(
             "export",
             authority,
             exchange,
-            ("--destination", str(destination)),
+            (
+                "--launch-intent",
+                launch_intent_id,
+                "--expected-campaign",
+                campaign_public_id,
+                "--destination",
+                str(destination),
+            ),
         )
         path = value.get("path")
         if not isinstance(path, str) or Path(path) != destination:
             raise CustodianStateError("Qualified export returned an invalid destination.")
         return destination
 
-    def repository(self, authority: Path, exchange: Path) -> Path:
-        value = self._run_json("repository", authority, exchange, ())
+    def repository(
+        self,
+        launch_intent_id: str,
+        campaign_public_id: str,
+        authority: Path,
+        exchange: Path,
+    ) -> Path:
+        value = self._run_json(
+            "repository",
+            authority,
+            exchange,
+            ("--launch-intent", launch_intent_id, "--expected-campaign", campaign_public_id),
+        )
         path = value.get("path")
         if not isinstance(path, str):
             raise CustodianStateError("Qualified repository path was unavailable.")
@@ -340,50 +408,6 @@ class SubprocessQualifiedRunner:
             raise CustodianStateError("Qualified campaign returned an invalid response.")
         return value
 
-    def _run_prelaunch_json(
-        self,
-        operation: str,
-        launch_authority_root: Path,
-        extra: Sequence[str],
-    ) -> dict[str, object]:
-        command = [
-            self.executable,
-            "-m",
-            "research_automation_supervisor.qualified_runner",
-            operation,
-            "--launch-authority-root",
-            str(launch_authority_root),
-            *extra,
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                env=_runner_environment(),
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise CustodianStateError(
-                "Qualified Start authority is temporarily unavailable."
-            ) from exc
-        stream = completed.stdout if completed.returncode == 0 else completed.stderr
-        try:
-            value = json.loads(stream)
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise CustodianStateError(
-                "Qualified Start authority is temporarily unavailable."
-            ) from exc
-        if completed.returncode != 0 or not isinstance(value, dict):
-            message = value.get("message") if isinstance(value, dict) else None
-            raise CustodianStateError(
-                message if isinstance(message, str) else "Qualified Start authority stopped safely."
-            )
-        return value
-
     def _command(
         self,
         operation: str,
@@ -400,6 +424,8 @@ class SubprocessQualifiedRunner:
             str(authority),
             "--exchange",
             str(exchange),
+            "--core-socket",
+            str(self.core_socket),
             *extra,
         ]
 
@@ -412,12 +438,22 @@ class CampaignCustodian:
         data_root: Path,
         *,
         runner: QualifiedRunner | None = None,
+        core: CoreAuthorityClient | None = None,
+        core_socket: Path = DEFAULT_CORE_SOCKET,
         environment_inspector: Callable[[Path], EnvironmentReportV1] = inspect_environment,
         token_factory: Callable[[], str] = lambda: secrets.token_hex(12),
         utc_now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.data_root = _safe_data_root(data_root)
-        self.runner = runner or SubprocessQualifiedRunner()
+        if core is not None:
+            self.core = core
+        elif runner is not None and callable(getattr(runner, "configure_core_storage", None)):
+            configure = cast(Callable[[Path], None], runner.configure_core_storage)  # type: ignore[attr-defined]
+            configure(self.data_root.parent / ".test-core-authority")
+            self.core = cast(CoreAuthorityClient, runner)
+        else:
+            self.core = UnixCoreAuthorityClient(core_socket)
+        self.runner = runner or SubprocessQualifiedRunner(core_socket=core_socket)
         self._start_lock = threading.Lock()
         self.environment_inspector = environment_inspector
         self.token_factory = token_factory
@@ -428,18 +464,7 @@ class CampaignCustodian:
         self.exports = _safe_child_directory(self.data_root, "exports")
         self.records = _safe_child_directory(self.custodian_state, "campaigns")
         self.previews = _safe_child_directory(self.custodian_state, "previews")
-        self.start_keys = _safe_child_directory(self.custodian_state, "start-keys")
-        self.preview_starts = _safe_child_directory(self.custodian_state, "preview-starts")
         self.runner_logs = _safe_child_directory(self.custodian_state, "runner-logs")
-        application_data = self.data_root.parent
-        self.launch_authority_root = _safe_external_core_root(
-            application_data / "research-automation-supervisor-core" / "prelaunch-authority",
-            self.data_root,
-        )
-        self.repository_preparation_root = _safe_external_core_root(
-            application_data / "research-automation-supervisor-core" / "repository-preparation",
-            self.data_root,
-        )
 
     def environment(self) -> EnvironmentReportV1:
         return self.environment_inspector(self.data_root)
@@ -450,10 +475,9 @@ class CampaignCustodian:
 
     def preview(self, submission: WizardSubmissionV1) -> CampaignPreviewV1:
         _validate_submission_text(submission)
-        repository = inspect_requested_repository(
+        repository = self.core.inspect_repository(
             submission.repository_kind,
             submission.repository_locator,
-            sterile_root=self.repository_preparation_root / "preview-sterile",
         )
         preview_id = f"preview-{self.token_factory()[:24]}"
         draft = PreviewDraftV1(
@@ -488,33 +512,6 @@ class CampaignCustodian:
         if not _START_KEY.fullmatch(client_start_key):
             raise CustodianInputError("Start request identity is invalid.")
         key_digest = hashlib.sha256(client_start_key.encode("ascii")).hexdigest()
-        key_path = self.start_keys / f"{key_digest}.json"
-        if key_path.exists():
-            value = _read_json_regular(key_path, "Start request")
-            campaign_id = value.get("campaign_public_id")
-            if not isinstance(campaign_id, str):
-                raise CustodianStateError("Start request record is invalid.")
-            return self.get_record(campaign_id, refresh=True)
-        preview_digest = hashlib.sha256(preview_id.encode("ascii")).hexdigest()
-        preview_start_path = self.preview_starts / f"{preview_digest}.json"
-        if preview_start_path.exists():
-            value = _read_json_regular(preview_start_path, "Preview Start record")
-            campaign_id = value.get("campaign_public_id")
-            if not isinstance(campaign_id, str):
-                raise CustodianStateError("Preview Start record is invalid.")
-            return self.get_record(campaign_id, refresh=True)
-        for existing_path in _regular_json_files(self.records):
-            existing = self.get_record(existing_path.stem, refresh=True)
-            if existing.preview_id == preview_id:
-                _write_once_json(
-                    preview_start_path,
-                    {
-                        "schema_version": 1,
-                        "preview_id": preview_id,
-                        "campaign_public_id": existing.campaign_public_id,
-                    },
-                )
-                return existing
         draft = self._load_preview(preview_id)
         launch_request = CampaignLaunchRequestV1(
             preview_id=preview_id,
@@ -533,18 +530,23 @@ class CampaignCustodian:
             supporting_files=draft.submission.supporting_files,
             requested_settings=draft.submission.requested_settings,
         )
-        # This is the first authoritative Start operation. It fsyncs the exact
-        # scientific bytes before Git, environment doctor, auth, or isolation checks.
-        reference = self.runner.freeze_launch(launch_request, self.launch_authority_root)
-        intent = self.runner.launch_summary(
-            reference.launch_token,
-            self.launch_authority_root,
-            reference.campaign_public_id,
-            reference.launch_intent_sha256,
+        # The core service imports the repository and commits the complete
+        # CampaignInputBundle before returning this immutable identity.
+        try:
+            reference = self.core.create_start_intent(launch_request)
+        except Exception as exc:
+            raise CustodianStateError(str(exc) or "Core Start authority stopped safely.") from exc
+        intent = self.core.verify_start_intent(
+            reference.launch_intent_id,
+            expected_campaign_public_id=reference.campaign_public_id,
+            expected_intent_sha256=reference.launch_intent_sha256,
+            expected_bundle_sha256=reference.input_bundle_sha256,
         )
         campaign_id = reference.campaign_public_id
-        exchange = prepare_operator_exchange(self.exchange_root, campaign_id)
         authority = self.authorities / campaign_id
+        if authority.exists():
+            return self._record_from_core(intent, refresh=True)
+        exchange = prepare_operator_exchange(self.exchange_root, campaign_id)
         projection = OperatorCampaignProjectionV1(
             campaign_public_id=campaign_id,
             human_name=intent.human_name,
@@ -558,23 +560,15 @@ class CampaignCustodian:
         record = CustodianCampaignRecordV1(
             campaign_public_id=campaign_id,
             preview_id=preview_id,
+            launch_intent_id=reference.launch_intent_id,
             launch_intent_sha256=reference.launch_intent_sha256,
-            launch_token=reference.launch_token,
-            core_authority_directory=str(authority),
+            input_bundle_sha256=reference.input_bundle_sha256,
+            qualified_campaign_directory=str(authority),
             exchange_directory=str(exchange.root),
-            created_at=_utc_string(self.utc_now()),
+            created_at=intent.created_at,
             projection=projection,
         )
         self._persist_record(record)
-        _write_once_json(
-            preview_start_path,
-            {
-                "schema_version": 1,
-                "preview_id": preview_id,
-                "campaign_public_id": campaign_id,
-            },
-        )
-        _write_once_json(key_path, {"schema_version": 1, "campaign_public_id": campaign_id})
         environment = self.environment()
         if not environment.ready:
             blocked = record.model_copy(
@@ -586,8 +580,8 @@ class CampaignCustodian:
             self._persist_record(blocked)
             return blocked
         pid = self.runner.launch_start(
-            reference.launch_token,
-            self.launch_authority_root,
+            reference.launch_intent_id,
+            campaign_id,
             authority,
             self.exchange_root,
             self.runner_logs / f"{campaign_id}.log",
@@ -597,25 +591,27 @@ class CampaignCustodian:
         return launched
 
     def list_campaigns(self, *, refresh: bool = True) -> tuple[OperatorCampaignProjectionV1, ...]:
-        values: list[OperatorCampaignProjectionV1] = []
-        for path in _regular_json_files(self.records):
-            record = self.get_record(path.stem, refresh=refresh)
-            values.append(record.projection)
+        values = [
+            self._record_from_core(summary, refresh=refresh).projection
+            for summary in self._core_summaries()
+        ]
         return tuple(sorted(values, key=lambda item: (item.status, item.human_name.casefold())))
 
     def get_record(
         self, campaign_public_id: str, *, refresh: bool = True
     ) -> CustodianCampaignRecordV1:
         _validate_campaign_id(campaign_public_id)
-        value = _read_json_regular(self.records / f"{campaign_public_id}.json", "Campaign card")
+        summaries = {item.campaign_public_id: item for item in self._core_summaries()}
+        summary = summaries.get(campaign_public_id)
+        if summary is None:
+            raise CustodianStateError("Core campaign authority is unavailable.")
+        return self._record_from_core(summary, refresh=refresh)
+
+    def _core_summaries(self) -> tuple[CampaignLaunchSummaryV1, ...]:
         try:
-            record = CustodianCampaignRecordV1.model_validate(value)
-        except ValidationError as exc:
-            raise CustodianStateError("Campaign card is invalid.") from exc
-        if record.campaign_public_id != campaign_public_id:
-            raise CustodianStateError("Campaign card identity changed.")
-        self._validate_record_locators(record)
-        return self._refresh_record(record) if refresh else record
+            return self.core.list_operator_campaigns()
+        except Exception as exc:
+            raise CustodianStateError("Core campaign authority is unavailable.") from exc
 
     def request(self, campaign_public_id: str) -> HumanActionRequestV1:
         record = self.get_record(campaign_public_id, refresh=True)
@@ -661,7 +657,9 @@ class CampaignCustodian:
             current_authority=request.durable_authority,
         )
         pid = self.runner.launch_response(
-            Path(record.core_authority_directory),
+            record.launch_intent_id,
+            campaign_public_id,
+            Path(record.qualified_campaign_directory),
             self.exchange_root,
             request.request_sha256,
             self.runner_logs / f"{campaign_public_id}.log",
@@ -680,15 +678,21 @@ class CampaignCustodian:
             )
             self._persist_record(updated)
             return updated
-        authority = Path(record.core_authority_directory)
+        authority = Path(record.qualified_campaign_directory)
         log = self.runner_logs / f"{campaign_public_id}.log"
         if authority.exists():
-            pid = self.runner.launch_resume(authority, self.exchange_root, log)
+            pid = self.runner.launch_resume(
+                record.launch_intent_id,
+                campaign_public_id,
+                authority,
+                self.exchange_root,
+                log,
+            )
             operation = "resume"
         else:
             pid = self.runner.launch_start(
-                record.launch_token,
-                self.launch_authority_root,
+                record.launch_intent_id,
+                campaign_public_id,
                 authority,
                 self.exchange_root,
                 log,
@@ -706,7 +710,11 @@ class CampaignCustodian:
         if token not in allowed:
             raise CustodianInputError("This result link is not available.")
         return self.runner.artifact(
-            Path(record.core_authority_directory), self.exchange_root, token
+            record.launch_intent_id,
+            campaign_public_id,
+            Path(record.qualified_campaign_directory),
+            self.exchange_root,
+            token,
         )
 
     def export_campaign(self, campaign_public_id: str) -> Path:
@@ -715,18 +723,25 @@ class CampaignCustodian:
             raise CustodianInputError("Only a verified completed campaign can be exported.")
         destination = self.exports / f"{campaign_public_id}.zip"
         return self.runner.export(
-            Path(record.core_authority_directory),
+            record.launch_intent_id,
+            campaign_public_id,
+            Path(record.qualified_campaign_directory),
             self.exchange_root,
             destination,
         )
 
     def repository_path(self, campaign_public_id: str) -> Path:
         record = self.get_record(campaign_public_id, refresh=False)
-        return self.runner.repository(Path(record.core_authority_directory), self.exchange_root)
+        return self.runner.repository(
+            record.launch_intent_id,
+            campaign_public_id,
+            Path(record.qualified_campaign_directory),
+            self.exchange_root,
+        )
 
     def _refresh_record(self, record: CustodianCampaignRecordV1) -> CustodianCampaignRecordV1:
         intent = self._validated_intent(record)
-        authority = Path(record.core_authority_directory)
+        authority = Path(record.qualified_campaign_directory)
         if not authority.exists():
             if record.projection.status == "blocked" and record.runner_pid is None:
                 return record
@@ -748,7 +763,12 @@ class CampaignCustodian:
                 return stopped
             return record
         try:
-            projection = self.runner.status(authority, self.exchange_root)
+            projection = self.runner.status(
+                record.launch_intent_id,
+                record.campaign_public_id,
+                authority,
+                self.exchange_root,
+            )
         except CustodianStateError:
             blocked = record.model_copy(
                 update={
@@ -783,11 +803,11 @@ class CampaignCustodian:
 
     def _validated_intent(self, record: CustodianCampaignRecordV1) -> CampaignLaunchSummaryV1:
         try:
-            return self.runner.launch_summary(
-                record.launch_token,
-                self.launch_authority_root,
-                record.campaign_public_id,
-                record.launch_intent_sha256,
+            return self.core.verify_start_intent(
+                record.launch_intent_id,
+                expected_campaign_public_id=record.campaign_public_id,
+                expected_intent_sha256=record.launch_intent_sha256,
+                expected_bundle_sha256=record.input_bundle_sha256,
             )
         except Exception as exc:
             raise CustodianStateError(
@@ -797,11 +817,76 @@ class CampaignCustodian:
     def _validate_record_locators(self, record: CustodianCampaignRecordV1) -> None:
         campaign_id = record.campaign_public_id
         expected = (
-            (Path(record.core_authority_directory), self.authorities / campaign_id),
+            (Path(record.qualified_campaign_directory), self.authorities / campaign_id),
             (Path(record.exchange_directory), self.exchange_root / campaign_id),
         )
         if any(actual != wanted for actual, wanted in expected):
             raise CustodianStateError("Campaign card locators were substituted.")
+
+    def _record_from_core(
+        self, summary: CampaignLaunchSummaryV1, *, refresh: bool
+    ) -> CustodianCampaignRecordV1:
+        campaign_id = summary.campaign_public_id
+        exchange = prepare_operator_exchange(self.exchange_root, campaign_id)
+        authority = self.authorities / campaign_id
+        projection = OperatorCampaignProjectionV1(
+            campaign_public_id=campaign_id,
+            human_name=summary.human_name,
+            repository=summary.repository_display,
+            status="preparing",
+            stage="Preparing campaign",
+            last_activity="Checking the local environment before qualified launch",
+            human_input_needed=False,
+            campaign_state_safe=True,
+        )
+        runner_operation: Literal["start", "resume", "respond", "idle"] = "idle"
+        runner_pid: int | None = None
+        path = self.records / f"{campaign_id}.json"
+        if path.exists() and not path.is_symlink():
+            try:
+                cached = CustodianCampaignRecordV1.model_validate(
+                    _read_json_regular(path, "Campaign card")
+                )
+                if (
+                    cached.campaign_public_id == campaign_id
+                    and cached.preview_id == summary.preview_id
+                    and cached.launch_intent_id == summary.launch_intent_id
+                    and cached.launch_intent_sha256 == summary.launch_intent_sha256
+                    and cached.input_bundle_sha256 == summary.input_bundle_sha256
+                    and Path(cached.qualified_campaign_directory) == authority
+                    and Path(cached.exchange_directory) == exchange.root
+                    and _pid_active(cached.runner_pid)
+                ):
+                    runner_operation = cached.runner_operation
+                    runner_pid = cached.runner_pid
+            except (CustodianStateError, ValidationError):
+                pass
+        record = CustodianCampaignRecordV1(
+            campaign_public_id=campaign_id,
+            preview_id=summary.preview_id,
+            launch_intent_id=summary.launch_intent_id,
+            launch_intent_sha256=summary.launch_intent_sha256,
+            input_bundle_sha256=summary.input_bundle_sha256,
+            qualified_campaign_directory=str(authority),
+            exchange_directory=str(exchange.root),
+            created_at=summary.created_at,
+            runner_operation=runner_operation,
+            runner_pid=runner_pid,
+            projection=projection,
+        )
+        self._persist_record(record)
+        if authority.exists():
+            return self._refresh_record(record) if refresh else record
+        if runner_pid is not None:
+            return record
+        environment = self.environment()
+        if not environment.ready:
+            blocked = record.model_copy(
+                update={"projection": _environment_blocked_projection(summary, environment)}
+            )
+            self._persist_record(blocked)
+            return blocked
+        return record
 
     def _notify_projection(self, record: CustodianCampaignRecordV1) -> None:
         projection = record.projection
@@ -1039,7 +1124,40 @@ def _runner_environment() -> dict[str, str]:
         "WSL_DISTRO_NAME",
         "WSL_INTEROP",
     }
-    return {key: value for key, value in os.environ.items() if key in allowed}
+    environment = {key: value for key, value in os.environ.items() if key in allowed}
+    environment.update(
+        {
+            "PATH": "/usr/bin:/bin",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/bin/false",
+            "SSH_ASKPASS": "/bin/false",
+            "GIT_EXTERNAL_DIFF": "",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+    )
+    sealed = (
+        ("safe.directory", "*"),
+        ("core.hooksPath", "/dev/null"),
+        ("core.fsmonitor", "false"),
+        ("core.attributesFile", "/dev/null"),
+        ("core.sshCommand", "/bin/false"),
+        ("credential.helper", ""),
+        ("diff.external", ""),
+        ("fetch.recurseSubmodules", "false"),
+        ("submodule.recurse", "false"),
+        ("protocol.ext.allow", "never"),
+        ("protocol.file.allow", "never"),
+        ("protocol.ssh.allow", "never"),
+        ("protocol.git.allow", "never"),
+    )
+    environment["GIT_CONFIG_COUNT"] = str(len(sealed))
+    for index, (key, value) in enumerate(sealed):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    return environment
 
 
 def _safe_external_core_root(path: Path, custodian_root: Path) -> Path:

@@ -44,6 +44,7 @@ browser-acceptance = [
 [project.scripts]
 research-supervisor = "research_automation_supervisor.cli:app"
 research-supervisor-custodian = "research_automation_supervisor.custodian_server:main"
+research-supervisor-core-authority = "research_automation_supervisor.core_authority_service:main"
 run-direct-historical-replay = "research_automation_supervisor.direct_historical_replay:main"
 evaluate-historical-replay = "research_automation_supervisor.offline_replay_evaluator:main"
 prepare-historical-replay-evaluation-package = "research_automation_supervisor.offline_evaluation_package:main"
@@ -70,6 +71,8 @@ include = [
   "/docs",
   "/examples",
   "/scripts/custodian-bootstrap.sh",
+  "/scripts/install-core-authority-service.sh",
+  "/scripts/research-supervisor-core-authority.service",
   "/scripts/windows-cdp-relay.ps1",
   "/tests/pa5c4_acceptance_backend.py",
   "/tests/pa5c4_acceptance_services.py",

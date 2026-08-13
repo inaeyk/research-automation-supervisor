@@ -11,6 +11,11 @@
   verification, and completion authority behind a process-isolated qualified-runner
   allowlist. Existing PA-5A/PA-5C1/PA-5C2/PA-5C3 scientific and review code is
   unchanged.
+- Close Custodian Start authority with a dedicated-identity Core Authority Service,
+  strict authenticated Unix-socket schemas, full-request atomic single assignment,
+  receipt-based card reconstruction, descriptor/inode-bound sanitized repository import,
+  one sealed production Git policy, and immutable launch-intent-only runner ingress.
+  The installed runner no longer accepts an arbitrary `start --bundle` pathname.
 
 All notable user-facing changes are recorded here. This project follows semantic
 versioning while it remains pre-1.0.

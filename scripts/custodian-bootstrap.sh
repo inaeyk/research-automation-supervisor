@@ -29,6 +29,7 @@ url=http://127.0.0.1:$port/
 readiness=$data_root/custodian-state/backend-readiness.json
 evidence_root=$data_root/custodian-state/launcher-evidence
 evidence=$evidence_root/$readiness_instance.json
+core_socket=/run/research-supervisor-core/authority.sock
 
 mkdir -p "$runtime_root" "$data_root/custodian-state" "$evidence_root"
 chmod 700 "$data_root" "$runtime_root" "$data_root/custodian-state" "$evidence_root"
@@ -43,7 +44,7 @@ if [ ! -x "$managed_venv/bin/python" ]; then
     "$system_python" -m venv "$managed_venv"
 fi
 
-current_commit=$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)
+current_commit=$("$system_python" -c 'import hashlib,pathlib,sys; root=pathlib.Path(sys.argv[1]).resolve(); selected=[root/"pyproject.toml",*(root/"src").rglob("*.py"),*(root/"scripts").glob("*.sh"),*(root/"scripts").glob("*.service")]; digest=hashlib.sha256(); [(digest.update(str(path.relative_to(root)).encode()+b"\0"),digest.update(hashlib.sha256(path.read_bytes()).digest())) for path in sorted(selected) if path.is_file()]; print(digest.hexdigest())' "$project_root")
 installed_commit=$(sed -n '1p' "$install_stamp" 2>/dev/null || true)
 if [ "$launch_mode" = first-run ] || [ "$current_commit" != "$installed_commit" ]; then
     "$managed_venv/bin/python" -m pip install --disable-pip-version-check "$project_root" >>"$backend_log" 2>&1
@@ -95,9 +96,13 @@ if [ -n "$acceptance_scenario" ]; then
         --readiness-instance "$readiness_instance" \
         --acceptance-scenario "$acceptance_scenario"
 else
+    if [ ! -S "$core_socket" ] || [ ! -w "$core_socket" ]; then
+        echo "The Core Authority Service needs one-time administrator setup." >&2
+        exit 6
+    fi
     set -- "$managed_venv/bin/research-supervisor-custodian" \
         --data-dir "$data_root" --host 127.0.0.1 --port "$port" \
-        --readiness-instance "$readiness_instance"
+        --readiness-instance "$readiness_instance" --core-socket "$core_socket"
 fi
 RAS_MANAGED_RUNTIME=1 RAS_QUALIFIED_COMMIT="$current_commit" nohup "$@" \
     >>"$backend_log" 2>&1 </dev/null &

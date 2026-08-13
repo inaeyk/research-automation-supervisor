@@ -117,7 +117,10 @@ service.
 
 For an ordinary Windows user, no terminal or WSL distro selection is required:
 
-1. Place this qualified project folder on the Windows machine.
+1. Place this qualified project folder on the Windows machine. An administrator performs
+   the one-time WSL Core Authority Service installation using
+   `scripts/install-core-authority-service.sh` for the ordinary operator account. This
+   authorization is not needed for later campaign use.
 2. Double-click **Research Supervisor** (`Research Supervisor.vbs`). The hidden-window
    Windows launcher finds the supported default WSL backend, creates a managed Python
    environment, installs the local qualified package, waits for random-instance-bound

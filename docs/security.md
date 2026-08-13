@@ -66,15 +66,25 @@ a model process can reach protected material.
 
 ## PA-5C4 prelaunch and repository boundary
 
-Started scientific inputs live only in the protected core prelaunch-authority store.
-Custodian previews/cards are replaceable projections and cannot authorize a campaign.
-The Start receipt is committed before any environment or repository action. Every
-retry must present the exact store-key HMAC launch token and matching campaign/intent
-identity; corrupt, missing, stale, and cross-campaign objects fail closed.
+Started scientific inputs live only in the mode-0700 authority store owned by the
+non-login `research-supervisor-core` service identity. The ordinary Custodian UID has
+no filesystem authority over its key, objects, receipts, frozen inputs, or authoritative
+launch records. Custodian previews/cards are replaceable projections and are rebuilt
+from the authenticated Unix-socket service. Strict `SO_PEERCRED`-authenticated IPC
+exposes only typed preview/Create/Get/List/Verify/Consume operations.
 
-Selected repositories are untrusted before Bubblewrap. SafeGit permits only direct
+Start is a request-keyed atomic single assignment. Core validates every supplied field,
+holds a no-follow repository descriptor, creates the sanitized snapshot and complete
+frozen bundle, fsyncs the objects/directories, and publishes the receipt as the sole
+commit point. Identical retries return the same immutable intent; any changed field,
+stale ID, corrupt object, or cross-campaign substitution fails closed. The installed
+runner accepts only `--launch-intent`; no mutable `--bundle` launch exists.
+
+Selected repositories are untrusted source material before Bubblewrap. SafeGit permits only direct
 audited Git built-ins for identity/object inspection and an HTTPS or local-source
-`--no-checkout` clone. It supplies a sterile HOME, disables system/global config,
+`--no-checkout` import. Existing roots are held by no-follow descriptor, bound by
+device/inode, and revalidated after import; later production paths use only the one
+core-created sanitized snapshot. SafeGit supplies a sterile HOME, disables system/global config,
 hooks, fsmonitor, external diff, attributes files, credential helpers and prompts, and
 denies command-executing/unsupported transports. Checkout and preparation commit run
 only inside Bubblewrap `--unshare-all`. A content-hashed receipt preserves the exact

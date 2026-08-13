@@ -52,34 +52,28 @@ if profile == "python_pytest":
 elif profile == "python_unittest":
     inner = [str(qualified_python), "-m", "unittest", "discover", "-s", "tests"]
 elif profile == "repository_integrity":
-    inner = None
+    inner = [str(qualified_python), "-c",
+             "from research_automation_supervisor.safe_git import "
+             "run_repository_integrity_acceptance as run; run()"]
 else:
     raise SystemExit(64)
-if inner is None:
-    result = subprocess.run(
-        ["git", "--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-C",
-         str(repository), "diff", "--no-ext-diff", "--check"],
-        cwd=repository, check=False,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "GIT_CONFIG_NOSYSTEM": "1"},
-    )
-else:
-    bwrap = shutil.which("bwrap")
-    if bwrap is None:
-        raise SystemExit(69)
-    command = [bwrap, "--die-with-parent", "--new-session", "--unshare-all",
-               "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-               "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin"]
-    for system_path in ("/lib", "/lib64", "/etc"):
-        if Path(system_path).exists():
-            command += ["--ro-bind", system_path, system_path]
-    runtime_prefix = qualified_python.parent.parent
-    if runtime_prefix not in (Path("/usr"), Path("/usr/local")):
-        command += ["--ro-bind", str(runtime_prefix), str(runtime_prefix)]
-    command += ["--bind", str(repository), "/workspace", "--chdir", "/workspace",
-                "--setenv", "HOME", "/tmp/operator", "--setenv", "PATH", "/usr/bin:/bin",
-                "--setenv", "PYTHONNOUSERSITE", "1", "--"] + inner
-    result = subprocess.run(command, cwd=repository, check=False,
-                            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+bwrap = shutil.which("bwrap")
+if bwrap is None:
+    raise SystemExit(69)
+command = [bwrap, "--die-with-parent", "--new-session", "--unshare-all",
+           "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+           "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin"]
+for system_path in ("/lib", "/lib64", "/etc"):
+    if Path(system_path).exists():
+        command += ["--ro-bind", system_path, system_path]
+runtime_prefix = qualified_python.parent.parent
+if runtime_prefix not in (Path("/usr"), Path("/usr/local")):
+    command += ["--ro-bind", str(runtime_prefix), str(runtime_prefix)]
+command += ["--bind", str(repository), "/workspace", "--chdir", "/workspace",
+            "--setenv", "HOME", "/tmp/operator", "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "PYTHONNOUSERSITE", "1", "--"] + inner
+result = subprocess.run(command, cwd=repository, check=False,
+                        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
 raise SystemExit(result.returncode)
 """
 
@@ -456,11 +450,17 @@ class CustodianCampaignRecordV1(BaseModel):
     schema_version: Literal[1] = 1
     campaign_public_id: PublicCampaignId
     preview_id: Identifier
-    launch_intent_sha256: Sha256
-    launch_token: Annotated[
-        str, Field(min_length=136, max_length=136, pattern=r"^launch_[0-9a-f]{64}_[0-9a-f]{64}$")
+    launch_intent_id: Annotated[
+        str,
+        Field(
+            min_length=136,
+            max_length=136,
+            pattern=r"^intent_[0-9a-f]{64}_[0-9a-f]{64}$",
+        ),
     ]
-    core_authority_directory: Annotated[str, Field(min_length=1, max_length=4096)]
+    launch_intent_sha256: Sha256
+    input_bundle_sha256: Sha256
+    qualified_campaign_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     exchange_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     created_at: Annotated[str, Field(min_length=1, max_length=80)]
     runner_operation: Literal["start", "resume", "respond", "idle"] = "idle"

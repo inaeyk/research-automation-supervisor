@@ -31,6 +31,25 @@ def test_double_click_launcher_is_hidden_and_uses_supported_default_wsl() -> Non
     assert "No scientific campaign state changed" in powershell
     assert "health_matches_instance" in bootstrap
     assert "launcher-evidence" in bootstrap
+    assert "/run/research-supervisor-core/authority.sock" in bootstrap
+    assert "git -C" not in bootstrap
+
+
+def test_core_service_installer_declares_real_os_identity_and_store_permissions() -> None:
+    installer = Path("scripts/install-core-authority-service.sh").read_text(encoding="utf-8")
+    unit = Path("scripts/research-supervisor-core-authority.service").read_text(encoding="utf-8")
+    assert "useradd --system" in installer
+    assert "research-supervisor-core" in installer
+    assert "/var/lib/research-supervisor-core/authority" in installer
+    assert "-m 0700" in installer
+    assert "User=research-supervisor-core" in unit
+    assert "Group=research-supervisor-custodian" in unit
+    assert "RuntimeDirectoryMode=0750" in unit
+    assert "CapabilityBoundingSet=" not in unit
+    assert "AmbientCapabilities=" not in unit
+    assert "NoNewPrivileges=true" in unit
+    assert "ProtectSystem=strict" in unit
+    assert "UMask=0077" in unit
 
 
 @pytest.mark.skipif(

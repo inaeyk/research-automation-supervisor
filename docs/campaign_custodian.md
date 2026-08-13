@@ -10,14 +10,19 @@ command.
 
 On Windows with WSL available:
 
-1. Double-click **Research Supervisor** (`Research Supervisor.vbs`) in the qualified
+1. An administrator performs the one-time Core Authority Service installation with
+   `scripts/install-core-authority-service.sh`, naming the ordinary operator account.
+   This creates the non-login `research-supervisor-core` identity, a service-only
+   authority store, and the authenticated local socket. No later campaign action
+   needs administrator authorization.
+2. Double-click **Research Supervisor** (`Research Supervisor.vbs`) in the qualified
    project folder. It is a hidden-window Windows Script Host entry point; no terminal
    is opened. `first-run-research-supervisor.cmd` remains a one-time compatibility
    bootstrap only.
-2. The launcher locates the supported default WSL backend without asking for a distro name,
+3. The launcher locates the supported default WSL backend without asking for a distro name,
    creates a managed environment below the user's local data directory, installs the
    qualified package, waits for loopback readiness, and opens the local browser UI.
-3. Double-click **Research Supervisor** thereafter. It reuses an existing
+4. Double-click **Research Supervisor** thereafter. It reuses an existing
    healthy backend and updates the managed installation only when the qualified source
    commit changes.
 
@@ -38,9 +43,11 @@ The default path is:
    optional.
 5. Review the repository version, input identities, acceptance profile, editable
    areas, environment readiness, and immutability warning.
-6. Press **Start** once. The first authoritative operation crosses the qualified-core
-   process and fsyncs the exact launch intent. Duplicate browser submissions
-   return the original public campaign card instead of creating another campaign.
+6. Press **Start** once. The Custodian sends the complete canonical request over the
+   authenticated local socket. The Core Authority Service imports exactly one sanitized
+   repository snapshot, freezes the complete input bundle, and fsyncs all objects before
+   atomically publishing the Start receipt. An identical retry with the same request
+   identity returns the exact intent; any changed supplied field fails closed.
 7. Follow the dashboard. If qualified core authority needs a human decision, inspect
    safe evidence, choose an allowed response, add a note/file if appropriate, and
    submit it. The Custodian never preselects an answer.
@@ -67,8 +74,9 @@ artifacts remain in the qualified evidence tree and are not the default result p
 
 ## Custodian permission boundary
 
-The Custodian may prepare its replaceable UI directories, inspect repository identity
-through SafeGit, present inputs, inspect environment readiness, invoke a fixed qualified-runner
+The Custodian may prepare its replaceable UI directories, ask the Core service for a
+non-authoritative repository preview, present inputs, inspect environment readiness,
+invoke a fixed qualified-runner
 operation, read operator-safe projections, store the user's exact exchange response,
 display core-allowlisted evidence, export verified results, open a repository folder,
 and send a local browser notification.
@@ -78,7 +86,7 @@ implementation, Worker, Auditor, model adapter, PA-2, PA-3, PA-5C2 scorer, or hi
 fixture authority. It has no durable campaign-state or journal filename. It cannot
 write campaign state, journal, proof, completion, or model action records. Its only
 campaign-affecting process target is `qualified_runner`, with the allowlisted
-operations `freeze`, `launch-summary`, `start`, `status`, `resume`, `respond`,
+operations `start`, `status`, `resume`, `respond`,
 `artifact`, `repository`, and `export`.
 
 Custodian-owned data is physically separate:
@@ -96,41 +104,51 @@ operator-exchange/
     uploads/
 qualified-campaigns/
 
-research-automation-supervisor-core/
-  prelaunch-authority/
+/var/lib/research-supervisor-core/
+  authority/                       # mode 0700, service identity only
     store-key-v1
     objects/<sha-prefix>/<launch-intent-sha>.json
-    receipts/<launch-intent-sha>.json
+    receipts/<start-request-sha>.json
     frozen-inputs/<launch-intent-sha>.json
-  repository-preparation/
+  snapshots/
     receipts/
     workspaces/
+
+/run/research-supervisor-core/
+  authority.sock                   # mode 0660, peer UID checked
 ```
 
 The Custodian and operator-exchange roots are explicitly non-authoritative. The core
-root is a protected application-data sibling, not a child of Custodian state, the
-selected repository, or a campaign workspace. A card contains only the launch-intent
-SHA-256 and opaque HMAC-bound token; it contains no authoritative scientific bytes.
+authority root is owned by the non-login `research-supervisor-core` identity and mode
+0700. The ordinary Custodian UID cannot traverse, read, write, rename, or replace its
+key, objects, receipts, or frozen inputs. A card contains only the public campaign ID,
+bundle SHA-256, and opaque HMAC-bound immutable intent ID; it contains no authoritative
+scientific bytes.
 A Custodian card or process exit can never create a completed projection.
 
-## CampaignLaunchIntentV1 and freeze timing
+## Core IPC and atomic Start
 
-At **Start**, before environment doctor, Git preparation, Codex, authentication, or
-Bubblewrap checks, `qualified_runner freeze` validates `CampaignLaunchRequestV1` and
-commits two create-once core objects:
+The service accepts one strict JSON request per Unix-socket connection and authenticates
+the peer with Linux `SO_PEERCRED`. Envelope and operation payload models all use
+`extra="forbid"`; unknown operations and fields fail closed. The only operations are
+`inspect_repository`, `create_start_intent`, `get_start_intent`,
+`list_operator_campaigns`, `verify_start_intent`, and
+`consume_start_intent_for_qualified_launch`. There is no file, command, or generic data
+operation.
 
-- `CampaignLaunchIntentV1` binds the exact contract, plan, task, supporting-file bytes,
-  requested repository locator/commit/tree, settings, public campaign identity, and
-  canonical `intent_sha256`;
-- `CampaignLaunchReceiptV1` binds that intent, the first Start request, timestamp, and
-  SHA-256 of a store-key HMAC token.
+At **Start**, `create_start_intent` locks the store and validates the complete
+`CampaignLaunchRequestV1`: request and preview identities; name; repository locator hash,
+captured device/inode, commit, and tree; exact contract, plan, task, and every support
+file; and every profile, model, reasoning, repair, editable-area, and execution choice.
 
-The intent file is fsynced before the receipt commit point; both containing directories
-are fsynced. An object-only crash prefix is recoverable. Once a receipt exists, a
-missing/replaced object is never reconstructed from a preview. Every environment retry
-first calls `launch-summary`, which verifies token HMAC, receipt self-hash, object
-self-hash, content address, campaign ID, and exact expected intent. Cross-campaign,
-stale, corrupt, or substituted references fail closed.
+While holding a no-follow repository directory descriptor, core imports one sanitized
+snapshot, revalidates device/inode, builds the complete `CampaignInputBundleV1`, and
+publishes content-addressed request, intent, and frozen-input objects. Every file and
+directory is fsynced. The request-keyed receipt is the sole atomic commit point. Crashes
+before it mean no Start; crashes after it mean exactly one immutable Start. Receipt
+enumeration reconstructs cards after a lost response, deleted/replaced Custodian state,
+or restart. Reuse compares the full canonical request hash; there are no weakly bound
+fields.
 
 ## CampaignInputBundleV1
 
@@ -147,10 +165,12 @@ self-hashed. It contains:
   reasoning, repair limit, and normalized editable areas;
 - `bundle_sha256`: SHA-256 of canonical JSON excluding only the self-hash field.
 
-Only after SafeGit preparation does the qualified core derive
-`FrozenCampaignInputV1`/`CampaignInputBundleV1` from the launch intent. The qualified
-core copies and revalidates that bundle before materializing the existing strict
-visible-campaign schemas. Every later operation reloads the core-owned self-hashed bundle.
+The Core service derives `FrozenCampaignInputV1`/`CampaignInputBundleV1` during atomic
+Start, before publishing the receipt. The qualified runner consumes those bytes only by
+immutable intent ID. The installed runner exposes
+`start --launch-intent <immutable-id>` and has no `start --bundle` option. Every later
+runner operation re-verifies the core intent and exact local bundle binding before
+entering the existing strict visible-campaign schemas.
 An edit after Start is detected; the UI exposes no edit operation. A scientific input
 change therefore requires a new campaign or a core-issued qualified human-action path.
 
@@ -177,18 +197,27 @@ the existing human-decision ingress.
 
 ## Environment bootstrap behavior
 
-The first-run launcher safely creates only user-owned data directories and a managed
-Python environment. The backend then verifies Python/package identity, Git, Codex
+The one-time administrator installer creates only the service identity, shared socket
+group, managed service environment, service-owned authority/snapshot roots, and systemd
+unit. The ordinary launcher creates user-owned UI data and its managed Python
+environment; it fails closed if the Core socket is absent or inaccessible. The backend
+then verifies Python/package identity, Git, Codex
 version, Codex authentication, Bubblewrap, WSL/Linux backend, and atomic rename and
 hard-link filesystem capabilities. Preview performs only sterile identity inspection.
 Repository preparation uses `/usr/bin/git` with system/global config disabled, a
 sterile HOME, hooks and fsmonitor disabled, external diff/textconv/helper paths
-neutralized, prompts disabled, and `ext`, file, SSH, and git protocols denied. New
+neutralized, prompts disabled, and `ext`, file, SSH, and git protocols denied. All
+production Git calls in Custodian/core/bootstrap/setup and resume are mechanically
+confined to one SafeGit implementation or occur inside the already-qualified sandbox. New
 remote repositories use only credential-free HTTPS and
-`clone --no-checkout --no-tags --no-recurse-submodules`. Existing sources use the same
-no-checkout clone after exact commit/tree revalidation. Checkout and the preparation
+`clone --no-checkout --no-tags --no-recurse-submodules`. Existing roots are opened once
+with no-follow directory flags, bound into import by descriptor, and revalidated by
+device/inode after import. They use the same no-checkout clone after exact commit/tree
+revalidation. Checkout and the preparation
 commit run only under Bubblewrap `--unshare-all`; the receipt records every exact
-argv/environment and asserts `checkout_outside_isolation=false`.
+argv/environment and asserts `checkout_outside_isolation=false`. The clone-generated
+`.git/config` is replaced by core's minimal sterile configuration. After receipt
+publication no production path returns to the original repository.
 
 Missing login, administrator permission, isolation, or filesystem capability produces
 an Action Needed card. The card states that the campaign has not started. Codex sign-in
@@ -225,7 +254,12 @@ routes, scorer-only inputs, or model logs.
 
 ## Security and acceptance coverage
 
-Focused tests cover strict models/self-hashes, frozen input tamper detection,
+Focused tests cover authenticated/schema-closed IPC, actual two-UID store denial in the
+privileged installation job, every atomic Start crash boundary, complete-field reuse,
+deleted/replaced Custodian state, arbitrary-bundle removal, stale/cross-campaign intents,
+descriptor/inode path swaps, original mutation after snapshot, hostile Git configuration,
+and a mechanical production Git-call inventory, in addition to strict models/self-hashes,
+frozen input tamper detection,
 create-once exchange behavior, traversal and symlink rejection, stale/duplicate and
 cross-campaign responses, completion-notification proof binding, environment leakage,
 CSRF/loopback browser isolation, static Custodian authority imports, unsafe recovery
