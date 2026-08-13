@@ -1,0 +1,79 @@
+{
+  "backend_api_used_for_operator_actions": false,
+  "browser_engine": "Chrome/151.0.7922.109",
+  "browser_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+  "launch_intent_sha256": "9ed6ec09cd1f9eb93bbf62f6e740912b4df541c3e2e59d96d42be70937030f66",
+  "launch_receipt_sha256": "490bb4ff4f531e38874dee6ea8a5374fc2095611b156982ac485bf04abd4af54",
+  "launcher_evidence": [
+    {
+      "backend_reused": false,
+      "browser_open_delegated_to_windows_launcher": true,
+      "kernel": "6.18.33.2-microsoft-standard-WSL2",
+      "launcher": "Research Supervisor.vbs",
+      "observed_readiness_instance": "487bc984dd2746239225ed4782449f7f945111ebe08f4c248a2fc77d188ff576",
+      "qualified_commit": "0123ba86f3e7b72411a198ec43edfa25aaba9840",
+      "requested_readiness_instance": "487bc984dd2746239225ed4782449f7f945111ebe08f4c248a2fc77d188ff576",
+      "schema_version": 1,
+      "url": "http://127.0.0.1:40439/",
+      "windows_execution_path": true,
+      "wsl_backend": true,
+      "wsl_distro": "Ubuntu"
+    },
+    {
+      "backend_reused": true,
+      "browser_open_delegated_to_windows_launcher": true,
+      "kernel": "6.18.33.2-microsoft-standard-WSL2",
+      "launcher": "Research Supervisor.vbs",
+      "observed_readiness_instance": "487bc984dd2746239225ed4782449f7f945111ebe08f4c248a2fc77d188ff576",
+      "qualified_commit": "0123ba86f3e7b72411a198ec43edfa25aaba9840",
+      "requested_readiness_instance": "a024c974e4964b5e8f0c4b56e6f7f18486f29a9d2ed048f6bcc3e4d0af2e4d13",
+      "schema_version": 1,
+      "url": "http://127.0.0.1:40439/",
+      "windows_execution_path": true,
+      "wsl_backend": true,
+      "wsl_distro": "Ubuntu"
+    },
+    {
+      "backend_reused": false,
+      "browser_open_delegated_to_windows_launcher": true,
+      "kernel": "6.18.33.2-microsoft-standard-WSL2",
+      "launcher": "Research Supervisor.vbs",
+      "observed_readiness_instance": "ab88610cb39040e7976611161791fbb0412786351fc444be859669ffd21ad654",
+      "qualified_commit": "0123ba86f3e7b72411a198ec43edfa25aaba9840",
+      "requested_readiness_instance": "ab88610cb39040e7976611161791fbb0412786351fc444be859669ffd21ad654",
+      "schema_version": 1,
+      "url": "http://127.0.0.1:40439/",
+      "windows_execution_path": true,
+      "wsl_backend": true,
+      "wsl_distro": "Ubuntu"
+    }
+  ],
+  "operator_actions_via_browser_ui_only": true,
+  "qualified": true,
+  "schema_version": 1,
+  "screenshots": {
+    "completed": "bc886c3461b6c4740ba79b7b71f634b7f92aefc7f91ddc8cf13ce525862e77c6",
+    "environment_blocked": "09d4ec4a8476cbe3a906ca3aab29aee22b3adfd504c20202e1dbee38443febed",
+    "human_action": "b79421062df3790850b9444e0c7ac7a4950a53627e2fe63e8950206d2dd3a9ed",
+    "recoverable_interruption": "1567057c168e988e8a242946f575ced8805d67c768c8af0b543dcf73cd8fd38b"
+  },
+  "stage": "PA-5C4-T",
+  "steps": [
+    "real_windows_launcher_opened_real_browser",
+    "environment_blocked_after_start",
+    "custodian_restarted",
+    "browser_restarted",
+    "original_frozen_launch_intent_remained_authoritative",
+    "recoverable_campaign_interruption_observed",
+    "human_action_observed",
+    "human_evidence_inspected",
+    "verified_durable_completion_observed",
+    "final_report_opened",
+    "result_bundle_exported",
+    "already_running_backend_reused",
+    "wsl_unavailable_failure_reported"
+  ],
+  "windows_execution_path": true,
+  "windows_launcher": "Research Supervisor.vbs",
+  "wsl_kernel": "6.18.33.2-microsoft-standard-WSL2"
+}

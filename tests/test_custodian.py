@@ -18,7 +18,6 @@ from research_automation_supervisor.custodian_exchange import (
     publish_human_action_request,
 )
 from research_automation_supervisor.custodian_models import (
-    CampaignInputBundleV1,
     DurableStateAuthorityV1,
     EnvironmentIssueV1,
     EnvironmentReportV1,
@@ -116,7 +115,13 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
     )
     assert duplicate_other_click.campaign_public_id == campaign_id
     assert runner.started == 1
-    assert Path(record.bundle_path).stat().st_mode & 0o222 == 0
+    frozen_object = (
+        custodian.launch_authority_root
+        / "objects"
+        / record.launch_intent_sha256[:2]
+        / f"{record.launch_intent_sha256}.json"
+    )
+    assert frozen_object.stat().st_mode & 0o222 == 0
 
     runner.current = projection(campaign_id, status="blocked")
     blocked = custodian.get_record(campaign_id, refresh=True)
@@ -124,7 +129,7 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
     custodian.continue_campaign(campaign_id)
     assert runner.resumed == 1
 
-    issued = human_request(campaign_id, record.bundle_sha256)
+    issued = human_request(campaign_id, record.launch_intent_sha256)
     paths = prepare_operator_exchange(custodian.exchange_root, campaign_id)
     publish_human_action_request(paths, issued)
     runner.current = projection(
@@ -257,7 +262,7 @@ def test_replaced_campaign_record_fails_closed(tmp_path: Path) -> None:
         custodian.get_record(record.campaign_public_id)
 
 
-def test_frozen_bundle_substitution_before_launch_fails_closed(tmp_path: Path) -> None:
+def test_frozen_authority_substitution_before_launch_fails_closed(tmp_path: Path) -> None:
     repository = create_repository(tmp_path)
     runner = FakeQualifiedRunner()
     issue = EnvironmentIssueV1(
@@ -287,23 +292,19 @@ def test_frozen_bundle_substitution_before_launch_fails_closed(tmp_path: Path) -
     )
     preview = custodian.preview(submission(repository))
     record = custodian.start(preview.preview_id, client_start_key="start_abcdefghijklmnop")
-    original = CampaignInputBundleV1.model_validate(
-        json.loads(Path(record.bundle_path).read_text(encoding="utf-8"))
+    object_path = (
+        custodian.launch_authority_root
+        / "objects"
+        / record.launch_intent_sha256[:2]
+        / f"{record.launch_intent_sha256}.json"
     )
-    altered = CampaignInputBundleV1.freeze(
-        campaign_public_id=original.campaign_public_id,
-        human_name=original.human_name,
-        repository=original.repository,
-        research_contract=FrozenInputFileV1.from_bytes("contract.md", b"altered contract\n"),
-        research_plan=original.research_plan,
-        initial_task=original.initial_task,
-        supporting_files=original.supporting_files,
-        requested_settings=original.requested_settings,
-    )
-    bundle_path = Path(record.bundle_path)
-    bundle_path.unlink()
-    bundle_path.write_text(altered.model_dump_json(), encoding="utf-8")
-    with pytest.raises(CustodianStateError, match="no longer match"):
+    altered = json.loads(object_path.read_text(encoding="utf-8"))
+    altered["research_contract"] = FrozenInputFileV1.from_bytes(
+        "contract.md", b"altered contract\n"
+    ).model_dump(mode="json")
+    object_path.unlink()
+    object_path.write_text(json.dumps(altered), encoding="utf-8")
+    with pytest.raises(CustodianStateError, match="Frozen core launch authority"):
         custodian.continue_campaign(record.campaign_public_id)
     assert runner.started == 0
 

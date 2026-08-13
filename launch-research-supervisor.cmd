@@ -1,4 +1,4 @@
 @echo off
 setlocal
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch-research-supervisor.ps1"
+wscript.exe "%~dp0Research Supervisor.vbs"
 if errorlevel 1 pause

@@ -21,7 +21,6 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
@@ -39,7 +38,6 @@ from research_automation_supervisor.custodian_exchange import (
     submit_human_action_response,
 )
 from research_automation_supervisor.custodian_models import (
-    CampaignInputBundleV1,
     CampaignPreviewV1,
     CampaignProfileSettingsV1,
     CustodianCampaignRecordV1,
@@ -49,10 +47,15 @@ from research_automation_supervisor.custodian_models import (
     HumanActionResponseV1,
     LocalNotificationV1,
     OperatorCampaignProjectionV1,
-    RepositoryAuthorityV1,
-    render_qualified_acceptance_runner,
 )
 from research_automation_supervisor.durable_state import atomic_write_json, render_json_bytes
+from research_automation_supervisor.prelaunch_authority import (
+    CampaignLaunchReferenceV1,
+    CampaignLaunchRequestV1,
+    CampaignLaunchSummaryV1,
+    RequestedRepositoryAuthorityV1,
+)
+from research_automation_supervisor.safe_git import inspect_requested_repository
 
 MAX_WIZARD_BODY_BYTES = 64 * 1024 * 1024
 _START_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{15,79}$")
@@ -79,18 +82,32 @@ class PreviewDraftV1(BaseModel):
     schema_version: Literal[1] = 1
     preview_id: str
     submission: WizardSubmissionV1
-    repository_root: str
-    repository_display: str
-    source_locator_sha256: str
-    baseline_commit: str
-    baseline_tree: str
-    repository_id: str
+    repository: RequestedRepositoryAuthorityV1
 
 
 class QualifiedRunner(Protocol):
     """Only campaign-affecting capabilities available to the Custodian."""
 
-    def launch_start(self, bundle: Path, authority: Path, exchange: Path, log: Path) -> int: ...
+    def freeze_launch(
+        self, request: CampaignLaunchRequestV1, launch_authority_root: Path
+    ) -> CampaignLaunchReferenceV1: ...
+
+    def launch_summary(
+        self,
+        launch_token: str,
+        launch_authority_root: Path,
+        campaign_public_id: str,
+        launch_intent_sha256: str,
+    ) -> CampaignLaunchSummaryV1: ...
+
+    def launch_start(
+        self,
+        launch_token: str,
+        launch_authority_root: Path,
+        authority: Path,
+        exchange: Path,
+        log: Path,
+    ) -> int: ...
 
     def launch_resume(self, authority: Path, exchange: Path, log: Path) -> int: ...
 
@@ -104,22 +121,77 @@ class QualifiedRunner(Protocol):
 
     def export(self, authority: Path, exchange: Path, destination: Path) -> Path: ...
 
+    def repository(self, authority: Path, exchange: Path) -> Path: ...
+
     def launch_authentication(self, log: Path) -> int: ...
 
 
 class SubprocessQualifiedRunner:
     """Invoke only the qualified runner module, never any model or workflow directly."""
 
+    def freeze_launch(
+        self, request: CampaignLaunchRequestV1, launch_authority_root: Path
+    ) -> CampaignLaunchReferenceV1:
+        value = self._run_prelaunch_json(
+            "freeze",
+            launch_authority_root,
+            ("--request-json", request.model_dump_json()),
+        )
+        try:
+            return CampaignLaunchReferenceV1.model_validate(value)
+        except ValidationError as exc:
+            raise CustodianStateError(
+                "Qualified Start authority returned an invalid reference."
+            ) from exc
+
+    def launch_summary(
+        self,
+        launch_token: str,
+        launch_authority_root: Path,
+        campaign_public_id: str,
+        launch_intent_sha256: str,
+    ) -> CampaignLaunchSummaryV1:
+        value = self._run_prelaunch_json(
+            "launch-summary",
+            launch_authority_root,
+            (
+                "--launch-token",
+                launch_token,
+                "--expected-campaign",
+                campaign_public_id,
+                "--expected-intent",
+                launch_intent_sha256,
+            ),
+        )
+        try:
+            return CampaignLaunchSummaryV1.model_validate(value)
+        except ValidationError as exc:
+            raise CustodianStateError(
+                "Frozen core launch authority returned invalid status."
+            ) from exc
+
     def __init__(self, executable: str | None = None) -> None:
         self.executable = executable or sys.executable
 
-    def launch_start(self, bundle: Path, authority: Path, exchange: Path, log: Path) -> int:
+    def launch_start(
+        self,
+        launch_token: str,
+        launch_authority_root: Path,
+        authority: Path,
+        exchange: Path,
+        log: Path,
+    ) -> int:
         return self._launch(
             "start",
             authority,
             exchange,
             log,
-            ("--bundle", str(bundle)),
+            (
+                "--launch-token",
+                launch_token,
+                "--launch-authority-root",
+                str(launch_authority_root),
+            ),
         )
 
     def launch_resume(self, authority: Path, exchange: Path, log: Path) -> int:
@@ -172,6 +244,13 @@ class SubprocessQualifiedRunner:
         if not isinstance(path, str) or Path(path) != destination:
             raise CustodianStateError("Qualified export returned an invalid destination.")
         return destination
+
+    def repository(self, authority: Path, exchange: Path) -> Path:
+        value = self._run_json("repository", authority, exchange, ())
+        path = value.get("path")
+        if not isinstance(path, str):
+            raise CustodianStateError("Qualified repository path was unavailable.")
+        return Path(path)
 
     def launch_authentication(self, log: Path) -> int:
         log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -261,6 +340,50 @@ class SubprocessQualifiedRunner:
             raise CustodianStateError("Qualified campaign returned an invalid response.")
         return value
 
+    def _run_prelaunch_json(
+        self,
+        operation: str,
+        launch_authority_root: Path,
+        extra: Sequence[str],
+    ) -> dict[str, object]:
+        command = [
+            self.executable,
+            "-m",
+            "research_automation_supervisor.qualified_runner",
+            operation,
+            "--launch-authority-root",
+            str(launch_authority_root),
+            *extra,
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                env=_runner_environment(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CustodianStateError(
+                "Qualified Start authority is temporarily unavailable."
+            ) from exc
+        stream = completed.stdout if completed.returncode == 0 else completed.stderr
+        try:
+            value = json.loads(stream)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise CustodianStateError(
+                "Qualified Start authority is temporarily unavailable."
+            ) from exc
+        if completed.returncode != 0 or not isinstance(value, dict):
+            message = value.get("message") if isinstance(value, dict) else None
+            raise CustodianStateError(
+                message if isinstance(message, str) else "Qualified Start authority stopped safely."
+            )
+        return value
+
     def _command(
         self,
         operation: str,
@@ -301,16 +424,22 @@ class CampaignCustodian:
         self.utc_now = utc_now
         self.custodian_state = _safe_child_directory(self.data_root, "custodian-state")
         self.exchange_root = _safe_child_directory(self.data_root, "operator-exchange")
-        self.repositories = _safe_child_directory(self.data_root, "managed-repositories")
-        self.workspaces = _safe_child_directory(self.data_root, "workspaces")
         self.authorities = _safe_child_directory(self.data_root, "qualified-campaigns")
         self.exports = _safe_child_directory(self.data_root, "exports")
         self.records = _safe_child_directory(self.custodian_state, "campaigns")
         self.previews = _safe_child_directory(self.custodian_state, "previews")
-        self.bundles = _safe_child_directory(self.custodian_state, "bundles")
         self.start_keys = _safe_child_directory(self.custodian_state, "start-keys")
         self.preview_starts = _safe_child_directory(self.custodian_state, "preview-starts")
         self.runner_logs = _safe_child_directory(self.custodian_state, "runner-logs")
+        application_data = self.data_root.parent
+        self.launch_authority_root = _safe_external_core_root(
+            application_data / "research-automation-supervisor-core" / "prelaunch-authority",
+            self.data_root,
+        )
+        self.repository_preparation_root = _safe_external_core_root(
+            application_data / "research-automation-supervisor-core" / "repository-preparation",
+            self.data_root,
+        )
 
     def environment(self) -> EnvironmentReportV1:
         return self.environment_inspector(self.data_root)
@@ -321,27 +450,23 @@ class CampaignCustodian:
 
     def preview(self, submission: WizardSubmissionV1) -> CampaignPreviewV1:
         _validate_submission_text(submission)
-        root, display, locator_hash = self._repository_source(submission)
-        commit = _git(root, "rev-parse", "HEAD")
-        tree = _git(root, "rev-parse", "HEAD^{tree}")
+        repository = inspect_requested_repository(
+            submission.repository_kind,
+            submission.repository_locator,
+            sterile_root=self.repository_preparation_root / "preview-sterile",
+        )
         preview_id = f"preview-{self.token_factory()[:24]}"
-        repository_id = _repository_identifier(display, locator_hash)
         draft = PreviewDraftV1(
             preview_id=preview_id,
             submission=submission,
-            repository_root=str(root),
-            repository_display=display,
-            source_locator_sha256=locator_hash,
-            baseline_commit=commit,
-            baseline_tree=tree,
-            repository_id=repository_id,
+            repository=repository,
         )
         _write_once_json(self.previews / f"{preview_id}.json", draft.model_dump(mode="json"))
         return CampaignPreviewV1(
             preview_id=preview_id,
             human_name=submission.human_name,
-            repository=display,
-            baseline_commit_short=commit[:12],
+            repository=repository.source_display,
+            baseline_commit_short=repository.requested_commit[:12],
             contract_sha256=hashlib.sha256(
                 submission.research_contract.encode("utf-8")
             ).hexdigest(),
@@ -369,7 +494,7 @@ class CampaignCustodian:
             campaign_id = value.get("campaign_public_id")
             if not isinstance(campaign_id, str):
                 raise CustodianStateError("Start request record is invalid.")
-            return self.get_record(campaign_id, refresh=False)
+            return self.get_record(campaign_id, refresh=True)
         preview_digest = hashlib.sha256(preview_id.encode("ascii")).hexdigest()
         preview_start_path = self.preview_starts / f"{preview_digest}.json"
         if preview_start_path.exists():
@@ -377,9 +502,9 @@ class CampaignCustodian:
             campaign_id = value.get("campaign_public_id")
             if not isinstance(campaign_id, str):
                 raise CustodianStateError("Preview Start record is invalid.")
-            return self.get_record(campaign_id, refresh=False)
+            return self.get_record(campaign_id, refresh=True)
         for existing_path in _regular_json_files(self.records):
-            existing = self.get_record(existing_path.stem, refresh=False)
+            existing = self.get_record(existing_path.stem, refresh=True)
             if existing.preview_id == preview_id:
                 _write_once_json(
                     preview_start_path,
@@ -391,29 +516,11 @@ class CampaignCustodian:
                 )
                 return existing
         draft = self._load_preview(preview_id)
-        campaign_id = f"campaign-{self.token_factory()[:24]}"
-        campaign_workspace = self.workspaces / campaign_id
-        try:
-            campaign_workspace.mkdir(exist_ok=False, mode=0o700)
-        except OSError as exc:
-            raise CustodianStateError("Campaign workspace could not be prepared.") from exc
-        prepared_repository = campaign_workspace / "repository"
-        self._create_detached_worktree(Path(draft.repository_root), prepared_repository, draft)
-        prepared_commit = _git(prepared_repository, "rev-parse", "HEAD")
-        prepared_tree = _git(prepared_repository, "rev-parse", "HEAD^{tree}")
-        repository = RepositoryAuthorityV1(
-            source_kind=draft.submission.repository_kind,
-            source_display=draft.repository_display,
-            source_locator_sha256=draft.source_locator_sha256,
-            prepared_workspace=str(prepared_repository),
-            baseline_commit=prepared_commit,
-            baseline_tree=prepared_tree,
-            repository_id=draft.repository_id,
-        )
-        bundle = CampaignInputBundleV1.freeze(
-            campaign_public_id=campaign_id,
+        launch_request = CampaignLaunchRequestV1(
+            preview_id=preview_id,
+            client_start_key_sha256=key_digest,
             human_name=draft.submission.human_name,
-            repository=repository,
+            repository=draft.repository,
             research_contract=FrozenInputFileV1.from_bytes(
                 "research-contract.md", draft.submission.research_contract.encode("utf-8")
             ),
@@ -426,14 +533,22 @@ class CampaignCustodian:
             supporting_files=draft.submission.supporting_files,
             requested_settings=draft.submission.requested_settings,
         )
-        bundle_path = self.bundles / f"{campaign_id}.json"
-        _write_once(bundle_path, render_json_bytes(bundle.model_dump(mode="json")))
+        # This is the first authoritative Start operation. It fsyncs the exact
+        # scientific bytes before Git, environment doctor, auth, or isolation checks.
+        reference = self.runner.freeze_launch(launch_request, self.launch_authority_root)
+        intent = self.runner.launch_summary(
+            reference.launch_token,
+            self.launch_authority_root,
+            reference.campaign_public_id,
+            reference.launch_intent_sha256,
+        )
+        campaign_id = reference.campaign_public_id
         exchange = prepare_operator_exchange(self.exchange_root, campaign_id)
         authority = self.authorities / campaign_id
         projection = OperatorCampaignProjectionV1(
             campaign_public_id=campaign_id,
-            human_name=bundle.human_name,
-            repository=bundle.repository.source_display,
+            human_name=intent.human_name,
+            repository=intent.repository_display,
             status="preparing",
             stage="Preparing campaign",
             last_activity="Checking the local environment before qualified launch",
@@ -443,8 +558,8 @@ class CampaignCustodian:
         record = CustodianCampaignRecordV1(
             campaign_public_id=campaign_id,
             preview_id=preview_id,
-            bundle_path=str(bundle_path),
-            bundle_sha256=bundle.bundle_sha256,
+            launch_intent_sha256=reference.launch_intent_sha256,
+            launch_token=reference.launch_token,
             core_authority_directory=str(authority),
             exchange_directory=str(exchange.root),
             created_at=_utc_string(self.utc_now()),
@@ -464,14 +579,15 @@ class CampaignCustodian:
         if not environment.ready:
             blocked = record.model_copy(
                 update={
-                    "projection": _environment_blocked_projection(bundle, environment),
+                    "projection": _environment_blocked_projection(intent, environment),
                     "runner_operation": "start",
                 }
             )
             self._persist_record(blocked)
             return blocked
         pid = self.runner.launch_start(
-            bundle_path,
+            reference.launch_token,
+            self.launch_authority_root,
             authority,
             self.exchange_root,
             self.runner_logs / f"{campaign_id}.log",
@@ -556,11 +672,11 @@ class CampaignCustodian:
 
     def continue_campaign(self, campaign_public_id: str) -> CustodianCampaignRecordV1:
         record = self.get_record(campaign_public_id, refresh=False)
+        intent = self._validated_intent(record)
         environment = self.environment()
-        bundle = self._validated_bundle(record)
         if not environment.ready:
             updated = record.model_copy(
-                update={"projection": _environment_blocked_projection(bundle, environment)}
+                update={"projection": _environment_blocked_projection(intent, environment)}
             )
             self._persist_record(updated)
             return updated
@@ -571,7 +687,11 @@ class CampaignCustodian:
             operation = "resume"
         else:
             pid = self.runner.launch_start(
-                Path(record.bundle_path), authority, self.exchange_root, log
+                record.launch_token,
+                self.launch_authority_root,
+                authority,
+                self.exchange_root,
+                log,
             )
             operation = "start"
         updated = record.model_copy(update={"runner_operation": operation, "runner_pid": pid})
@@ -602,10 +722,10 @@ class CampaignCustodian:
 
     def repository_path(self, campaign_public_id: str) -> Path:
         record = self.get_record(campaign_public_id, refresh=False)
-        return Path(_load_bundle(Path(record.bundle_path)).repository.prepared_workspace)
+        return self.runner.repository(Path(record.core_authority_directory), self.exchange_root)
 
     def _refresh_record(self, record: CustodianCampaignRecordV1) -> CustodianCampaignRecordV1:
-        bundle = self._validated_bundle(record)
+        intent = self._validated_intent(record)
         authority = Path(record.core_authority_directory)
         if not authority.exists():
             if record.projection.status == "blocked" and record.runner_pid is None:
@@ -616,7 +736,7 @@ class CampaignCustodian:
                 stopped = record.model_copy(
                     update={
                         "projection": _verification_blocked_projection(
-                            bundle,
+                            intent,
                             "qualified_runner_stopped",
                             "The qualified campaign runner stopped before campaign launch.",
                         ),
@@ -633,7 +753,7 @@ class CampaignCustodian:
             blocked = record.model_copy(
                 update={
                     "projection": _verification_blocked_projection(
-                        bundle,
+                        intent,
                         "verified_status_unavailable",
                         (
                             "Qualified campaign evidence could not be verified. "
@@ -661,21 +781,22 @@ class CampaignCustodian:
         self._notify_projection(updated)
         return updated
 
-    def _validated_bundle(self, record: CustodianCampaignRecordV1) -> CampaignInputBundleV1:
-        bundle = _load_bundle(Path(record.bundle_path))
-        if (
-            bundle.campaign_public_id != record.campaign_public_id
-            or bundle.bundle_sha256 != record.bundle_sha256
-            or Path(bundle.repository.prepared_workspace)
-            != self.workspaces / record.campaign_public_id / "repository"
-        ):
-            raise CustodianStateError("Frozen campaign inputs no longer match Start authority.")
-        return bundle
+    def _validated_intent(self, record: CustodianCampaignRecordV1) -> CampaignLaunchSummaryV1:
+        try:
+            return self.runner.launch_summary(
+                record.launch_token,
+                self.launch_authority_root,
+                record.campaign_public_id,
+                record.launch_intent_sha256,
+            )
+        except Exception as exc:
+            raise CustodianStateError(
+                "Frozen core launch authority is missing, corrupt, stale, or belongs elsewhere."
+            ) from exc
 
     def _validate_record_locators(self, record: CustodianCampaignRecordV1) -> None:
         campaign_id = record.campaign_public_id
         expected = (
-            (Path(record.bundle_path), self.bundles / f"{campaign_id}.json"),
             (Path(record.core_authority_directory), self.authorities / campaign_id),
             (Path(record.exchange_directory), self.exchange_root / campaign_id),
         )
@@ -725,56 +846,6 @@ class CampaignCustodian:
             raise CustodianStateError("Campaign preview identity changed.")
         return draft
 
-    def _repository_source(self, submission: WizardSubmissionV1) -> tuple[Path, str, str]:
-        locator = submission.repository_locator.strip()
-        locator_hash = hashlib.sha256(locator.encode("utf-8")).hexdigest()
-        if submission.repository_kind == "existing_folder":
-            root = _existing_repository(Path(locator))
-            return root, root.name, locator_hash
-        display = _safe_git_display(locator)
-        destination = self.repositories / locator_hash
-        if destination.exists():
-            root = _existing_repository(destination)
-        else:
-            _clone_repository(locator, destination)
-            root = _existing_repository(destination)
-        return root, display, locator_hash
-
-    def _create_detached_worktree(
-        self,
-        source: Path,
-        destination: Path,
-        draft: PreviewDraftV1,
-    ) -> None:
-        if _git(source, "rev-parse", "HEAD") != draft.baseline_commit:
-            raise CustodianInputError(
-                "Repository changed after preview. Review it again before Start."
-            )
-        if _git(source, "rev-parse", "HEAD^{tree}") != draft.baseline_tree:
-            raise CustodianInputError(
-                "Repository changed after preview. Review it again before Start."
-            )
-        _git(source, "worktree", "add", "--detach", str(destination), draft.baseline_commit)
-        if _git(destination, "status", "--porcelain", "--untracked-files=normal"):
-            raise CustodianStateError("Prepared campaign worktree is not clean.")
-        support = destination / ".research-supervisor"
-        support.mkdir(mode=0o700)
-        (support / "acceptance.py").write_bytes(render_qualified_acceptance_runner(sys.executable))
-        _git(destination, "add", "--", ".research-supervisor/acceptance.py")
-        _git(
-            destination,
-            "-c",
-            "user.name=Research Supervisor Custodian",
-            "-c",
-            "user.email=custodian@localhost.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "chore: prepare qualified campaign acceptance",
-        )
-        if _git(destination, "status", "--porcelain", "--untracked-files=normal"):
-            raise CustodianStateError("Prepared campaign worktree is not clean.")
-
     def _persist_record(self, record: CustodianCampaignRecordV1) -> None:
         atomic_write_json(
             self.records / f"{record.campaign_public_id}.json",
@@ -796,82 +867,6 @@ def _validate_submission_text(submission: WizardSubmissionV1) -> None:
             raise CustodianInputError(f"{label} contains an unsupported character.")
 
 
-def _safe_git_display(locator: str) -> str:
-    if locator.startswith("git@"):
-        if ":" not in locator or any(character.isspace() for character in locator):
-            raise CustodianInputError("Git URL is invalid.")
-        host, path = locator[4:].split(":", 1)
-        if not host or not path or path.startswith("/") or ".." in Path(path).parts:
-            raise CustodianInputError("Git URL is invalid.")
-        return f"{host}/{path.removesuffix('.git')}"
-    parsed = urlsplit(locator)
-    if parsed.scheme not in {"https", "ssh"} or not parsed.hostname:
-        raise CustodianInputError("Use an HTTPS or SSH Git URL.")
-    if parsed.password is not None or (parsed.username and parsed.scheme == "https"):
-        raise CustodianInputError("Git URLs must not contain credentials.")
-    if ".." in Path(parsed.path).parts:
-        raise CustodianInputError("Git URL is invalid.")
-    return f"{parsed.hostname}{parsed.path.removesuffix('.git')}"
-
-
-def _clone_repository(locator: str, destination: Path) -> None:
-    try:
-        completed = subprocess.run(
-            ["git", "clone", "--no-tags", "--", locator, str(destination)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env={**_runner_environment(), "GIT_TERMINAL_PROMPT": "0"},
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CustodianEnvironmentError("Repository could not be cloned.") from exc
-    if completed.returncode != 0:
-        raise CustodianEnvironmentError(
-            "Repository access needs attention. Check the URL or approved Git credentials."
-        )
-
-
-def _existing_repository(path: Path) -> Path:
-    try:
-        absolute = Path(os.path.abspath(path))
-        resolved = path.resolve(strict=True)
-        status = resolved.lstat()
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise CustodianInputError("Repository folder is unavailable.") from exc
-    if absolute != resolved or stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise CustodianInputError("Repository folder must not be a symbolic link.")
-    root_text = _git(resolved, "rev-parse", "--show-toplevel")
-    root = Path(root_text).resolve(strict=True)
-    if root != resolved:
-        raise CustodianInputError("Choose the repository's top-level folder.")
-    return root
-
-
-def _git(repository: Path, *arguments: str) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(repository), *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120,
-            env=_runner_environment(),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CustodianEnvironmentError("Git could not inspect the selected repository.") from exc
-    if completed.returncode != 0:
-        raise CustodianInputError("The selected folder is not a usable Git repository.")
-    return completed.stdout.strip()
-
-
-def _repository_identifier(display: str, locator_hash: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(display).name).strip("-") or "repository"
-    return f"{cleaned[:60]}-{locator_hash[:12]}"[:80]
-
-
 def _profile_summary(settings: CampaignProfileSettingsV1) -> str:
     return {
         "standard": (
@@ -884,14 +879,14 @@ def _profile_summary(settings: CampaignProfileSettingsV1) -> str:
 
 
 def _environment_blocked_projection(
-    bundle: CampaignInputBundleV1,
+    bundle: CampaignLaunchSummaryV1,
     environment: EnvironmentReportV1,
 ) -> OperatorCampaignProjectionV1:
     first = environment.issues[0]
     return OperatorCampaignProjectionV1(
         campaign_public_id=bundle.campaign_public_id,
         human_name=bundle.human_name,
-        repository=bundle.repository.source_display,
+        repository=bundle.repository_display,
         status="blocked",
         stage="Setup needed",
         last_activity="Campaign launch is waiting; no scientific action has started",
@@ -904,14 +899,14 @@ def _environment_blocked_projection(
 
 
 def _verification_blocked_projection(
-    bundle: CampaignInputBundleV1,
+    bundle: CampaignLaunchSummaryV1,
     code: str,
     message: str,
 ) -> OperatorCampaignProjectionV1:
     return OperatorCampaignProjectionV1(
         campaign_public_id=bundle.campaign_public_id,
         human_name=bundle.human_name,
-        repository=bundle.repository.source_display,
+        repository=bundle.repository_display,
         status="blocked",
         stage="Paused safely",
         last_activity="Qualified verification stopped before another campaign action",
@@ -1001,14 +996,6 @@ def _regular_json_files(directory: Path) -> tuple[Path, ...]:
     return tuple(sorted(values))
 
 
-def _load_bundle(path: Path) -> CampaignInputBundleV1:
-    value = _read_json_regular(path, "Frozen campaign input bundle")
-    try:
-        return CampaignInputBundleV1.model_validate(value)
-    except ValidationError as exc:
-        raise CustodianStateError("Frozen campaign input bundle is invalid.") from exc
-
-
 def _validate_campaign_id(value: str) -> None:
     if not re.fullmatch(r"campaign-[a-z0-9-]{12,71}", value):
         raise CustodianInputError("Campaign link is invalid.")
@@ -1053,6 +1040,29 @@ def _runner_environment() -> dict[str, str]:
         "WSL_INTEROP",
     }
     return {key: value for key, value in os.environ.items() if key in allowed}
+
+
+def _safe_external_core_root(path: Path, custodian_root: Path) -> Path:
+    """Create a protected sibling root that is never part of Custodian state."""
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        absolute = Path(os.path.abspath(path))
+        resolved = path.resolve(strict=True)
+        status = resolved.lstat()
+        custodian = custodian_root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CustodianEnvironmentError("Core application storage is unavailable.") from exc
+    if (
+        absolute != resolved
+        or stat.S_ISLNK(status.st_mode)
+        or not stat.S_ISDIR(status.st_mode)
+        or resolved == custodian
+        or custodian in resolved.parents
+        or resolved in custodian.parents
+    ):
+        raise CustodianEnvironmentError("Core application storage is unsafe.")
+    os.chmod(resolved, 0o700)
+    return resolved
 
 
 def _utc_string(value: datetime) -> str:

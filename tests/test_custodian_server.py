@@ -134,7 +134,7 @@ def test_zero_shell_http_acceptance_journey_and_progressive_disclosure(tmp_path:
         assert runner.resumed == 1
 
         record = custodian.get_record(campaign_id, refresh=False)
-        issued = human_request(campaign_id, record.bundle_sha256)
+        issued = human_request(campaign_id, record.launch_intent_sha256)
         exchange = prepare_operator_exchange(custodian.exchange_root, campaign_id)
         publish_human_action_request(exchange, issued)
         runner.current = projection(

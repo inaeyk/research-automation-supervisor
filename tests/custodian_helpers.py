@@ -8,6 +8,13 @@ from research_automation_supervisor.custodian_models import (
     EnvironmentReportV1,
     OperatorCampaignProjectionV1,
 )
+from research_automation_supervisor.prelaunch_authority import (
+    CampaignLaunchReferenceV1,
+    CampaignLaunchRequestV1,
+    CampaignLaunchSummaryV1,
+    freeze_launch_intent,
+    load_launch_summary,
+)
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -103,11 +110,37 @@ class FakeQualifiedRunner:
         self.responded = 0
         self.authenticated = 0
 
-    def launch_start(self, bundle: Path, authority: Path, exchange: Path, log: Path) -> int:
-        del exchange, log
+    def freeze_launch(
+        self, request: CampaignLaunchRequestV1, launch_authority_root: Path
+    ) -> CampaignLaunchReferenceV1:
+        return freeze_launch_intent(request, launch_authority_root)
+
+    def launch_summary(
+        self,
+        launch_token: str,
+        launch_authority_root: Path,
+        campaign_public_id: str,
+        launch_intent_sha256: str,
+    ) -> CampaignLaunchSummaryV1:
+        return load_launch_summary(
+            launch_authority_root,
+            launch_token,
+            expected_campaign_public_id=campaign_public_id,
+            expected_intent_sha256=launch_intent_sha256,
+        )
+
+    def launch_start(
+        self,
+        launch_token: str,
+        launch_authority_root: Path,
+        authority: Path,
+        exchange: Path,
+        log: Path,
+    ) -> int:
+        del launch_token, launch_authority_root, exchange, log
         self.started += 1
         authority.mkdir(parents=True, exist_ok=True)
-        campaign_id = bundle.stem
+        campaign_id = authority.name
         self.current = projection(campaign_id)
         return 910_001
 
@@ -144,6 +177,10 @@ class FakeQualifiedRunner:
         del authority, exchange
         destination.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
         return destination
+
+    def repository(self, authority: Path, exchange: Path) -> Path:
+        del exchange
+        return authority.parent / "repository"
 
     def launch_authentication(self, log: Path) -> int:
         del log

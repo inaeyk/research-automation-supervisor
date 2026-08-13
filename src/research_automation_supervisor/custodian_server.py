@@ -29,11 +29,12 @@ from research_automation_supervisor.custodian import (
     CampaignCustodian,
     WizardSubmissionV1,
 )
-from research_automation_supervisor.custodian_errors import CustodianError
+from research_automation_supervisor.custodian_errors import CustodianError, CustodianStateError
 from research_automation_supervisor.custodian_models import (
     CampaignProfileSettingsV1,
     FrozenInputFileV1,
 )
+from research_automation_supervisor.durable_state import atomic_write_json
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 CAMPAIGN_ROUTE = re.compile(r"^/api/campaigns/(?P<campaign>campaign-[a-z0-9-]+)$")
@@ -58,10 +59,12 @@ class CustodianHTTPServer(ThreadingHTTPServer):
         custodian: CampaignCustodian,
         *,
         session_secret: str,
+        readiness_instance: str | None = None,
     ) -> None:
         self.custodian = custodian
         self.session_secret = session_secret
         self.csrf_token = hashlib.sha256(f"csrf:{session_secret}".encode("ascii")).hexdigest()
+        self.readiness_instance = readiness_instance or secrets.token_hex(32)
         super().__init__(server_address, CustodianRequestHandler)
 
 
@@ -93,6 +96,7 @@ class CustodianRequestHandler(BaseHTTPRequestHandler):
                         "application": "Research Automation Supervisor",
                         "version": __version__,
                         "qualified_commit": os.environ.get("RAS_QUALIFIED_COMMIT", "development"),
+                        "readiness_instance": self.server.readiness_instance,
                     }
                 )
                 return
@@ -339,26 +343,33 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
     open_browser: bool = False,
+    readiness_instance: str | None = None,
+    custodian: CampaignCustodian | None = None,
 ) -> None:
     if host != "127.0.0.1":
         raise ValueError("Campaign Custodian may bind only to 127.0.0.1")
-    custodian = CampaignCustodian(data_root)
+    active_custodian = custodian or CampaignCustodian(data_root)
     session_secret = secrets.token_urlsafe(32)
-    server = CustodianHTTPServer((host, port), custodian, session_secret=session_secret)
+    server = CustodianHTTPServer(
+        (host, port),
+        active_custodian,
+        session_secret=session_secret,
+        readiness_instance=readiness_instance,
+    )
     url = f"http://{host}:{server.server_port}/"
-    readiness = custodian.custodian_state / "backend-readiness.json"
-    readiness.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "pid": os.getpid(),
-                "url": url,
-                "started": True,
-                "qualified_commit": os.environ.get("RAS_QUALIFIED_COMMIT", "development"),
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    readiness = active_custodian.custodian_state / "backend-readiness.json"
+    atomic_write_json(
+        readiness,
+        {
+            "schema_version": 1,
+            "pid": os.getpid(),
+            "url": url,
+            "started": True,
+            "qualified_commit": os.environ.get("RAS_QUALIFIED_COMMIT", "development"),
+            "readiness_instance": server.readiness_instance,
+        },
+        error_factory=CustodianStateError,
+        error_message="Backend readiness could not be committed.",
     )
     if open_browser:
         threading.Timer(0.25, lambda: webbrowser.open(url)).start()
@@ -379,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open-browser", action="store_true")
+    parser.add_argument("--readiness-instance")
     args = parser.parse_args(argv)
     log_root = args.data_dir / "custodian-state"
     log_root.mkdir(parents=True, exist_ok=True)
@@ -393,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             open_browser=args.open_browser,
+            readiness_instance=args.readiness_instance,
         )
     except OSError:
         return 2

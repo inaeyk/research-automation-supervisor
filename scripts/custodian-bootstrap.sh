@@ -3,15 +3,35 @@ set -eu
 
 project_root=${1:?project root is required}
 launch_mode=${2:-normal}
-data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}/research-automation-supervisor
+readiness_instance=${3:?readiness instance is required}
+data_override=${4:-}
+acceptance_scenario=${5:-}
+port=${6:-8765}
+case "$readiness_instance" in
+    *[!A-Fa-f0-9]*|'') exit 2 ;;
+esac
+case "$port" in
+    *[!0-9]*|'') exit 2 ;;
+esac
+if [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+    exit 2
+fi
+if [ -n "$data_override" ]; then
+    data_root=$data_override
+else
+    data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}/research-automation-supervisor
+fi
 runtime_root=$data_root/runtime
 managed_venv=$runtime_root/venv
 backend_log=$data_root/custodian-state/backend.log
 install_stamp=$runtime_root/installed-commit
-url=http://127.0.0.1:8765/
+url=http://127.0.0.1:$port/
 readiness=$data_root/custodian-state/backend-readiness.json
+evidence_root=$data_root/custodian-state/launcher-evidence
+evidence=$evidence_root/$readiness_instance.json
 
-mkdir -p "$runtime_root" "$data_root/custodian-state"
+mkdir -p "$runtime_root" "$data_root/custodian-state" "$evidence_root"
+chmod 700 "$data_root" "$runtime_root" "$data_root/custodian-state" "$evidence_root"
 
 if command -v python3 >/dev/null 2>&1; then
     system_python=$(command -v python3)
@@ -32,12 +52,28 @@ if [ "$launch_mode" = first-run ] || [ "$current_commit" != "$installed_commit" 
     mv "$stamp_tmp" "$install_stamp"
 fi
 
-health_matches() {
-    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen("http://127.0.0.1:8765/api/health",timeout=1)); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[1] else 1)' "$current_commit" >/dev/null 2>&1
+health_matches_any() {
+    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); instance=value.get("readiness_instance"); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and isinstance(instance,str) and len(instance)==64 else 1)' "$url" "$current_commit" >/dev/null 2>&1
 }
 
-if health_matches; then
-    explorer.exe "$url" >/dev/null 2>&1 || true
+health_matches_instance() {
+    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and value.get("readiness_instance")==sys.argv[3] else 1)' "$url" "$current_commit" "$readiness_instance" >/dev/null 2>&1
+}
+
+write_evidence() {
+    reused=$1
+    observed=$2
+    "$managed_venv/bin/python" -c 'import json,os,pathlib,platform,sys,tempfile; destination=pathlib.Path(sys.argv[1]); value={"schema_version":1,"launcher":"Research Supervisor.vbs","windows_execution_path":True,"wsl_backend":True,"wsl_distro":os.environ.get("WSL_DISTRO_NAME",""),"kernel":platform.release(),"backend_reused":sys.argv[2]=="true","requested_readiness_instance":sys.argv[3],"observed_readiness_instance":sys.argv[4],"qualified_commit":sys.argv[5],"url":sys.argv[6],"browser_open_delegated_to_windows_launcher":True}; descriptor,name=tempfile.mkstemp(prefix=".launcher-evidence.",dir=destination.parent); handle=os.fdopen(descriptor,"w",encoding="utf-8"); json.dump(value,handle,sort_keys=True); handle.write("\n"); handle.flush(); os.fsync(handle.fileno()); handle.close(); os.replace(name,destination); directory=os.open(destination.parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)); os.fsync(directory); os.close(directory)' "$evidence" "$reused" "$readiness_instance" "$observed" "$current_commit" "$url"
+}
+
+observed_instance() {
+    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; print(json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1))["readiness_instance"])' "$url"
+}
+
+if health_matches_any; then
+    observed=$(observed_instance)
+    write_evidence true "$observed"
+    printf 'RAS_LAUNCH_READY|%s|%s|%s\n' "$url" "$readiness_instance" "$evidence"
     exit 0
 fi
 
@@ -49,14 +85,28 @@ if [ -n "$old_pid" ] && [ -r "/proc/$old_pid/cmdline" ]; then
     esac
 fi
 
-RAS_MANAGED_RUNTIME=1 RAS_QUALIFIED_COMMIT="$current_commit" nohup "$managed_venv/bin/research-supervisor-custodian" \
-    --data-dir "$data_root" --host 127.0.0.1 --port 8765 \
+if [ -n "$acceptance_scenario" ]; then
+    acceptance_backend=$project_root/tests/pa5c4_acceptance_backend.py
+    if [ ! -f "$acceptance_backend" ] || [ ! -f "$acceptance_scenario" ]; then
+        exit 5
+    fi
+    set -- "$managed_venv/bin/python" "$acceptance_backend" \
+        --data-dir "$data_root" --host 127.0.0.1 --port "$port" \
+        --readiness-instance "$readiness_instance" \
+        --acceptance-scenario "$acceptance_scenario"
+else
+    set -- "$managed_venv/bin/research-supervisor-custodian" \
+        --data-dir "$data_root" --host 127.0.0.1 --port "$port" \
+        --readiness-instance "$readiness_instance"
+fi
+RAS_MANAGED_RUNTIME=1 RAS_QUALIFIED_COMMIT="$current_commit" nohup "$@" \
     >>"$backend_log" 2>&1 </dev/null &
 
 attempt=0
 while [ "$attempt" -lt 120 ]; do
-    if health_matches; then
-        explorer.exe "$url" >/dev/null 2>&1 || true
+    if health_matches_instance; then
+        write_evidence false "$readiness_instance"
+        printf 'RAS_LAUNCH_READY|%s|%s|%s\n' "$url" "$readiness_instance" "$evidence"
         exit 0
     fi
     attempt=$((attempt + 1))

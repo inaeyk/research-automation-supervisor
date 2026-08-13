@@ -118,11 +118,13 @@ service.
 For an ordinary Windows user, no terminal or WSL distro selection is required:
 
 1. Place this qualified project folder on the Windows machine.
-2. Double-click `first-run-research-supervisor.cmd` once. The launcher finds WSL,
-   creates a managed Python environment, installs the local qualified package, starts
-   the loopback-only Custodian backend, and opens the browser interface.
-3. For later use, double-click `launch-research-supervisor.cmd`. An already-running
-   healthy backend is reused.
+2. Double-click **Research Supervisor** (`Research Supervisor.vbs`). The hidden-window
+   Windows launcher finds the supported default WSL backend, creates a managed Python
+   environment, installs the local qualified package, waits for random-instance-bound
+   loopback readiness, and opens the Windows browser interface.
+3. For later use, double-click **Research Supervisor** again. An already-running
+   healthy random-instance-bound backend is reused. The `.cmd` files remain only as
+   first-run/legacy compatibility wrappers around this entry point.
 
 Setup items that require login, administrator permission, or security approval are
 shown as plain **Action Needed** cards. They are never repaired by weakening

@@ -64,6 +64,22 @@ a model process can reach protected material.
 - Review every fixed acceptance command: the Stage 2 runner does not provide arbitrary
   test executables with a separate OS-level network namespace.
 
+## PA-5C4 prelaunch and repository boundary
+
+Started scientific inputs live only in the protected core prelaunch-authority store.
+Custodian previews/cards are replaceable projections and cannot authorize a campaign.
+The Start receipt is committed before any environment or repository action. Every
+retry must present the exact store-key HMAC launch token and matching campaign/intent
+identity; corrupt, missing, stale, and cross-campaign objects fail closed.
+
+Selected repositories are untrusted before Bubblewrap. SafeGit permits only direct
+audited Git built-ins for identity/object inspection and an HTTPS or local-source
+`--no-checkout` clone. It supplies a sterile HOME, disables system/global config,
+hooks, fsmonitor, external diff, attributes files, credential helpers and prompts, and
+denies command-executing/unsupported transports. Checkout and preparation commit run
+only inside Bubblewrap `--unshare-all`. A content-hashed receipt preserves the exact
+argv/environment/isolation proof.
+
 The PA-2 Physics Oracle runner has a narrower, distinct policy. It accepts no CLI argv
 and executes only a trusted catalog's hash-pinned system-Python intent. Bubblewrap
 `--unshare-all` enforces disabled networking, the workspace is a read-only bind mount,

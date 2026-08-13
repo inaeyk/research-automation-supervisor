@@ -86,10 +86,9 @@ raise SystemExit(result.returncode)
 
 def render_qualified_acceptance_runner(python_executable: str) -> bytes:
     """Bind one absolute managed interpreter into the immutable acceptance runner."""
-    if (
-        not python_executable.startswith("/")
-        or any(character not in "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
-               for character in python_executable)
+    if not python_executable.startswith("/") or any(
+        character not in "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+        for character in python_executable
     ):
         raise ValueError("qualified Python executable path is unsafe")
     return QUALIFIED_ACCEPTANCE_RUNNER_V1.replace(
@@ -457,8 +456,10 @@ class CustodianCampaignRecordV1(BaseModel):
     schema_version: Literal[1] = 1
     campaign_public_id: PublicCampaignId
     preview_id: Identifier
-    bundle_path: Annotated[str, Field(min_length=1, max_length=4096)]
-    bundle_sha256: Sha256
+    launch_intent_sha256: Sha256
+    launch_token: Annotated[
+        str, Field(min_length=136, max_length=136, pattern=r"^launch_[0-9a-f]{64}_[0-9a-f]{64}$")
+    ]
     core_authority_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     exchange_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     created_at: Annotated[str, Field(min_length=1, max_length=80)]

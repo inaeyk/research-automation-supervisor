@@ -49,6 +49,11 @@ from research_automation_supervisor.errors import (
     ReplayCampaignError,
     WorkflowError,
 )
+from research_automation_supervisor.prelaunch_authority import (
+    load_frozen_campaign_input,
+    load_launch_intent,
+    seal_frozen_campaign_input,
+)
 from research_automation_supervisor.replay_campaign_engine import (
     ReplayCampaignServices,
     replay_campaign_status,
@@ -56,6 +61,7 @@ from research_automation_supervisor.replay_campaign_engine import (
     run_replay_campaign,
 )
 from research_automation_supervisor.replay_campaign_models import ReplayCampaignState
+from research_automation_supervisor.safe_git import prepare_repository
 from research_automation_supervisor.workflow_engine import substage_status
 from research_automation_supervisor.workflow_integrity import sha256_regular_file
 from research_automation_supervisor.workflow_recovery import (
@@ -68,6 +74,48 @@ PROJECTION_FILE = "operator-projection-v1.json"
 FAILURE_FILE = "qualified-failure-v1.json"
 RESULTS_DIRECTORY = "operator-results"
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+
+
+def start_qualified_launch(
+    launch_token: str,
+    launch_authority_root: Path,
+    *,
+    authority_directory: Path,
+    exchange_root: Path,
+) -> OperatorCampaignProjectionV1:
+    """Reload core-frozen Start authority, prepare Git safely, then enter PA-5C3."""
+    intent = load_launch_intent(launch_authority_root, launch_token)
+    expected_authority = authority_directory.parent / intent.campaign_public_id
+    if authority_directory != expected_authority:
+        raise QualifiedCampaignInputError("qualified campaign authority belongs elsewhere")
+    frozen = load_frozen_campaign_input(launch_authority_root, intent)
+    if frozen is None:
+        preparation_root = launch_authority_root.parent / "repository-preparation"
+        repository, receipt = prepare_repository(intent, preparation_root=preparation_root)
+        frozen = seal_frozen_campaign_input(
+            launch_authority_root,
+            intent,
+            repository,
+            receipt.receipt_sha256,
+        )
+    frozen_path = launch_authority_root / "frozen-inputs" / f"{intent.intent_sha256}.json"
+    # start_qualified_campaign accepts the historical bundle shape, so pass its
+    # exact nested bundle through a core-owned immutable staging file.
+    bundle_path = launch_authority_root / "bundles" / f"{intent.intent_sha256}.json"
+    if not bundle_path.exists():
+        bundle_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _write_once(bundle_path, render_json_bytes(frozen.input_bundle.model_dump(mode="json")))
+    else:
+        observed = load_campaign_input_bundle(bundle_path)
+        if observed != frozen.input_bundle:
+            raise QualifiedCampaignInputError("core frozen campaign bundle was replaced")
+    if not frozen_path.is_file():
+        raise QualifiedCampaignInputError("frozen campaign input is unavailable")
+    return start_qualified_campaign(
+        bundle_path,
+        authority_directory=authority_directory,
+        exchange_root=exchange_root,
+    )
 
 
 def run_qualified_authentication() -> None:
@@ -184,6 +232,19 @@ def qualified_campaign_status(
     projection = _project_verified_state(bundle, authority, state, exchange_root)
     _persist_projection(authority, projection)
     return projection
+
+
+def qualified_campaign_repository(
+    *,
+    authority_directory: Path,
+    exchange_root: Path,
+) -> Path:
+    """Return the verified prepared repository without trusting a Custodian locator."""
+    del exchange_root
+    authority = _existing_authority_path(authority_directory)
+    bundle = load_campaign_input_bundle(authority / BUNDLE_FILE)
+    locator = _load_locator(authority, bundle)
+    return _verified_workspace(bundle) if locator.prepared_workspace else Path()
 
 
 def resume_qualified_campaign(

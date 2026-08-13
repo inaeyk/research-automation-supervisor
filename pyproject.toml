@@ -37,6 +37,9 @@ dev = [
   "pytest-cov>=5,<8",
   "ruff>=0.12,<1",
 ]
+browser-acceptance = [
+  "playwright>=1.54,<2",
+]
 
 [project.scripts]
 research-supervisor = "research_automation_supervisor.cli:app"
@@ -62,10 +65,15 @@ include = [
   "/first-run-research-supervisor.cmd",
   "/launch-research-supervisor.cmd",
   "/launch-research-supervisor.ps1",
+  "/Research Supervisor.vbs",
   "/pyproject.toml",
   "/docs",
   "/examples",
   "/scripts/custodian-bootstrap.sh",
+  "/scripts/windows-cdp-relay.ps1",
+  "/tests/pa5c4_acceptance_backend.py",
+  "/tests/pa5c4_acceptance_services.py",
+  "/tests/real_windows_browser_acceptance.py",
   "/src",
 ]
 exclude = [

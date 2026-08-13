@@ -10,11 +10,14 @@ command.
 
 On Windows with WSL available:
 
-1. Double-click `first-run-research-supervisor.cmd` in the qualified project folder.
-2. The launcher locates the default WSL backend without asking for a distro name,
+1. Double-click **Research Supervisor** (`Research Supervisor.vbs`) in the qualified
+   project folder. It is a hidden-window Windows Script Host entry point; no terminal
+   is opened. `first-run-research-supervisor.cmd` remains a one-time compatibility
+   bootstrap only.
+2. The launcher locates the supported default WSL backend without asking for a distro name,
    creates a managed environment below the user's local data directory, installs the
    qualified package, waits for loopback readiness, and opens the local browser UI.
-3. Double-click `launch-research-supervisor.cmd` thereafter. It reuses an existing
+3. Double-click **Research Supervisor** thereafter. It reuses an existing
    healthy backend and updates the managed installation only when the qualified source
    commit changes.
 
@@ -28,14 +31,15 @@ primary user message.
 The default path is:
 
 1. Choose **New Campaign**.
-2. Choose an existing Git repository using the folder picker, or paste an HTTPS/SSH
-   Git URL. The Custodian creates a separate detached worktree automatically.
+2. Choose an existing Git repository using the folder picker, or paste a
+   credential-free HTTPS Git URL. Unsupported transports fail closed.
 3. Paste or drop the Research Contract and Research Plan.
 4. Enter an ordinary-language campaign name and Initial Task. Supporting files are
    optional.
 5. Review the repository version, input identities, acceptance profile, editable
    areas, environment readiness, and immutability warning.
-6. Press **Start** once. The exact bundle is frozen. Duplicate browser submissions
+6. Press **Start** once. The first authoritative operation crosses the qualified-core
+   process and fsyncs the exact launch intent. Duplicate browser submissions
    return the original public campaign card instead of creating another campaign.
 7. Follow the dashboard. If qualified core authority needs a human decision, inspect
    safe evidence, choose an allowed response, add a note/file if appropriate, and
@@ -63,8 +67,8 @@ artifacts remain in the qualified evidence tree and are not the default result p
 
 ## Custodian permission boundary
 
-The Custodian may prepare directories and detached worktrees, clone a repository,
-freeze an input bundle, inspect environment readiness, invoke a fixed qualified-runner
+The Custodian may prepare its replaceable UI directories, inspect repository identity
+through SafeGit, present inputs, inspect environment readiness, invoke a fixed qualified-runner
 operation, read operator-safe projections, store the user's exact exchange response,
 display core-allowlisted evidence, export verified results, open a repository folder,
 and send a local browser notification.
@@ -74,13 +78,13 @@ implementation, Worker, Auditor, model adapter, PA-2, PA-3, PA-5C2 scorer, or hi
 fixture authority. It has no durable campaign-state or journal filename. It cannot
 write campaign state, journal, proof, completion, or model action records. Its only
 campaign-affecting process target is `qualified_runner`, with the allowlisted
-operations `start`, `status`, `resume`, `respond`, `artifact`, and `export`.
+operations `freeze`, `launch-summary`, `start`, `status`, `resume`, `respond`,
+`artifact`, `repository`, and `export`.
 
 Custodian-owned data is physically separate:
 
 ```text
 custodian-state/
-  bundles/
   campaigns/
   previews/
   runner-logs/
@@ -91,11 +95,42 @@ operator-exchange/
     notifications/
     uploads/
 qualified-campaigns/
-workspaces/
+
+research-automation-supervisor-core/
+  prelaunch-authority/
+    store-key-v1
+    objects/<sha-prefix>/<launch-intent-sha>.json
+    receipts/<launch-intent-sha>.json
+    frozen-inputs/<launch-intent-sha>.json
+  repository-preparation/
+    receipts/
+    workspaces/
 ```
 
-The first two roots are explicitly non-authoritative. A Custodian card or process exit
-can never create a completed projection.
+The Custodian and operator-exchange roots are explicitly non-authoritative. The core
+root is a protected application-data sibling, not a child of Custodian state, the
+selected repository, or a campaign workspace. A card contains only the launch-intent
+SHA-256 and opaque HMAC-bound token; it contains no authoritative scientific bytes.
+A Custodian card or process exit can never create a completed projection.
+
+## CampaignLaunchIntentV1 and freeze timing
+
+At **Start**, before environment doctor, Git preparation, Codex, authentication, or
+Bubblewrap checks, `qualified_runner freeze` validates `CampaignLaunchRequestV1` and
+commits two create-once core objects:
+
+- `CampaignLaunchIntentV1` binds the exact contract, plan, task, supporting-file bytes,
+  requested repository locator/commit/tree, settings, public campaign identity, and
+  canonical `intent_sha256`;
+- `CampaignLaunchReceiptV1` binds that intent, the first Start request, timestamp, and
+  SHA-256 of a store-key HMAC token.
+
+The intent file is fsynced before the receipt commit point; both containing directories
+are fsynced. An object-only crash prefix is recoverable. Once a receipt exists, a
+missing/replaced object is never reconstructed from a preview. Every environment retry
+first calls `launch-summary`, which verifies token HMAC, receipt self-hash, object
+self-hash, content address, campaign ID, and exact expected intent. Cross-campaign,
+stale, corrupt, or substituted references fail closed.
 
 ## CampaignInputBundleV1
 
@@ -112,8 +147,10 @@ self-hashed. It contains:
   reasoning, repair limit, and normalized editable areas;
 - `bundle_sha256`: SHA-256 of canonical JSON excluding only the self-hash field.
 
-The qualified core copies and revalidates the bundle before materializing the existing
-strict visible-campaign schemas. Every later operation reloads the self-hashed bundle.
+Only after SafeGit preparation does the qualified core derive
+`FrozenCampaignInputV1`/`CampaignInputBundleV1` from the launch intent. The qualified
+core copies and revalidates that bundle before materializing the existing strict
+visible-campaign schemas. Every later operation reloads the core-owned self-hashed bundle.
 An edit after Start is detected; the UI exposes no edit operation. A scientific input
 change therefore requires a new campaign or a core-issued qualified human-action path.
 
@@ -143,9 +180,15 @@ the existing human-decision ingress.
 The first-run launcher safely creates only user-owned data directories and a managed
 Python environment. The backend then verifies Python/package identity, Git, Codex
 version, Codex authentication, Bubblewrap, WSL/Linux backend, and atomic rename and
-hard-link filesystem capabilities. Repository selection creates a clean detached
-worktree at the previewed commit, without switching the source branch. HTTPS Git URLs
-with embedded credentials and unsafe paths are rejected.
+hard-link filesystem capabilities. Preview performs only sterile identity inspection.
+Repository preparation uses `/usr/bin/git` with system/global config disabled, a
+sterile HOME, hooks and fsmonitor disabled, external diff/textconv/helper paths
+neutralized, prompts disabled, and `ext`, file, SSH, and git protocols denied. New
+remote repositories use only credential-free HTTPS and
+`clone --no-checkout --no-tags --no-recurse-submodules`. Existing sources use the same
+no-checkout clone after exact commit/tree revalidation. Checkout and the preparation
+commit run only under Bubblewrap `--unshare-all`; the receipt records every exact
+argv/environment and asserts `checkout_outside_isolation=false`.
 
 Missing login, administrator permission, isolation, or filesystem capability produces
 an Action Needed card. The card states that the campaign has not started. Codex sign-in
@@ -189,7 +232,13 @@ CSRF/loopback browser isolation, static Custodian authority imports, unsafe reco
 cards, duplicate Start, browser/Custodian restart, authentication setup, result export,
 and refusal to synthesize completed status from an unverified state file.
 
-The scripted browser acceptance starts with no run ID, configuration file, terminal
-operation, or activated user environment. It performs the ordinary wizard, preview,
-Start, injected recoverable interruption, UI Continue, Human Action inspection and
-response, verified completion, notification derivation, report access, and export.
+`tests/real_windows_browser_acceptance.py` starts Windows Script Host on the actual
+`Research Supervisor.vbs`, which starts the real WSL backend and Windows Chrome. The
+test attaches Playwright to that Windows browser and performs no operator backend API
+calls. It starts with no run ID, terminal, activated environment, distro name, branch,
+or port entered by a user. It performs the ordinary wizard, preview, Start, injected
+recoverable interruption, UI Continue, Human Action inspection and response, verified
+completion status, report access, and export. It also stops and restarts the backend,
+restarts the browser page, reuses an already-running backend, and exercises the Windows
+plain-language WSL failure path. The machine-readable result is
+`docs/validation/pa5c4-real-browser-evidence.json`.
