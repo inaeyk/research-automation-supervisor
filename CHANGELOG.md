@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — PA-5C4
+
+- Add a low-privilege Campaign Custodian with a loopback-only progressive-disclosure
+  browser UI, strict self-hashed campaign bundles, create-once operator exchange,
+  qualified human-response ingress, verified result/export projection, browser
+  notifications, automatic repository worktrees, managed-environment diagnostics,
+  and double-click Windows/WSL launchers.
+- Keep campaign creation, PA-5A recovery, human decision application, durable status
+  verification, and completion authority behind a process-isolated qualified-runner
+  allowlist. Existing PA-5A/PA-5C1/PA-5C2/PA-5C3 scientific and review code is
+  unchanged.
+
 All notable user-facing changes are recorded here. This project follows semantic
 versioning while it remains pre-1.0.
 

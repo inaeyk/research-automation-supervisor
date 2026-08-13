@@ -94,9 +94,10 @@ evaluator portable across arbitrary toolchains.
 
 ## Requirements
 
-- Linux is the qualified operating system. macOS imports and basic local workflows
-  may work but are not release-qualified. Native Windows is unsupported; WSL2 is not
-  yet qualified by this project.
+- Linux is the qualified execution environment. macOS imports and basic local workflows
+  may work but are not release-qualified. Native Windows execution is unsupported;
+  the PA-5C4 double-click launcher uses WSL2 as its Linux backend and does not run the
+  scientific workflow in a native Windows process.
 - Python 3.11 or newer.
 - Git and a clean Git worktree for workflow execution.
 - Codex CLI 0.144.0 or newer for real Worker, Auditor, or Supervisor actions.
@@ -111,6 +112,35 @@ The bundled synthetic quick start uses a local test double and never contacts a 
 service.
 
 ## Installation
+
+### Zero-shell Windows / WSL installation
+
+For an ordinary Windows user, no terminal or WSL distro selection is required:
+
+1. Place this qualified project folder on the Windows machine.
+2. Double-click `first-run-research-supervisor.cmd` once. The launcher finds WSL,
+   creates a managed Python environment, installs the local qualified package, starts
+   the loopback-only Custodian backend, and opens the browser interface.
+3. For later use, double-click `launch-research-supervisor.cmd`. An already-running
+   healthy backend is reused.
+
+Setup items that require login, administrator permission, or security approval are
+shown as plain **Action Needed** cards. They are never repaired by weakening
+isolation or campaign authority. The normal workflow is New Campaign → choose or clone
+a repository → add the Research Contract, Research Plan, and Initial Task → Preview →
+Start → answer Human Action cards → inspect or export verified results. Run tokens,
+branches, virtual environments, YAML/JSON, and shell commands are not part of this
+workflow.
+
+The interface uses progressive disclosure. A running campaign defaults to “Campaign
+is running”, a human stage label, and the last meaningful activity. Internal state,
+journal, proof, and process identities remain behind qualified verification and do not
+appear on the default campaign card.
+
+See [Campaign Custodian and zero-shell UX](docs/campaign_custodian.md) for schemas,
+security boundaries, recovery delegation, launch behavior, and operator procedures.
+
+### Developer installation
 
 Development installation:
 
