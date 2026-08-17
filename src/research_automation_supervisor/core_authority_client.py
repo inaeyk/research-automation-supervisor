@@ -19,10 +19,17 @@ from research_automation_supervisor.core_authority_models import (
     RequestedRepositoryAuthorityV1,
 )
 from research_automation_supervisor.custodian_errors import CustodianStateError
+from research_automation_supervisor.gitless_repository import (
+    create_local_repository_transfer,
+)
 
 DEFAULT_CORE_SOCKET = Path("/run/research-supervisor-core/authority.sock")
 MAX_IPC_BYTES = 80 * 1024 * 1024
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+class _RepositoryTransferRequired(CustodianStateError):
+    """Typed Core response that authorizes one untrusted-source read."""
 
 
 class CoreAuthorityClient(Protocol):
@@ -37,6 +44,8 @@ class CoreAuthorityClient(Protocol):
     def get_start_intent(self, launch_intent_id: str) -> CampaignLaunchSummaryV1: ...
 
     def list_operator_campaigns(self) -> tuple[CampaignLaunchSummaryV1, ...]: ...
+
+    def resume_start_snapshot(self, launch_intent_id: str) -> CampaignLaunchSummaryV1: ...
 
     def verify_start_intent(
         self,
@@ -73,18 +82,13 @@ class UnixCoreAuthorityClient:
         self, source_kind: Literal["existing_folder", "git_url"], locator: str
     ) -> RequestedRepositoryAuthorityV1:
         source_descriptor: int | None = None
-        bundle_descriptor: int | None = None
+        transfer_descriptor: int | None = None
         try:
             payload: dict[str, object] = {"source_kind": source_kind, "locator": locator}
             if source_kind == "existing_folder":
-                from research_automation_supervisor.safe_git import (
-                    create_repository_bundle_for_core,
-                )
-
                 absolute = str(Path(os.path.abspath(locator)))
                 source_descriptor = _open_repository_directory(absolute)
                 identity = os.fstat(source_descriptor)
-                bundle_descriptor = create_repository_bundle_for_core(source_descriptor)
                 payload.update(
                     {
                         "locator": absolute,
@@ -92,28 +96,35 @@ class UnixCoreAuthorityClient:
                         "source_inode": identity.st_ino,
                     }
                 )
+                transfer_descriptor = create_local_repository_transfer(source_descriptor)
             return self._model(
                 "inspect_repository",
                 payload,
                 RequestedRepositoryAuthorityV1,
-                descriptor=bundle_descriptor,
+                descriptor=transfer_descriptor,
             )
         except OSError as exc:
             raise CustodianStateError("Selected repository is unavailable.") from exc
         finally:
-            for descriptor in (bundle_descriptor, source_descriptor):
-                if descriptor is not None:
-                    os.close(descriptor)
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+            if transfer_descriptor is not None:
+                os.close(transfer_descriptor)
 
     def create_start_intent(self, request: CampaignLaunchRequestV1) -> CampaignLaunchReferenceV1:
+        payload: dict[str, object] = {"request": request.model_dump(mode="json")}
+        try:
+            # Query committed authority before touching the untrusted source.
+            # Core returns an exact existing Start or a typed transfer demand.
+            return self._model(
+                "create_start_intent", payload, CampaignLaunchReferenceV1
+            )
+        except _RepositoryTransferRequired:
+            pass
         source_descriptor: int | None = None
-        bundle_descriptor: int | None = None
+        transfer_descriptor: int | None = None
         try:
             if request.repository.source_kind == "existing_folder":
-                from research_automation_supervisor.safe_git import (
-                    create_repository_bundle_for_core,
-                )
-
                 source_descriptor = _open_repository_directory(request.repository.source_locator)
                 status = os.fstat(source_descriptor)
                 if (
@@ -121,29 +132,20 @@ class UnixCoreAuthorityClient:
                     or status.st_ino != request.repository.source_inode
                 ):
                     raise OSError("selected repository object changed")
-                bundle_descriptor = create_repository_bundle_for_core(source_descriptor)
+                transfer_descriptor = create_local_repository_transfer(source_descriptor)
             return self._model(
                 "create_start_intent",
-                {"request": request.model_dump(mode="json")},
+                payload,
                 CampaignLaunchReferenceV1,
-                descriptor=bundle_descriptor,
+                descriptor=transfer_descriptor,
             )
         except OSError as exc:
-            # An already-committed Start remains recoverable after the original
-            # untrusted source disappears.  Core permits descriptor-less reuse
-            # only when the complete request already has an exact receipt.
-            try:
-                return self._model(
-                    "create_start_intent",
-                    {"request": request.model_dump(mode="json")},
-                    CampaignLaunchReferenceV1,
-                )
-            except CustodianStateError:
-                raise CustodianStateError("Selected repository changed before Start.") from exc
+            raise CustodianStateError("Selected repository changed before Start.") from exc
         finally:
-            for descriptor in (bundle_descriptor, source_descriptor):
-                if descriptor is not None:
-                    os.close(descriptor)
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+            if transfer_descriptor is not None:
+                os.close(transfer_descriptor)
 
     def get_start_intent(self, launch_intent_id: str) -> CampaignLaunchSummaryV1:
         return self._model(
@@ -160,6 +162,13 @@ class UnixCoreAuthorityClient:
             return tuple(CampaignLaunchSummaryV1.model_validate(item) for item in value)
         except ValidationError as exc:
             raise CustodianStateError("Core campaign list returned an invalid response.") from exc
+
+    def resume_start_snapshot(self, launch_intent_id: str) -> CampaignLaunchSummaryV1:
+        return self._model(
+            "resume_start_snapshot",
+            {"launch_intent_id": launch_intent_id},
+            CampaignLaunchSummaryV1,
+        )
 
     def verify_start_intent(
         self,
@@ -242,6 +251,10 @@ class UnixCoreAuthorityClient:
         except (ValidationError, ValueError) as exc:
             raise CustodianStateError("Core authority returned an invalid response.") from exc
         if not response.ok:
+            if response.error_code == "repository_transfer_required":
+                raise _RepositoryTransferRequired(
+                    response.message or "Core requires a repository transfer."
+                )
             raise CustodianStateError(response.message or "Core authority rejected the request.")
         if response.error_code is not None or response.message is not None:
             raise CustodianStateError("Core authority returned a contradictory response.")

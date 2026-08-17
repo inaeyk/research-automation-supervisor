@@ -13,9 +13,20 @@
   unchanged.
 - Close Custodian Start authority with a dedicated-identity Core Authority Service,
   strict authenticated Unix-socket schemas, full-request atomic single assignment,
-  receipt-based card reconstruction, descriptor/inode-bound sanitized repository import,
-  one sealed production Git policy, and immutable launch-intent-only runner ingress.
-  The installed runner no longer accepts an arbitrary `start --bundle` pathname.
+  SQLite WAL/FULL transaction authority, descriptor-bound Dulwich repository import,
+  absent/building/complete snapshot transactions, database-based card reconstruction,
+  complete Git-callsite inventory, and immutable launch-intent-only runner ingress.
+  Neither Custodian nor Core can execute Git before snapshot completion; the installed
+  CLI gates retained legacy Git diagnostics on a Core-signed Ed25519 workspace binding.
+  Binding verification needs no operator access to the private snapshot/object store, and
+  committed-Start retries query Core before touching the original repository. The installed
+  runner still rejects arbitrary `start --bundle` pathnames. Private operator repositories
+  cross the UID boundary as hashed, unlinked regular-file transfers; HTTPS redirects are
+  denied, and derived Git control metadata remains Core-owned read-only.
+- Preserve service `RestrictSUIDSGID` hardening while delegating mutable workspaces through
+  an installer-provisioned Core/shared-group SGID anchor and a qualified-runner umask of
+  0007. Upgrade installs explicitly restart the service so installed bytes and source
+  qualification cannot diverge.
 
 All notable user-facing changes are recorded here. This project follows semantic
 versioning while it remains pre-1.0.

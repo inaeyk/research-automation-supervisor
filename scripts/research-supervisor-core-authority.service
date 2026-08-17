@@ -22,6 +22,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
+InaccessiblePaths=/usr/bin/git /bin/git
 ReadWritePaths=/var/lib/research-supervisor-core /run/research-supervisor-core
 RuntimeDirectory=research-supervisor-core
 RuntimeDirectoryMode=0750

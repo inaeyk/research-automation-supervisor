@@ -1,25 +1,24 @@
-"""Crash-durable Start authority used only by the privileged Core service.
+"""Transactional Start and snapshot authority owned only by the Core service.
 
-The public Custodian talks to :mod:`core_authority_service` over a typed Unix
-socket.  It must never import this module in production: every function here
-expects direct access to the service-owned authority directory.
+Filesystem objects are immutable supporting blobs.  A Start exists exclusively
+when one row is committed in ``authority.sqlite3``; directory entries, partial
+objects, Custodian cards, and snapshot staging content have no Start authority.
 """
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import hmac
-import json
 import os
-import re
 import secrets
+import sqlite3
 import stat
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+import sys
+import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal, TypeVar
+from typing import Annotated, Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -30,7 +29,10 @@ from research_automation_supervisor.core_authority_models import (
     QualifiedLaunchMaterialV1,
     RequestedRepositoryAuthorityV1,
 )
-from research_automation_supervisor.custodian_errors import QualifiedCampaignInputError
+from research_automation_supervisor.custodian_errors import (
+    QualifiedCampaignInputError,
+    QualifiedCampaignStateError,
+)
 from research_automation_supervisor.custodian_models import (
     CampaignInputBundleV1,
     CampaignProfileSettingsV1,
@@ -38,38 +40,33 @@ from research_automation_supervisor.custodian_models import (
     RepositoryAuthorityV1,
 )
 from research_automation_supervisor.durable_state import canonical_json, fsync_directory
+from research_automation_supervisor.gitless_repository import (
+    SanitizedSnapshotPlanV1,
+    build_sanitized_snapshot,
+    freeze_repository_import,
+    initialize_snapshot_store,
+    load_gitless_import,
+    materialize_campaign_workspace,
+    plan_sanitized_snapshot,
+    publish_workspace_verification_key,
+    repository_authority_for_plan,
+    verify_campaign_workspace,
+    verify_sanitized_snapshot,
+)
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-CommitId = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-StartIntentId = Annotated[
-    str,
-    Field(pattern=r"^intent_[0-9a-f]{64}_[0-9a-f]{64}$", min_length=136, max_length=136),
-]
-START_INTENT_ID = re.compile(r"^intent_([0-9a-f]{64})_([0-9a-f]{64})$")
-MAX_AUTHORITY_BYTES = 64 * 1024 * 1024
-ModelT = TypeVar("ModelT", bound=BaseModel)
 CrashInjector = Callable[[str], None]
-
-
-def initialize_authority_store(authority_root: Path, snapshot_root: Path) -> None:
-    """Create durable empty service state before accepting any IPC request."""
-    root = _authority_root(authority_root)
-    _snapshot_root(snapshot_root)
-    _store_secret(root)
-
-
-def _self_hash(value: BaseModel, field: str) -> str:
-    return hashlib.sha256(
-        canonical_json(value.model_dump(mode="json", exclude={field}))
-    ).hexdigest()
+ModelT = TypeVar("ModelT", bound=BaseModel)
+DATABASE_NAME = "authority.sqlite3"
+MAX_AUTHORITY_BYTES = 64 * 1024 * 1024
 
 
 class CampaignLaunchIntentV1(BaseModel):
-    """Content-addressed immutable Start intent, before receipt publication."""
+    """Immutable Start object referenced by a committed database row."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     campaign_public_id: Annotated[
         str, Field(min_length=12, max_length=80, pattern=r"^campaign-[a-z0-9-]+$")
     ]
@@ -93,11 +90,11 @@ class CampaignLaunchIntentV1(BaseModel):
 
 
 class FrozenCampaignInputV1(BaseModel):
-    """Complete canonical CampaignInputBundle prepared during atomic Start."""
+    """Canonical bundle whose identity is bound by the Start transaction."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     launch_intent_sha256: Sha256
     repository_preparation_sha256: Sha256
     input_bundle: CampaignInputBundleV1
@@ -110,29 +107,87 @@ class FrozenCampaignInputV1(BaseModel):
         return self
 
 
-class CampaignLaunchReceiptV1(BaseModel):
-    """Atomic Start commit record, addressed by request identity."""
+def initialize_authority_store(authority_root: Path, snapshot_root: Path) -> None:
+    """Create SQLite and storage with crash-authority durability settings."""
+    root = _authority_root(authority_root)
+    snapshots = initialize_snapshot_store(snapshot_root)
+    secret = _store_secret(root)
+    publish_workspace_verification_key(snapshots, secret)
+    with _connect(root) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS authority_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+            CREATE TABLE IF NOT EXISTS snapshots (
+                snapshot_id TEXT PRIMARY KEY CHECK(length(snapshot_id) = 64),
+                import_id TEXT NOT NULL CHECK(length(import_id) = 64),
+                source_commit TEXT NOT NULL CHECK(length(source_commit) = 40),
+                source_tree TEXT NOT NULL CHECK(length(source_tree) = 40),
+                prepared_commit TEXT NOT NULL CHECK(length(prepared_commit) = 40),
+                prepared_tree TEXT NOT NULL CHECK(length(prepared_tree) = 40),
+                plan_json BLOB NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('absent', 'building', 'complete')),
+                completed_at TEXT,
+                CHECK((state = 'complete') = (completed_at IS NOT NULL))
+            );
 
-    schema_version: Literal[1] = 1
-    campaign_public_id: str
-    preview_id: str
-    client_start_key_sha256: Sha256
-    start_request_sha256: Sha256
-    launch_intent_sha256: Sha256
-    launch_intent_id_sha256: Sha256
-    frozen_input_sha256: Sha256
-    input_bundle_sha256: Sha256
-    repository_preparation_sha256: Sha256
-    created_at: Annotated[str, Field(min_length=20, max_length=40)]
-    receipt_sha256: Sha256
+            CREATE TABLE IF NOT EXISTS starts (
+                start_intent_id TEXT PRIMARY KEY,
+                immutable_start_request_id TEXT NOT NULL UNIQUE
+                    CHECK(length(immutable_start_request_id) = 64),
+                canonical_request_sha256 TEXT NOT NULL CHECK(length(canonical_request_sha256) = 64),
+                campaign_public_id TEXT NOT NULL UNIQUE,
+                operator_uid INTEGER NOT NULL,
+                operator_gid INTEGER,
+                preview_id TEXT NOT NULL UNIQUE,
+                repository_input_sha256 TEXT NOT NULL CHECK(length(repository_input_sha256) = 64),
+                source_kind TEXT NOT NULL CHECK(source_kind IN ('existing_folder', 'git_url')),
+                source_display TEXT NOT NULL,
+                source_locator_sha256 TEXT NOT NULL CHECK(length(source_locator_sha256) = 64),
+                source_commit TEXT NOT NULL CHECK(length(source_commit) = 40),
+                source_tree TEXT NOT NULL CHECK(length(source_tree) = 40),
+                contract_sha256 TEXT NOT NULL CHECK(length(contract_sha256) = 64),
+                plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+                task_sha256 TEXT NOT NULL CHECK(length(task_sha256) = 64),
+                supporting_manifest_sha256 TEXT NOT NULL
+                    CHECK(length(supporting_manifest_sha256) = 64),
+                settings_sha256 TEXT NOT NULL CHECK(length(settings_sha256) = 64),
+                input_bundle_sha256 TEXT NOT NULL UNIQUE CHECK(length(input_bundle_sha256) = 64),
+                frozen_input_sha256 TEXT NOT NULL UNIQUE CHECK(length(frozen_input_sha256) = 64),
+                intent_sha256 TEXT NOT NULL UNIQUE CHECK(length(intent_sha256) = 64),
+                creation_transaction_id TEXT NOT NULL UNIQUE,
+                import_id TEXT NOT NULL CHECK(length(import_id) = 64),
+                expected_snapshot_id TEXT NOT NULL CHECK(length(expected_snapshot_id) = 64),
+                current_snapshot_id TEXT,
+                request_object_sha256 TEXT NOT NULL CHECK(length(request_object_sha256) = 64),
+                intent_object_sha256 TEXT NOT NULL CHECK(length(intent_object_sha256) = 64),
+                frozen_object_sha256 TEXT NOT NULL CHECK(length(frozen_object_sha256) = 64),
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(expected_snapshot_id) REFERENCES snapshots(snapshot_id),
+                FOREIGN KEY(current_snapshot_id) REFERENCES snapshots(snapshot_id),
+                CHECK(current_snapshot_id IS NULL OR current_snapshot_id = expected_snapshot_id)
+            );
 
-    @model_validator(mode="after")
-    def validate_receipt(self) -> CampaignLaunchReceiptV1:
-        if self.receipt_sha256 != _self_hash(self, "receipt_sha256"):
-            raise ValueError("launch receipt self-hash is invalid")
-        return self
+            CREATE INDEX IF NOT EXISTS starts_created_at
+                ON starts(created_at, campaign_public_id);
+            """
+        )
+        existing = connection.execute(
+            "SELECT value FROM authority_meta WHERE key = 'snapshot_root'"
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "INSERT INTO authority_meta(key, value) VALUES('snapshot_root', ?)",
+                (str(snapshots),),
+            )
+        elif existing[0] != str(snapshots):
+            raise QualifiedCampaignStateError("Core snapshot storage identity changed")
+        connection.commit()
+    _secure_database_files(root)
+    fsync_directory(root)
 
 
 def create_start_intent(
@@ -142,169 +197,241 @@ def create_start_intent(
     *,
     operator_uid: int | None = None,
     operator_gid: int | None = None,
+    repository_descriptor: int | None = None,
+    repository_transfer_descriptor: int | None = None,
     repository_bundle_descriptor: int | None = None,
     require_repository_descriptor: bool = False,
     now: datetime | None = None,
     crash_injector: CrashInjector | None = None,
 ) -> CampaignLaunchReferenceV1:
-    """Perform Start as one locked, receipt-committed single assignment."""
+    """Commit Start once, then independently advance its snapshot transaction."""
     inject = crash_injector or (lambda _boundary: None)
-    inject("before_core_transaction")
+    inject("before_input_object_creation")
+    inject("before_core_transaction")  # PA-5C4-S compatibility boundary.
+    initialize_authority_store(authority_root, snapshot_root)
     root = _authority_root(authority_root)
-    snapshots = _snapshot_root(snapshot_root)
-    secret = _store_secret(root)
+    snapshots = initialize_snapshot_store(snapshot_root)
+    secret = _read_store_secret(root)
     request_sha = request.canonical_sha256()
-    with _start_lock(root):
-        existing = _receipt_for_request(root, request.client_start_key_sha256)
-        if existing is not None:
-            if existing.start_request_sha256 != request_sha:
-                raise QualifiedCampaignInputError(
-                    "Start request identity was already bound to different fields"
+    existing = _row_for_request_identity(root, request.client_start_key_sha256)
+    if existing is not None:
+        _require_same_request(existing, request_sha)
+        _ensure_snapshot(root, snapshots, existing, inject)
+        refreshed = _row_for_intent(root, str(existing["start_intent_id"]))
+        return _reference_from_row(root, refreshed, secret)
+
+    descriptor = repository_descriptor
+    if descriptor is None:
+        descriptor = repository_bundle_descriptor
+    if (
+        require_repository_descriptor
+        and request.repository.source_kind == "existing_folder"
+        and descriptor is None
+        and repository_transfer_descriptor is None
+    ):
+        raise QualifiedCampaignInputError("new Start requires the selected repository object")
+
+    imported = freeze_repository_import(
+        request.repository,
+        import_root=snapshots / "imports",
+        repository_descriptor=(
+            descriptor if repository_transfer_descriptor is None else None
+        ),
+        repository_transfer_descriptor=repository_transfer_descriptor,
+        crash_injector=inject,
+    )
+    snapshot_plan = plan_sanitized_snapshot(
+        imported, python_executable=os.path.realpath(sys.executable)
+    )
+    campaign_mac = hmac.new(
+        secret,
+        f"campaign:{request.client_start_key_sha256}".encode("ascii"),
+        "sha256",
+    ).hexdigest()
+    campaign_id = f"campaign-{campaign_mac[:24]}"
+    intent_payload = {
+        "schema_version": 2,
+        "campaign_public_id": campaign_id,
+        "start_request_sha256": request_sha,
+        **request.model_dump(mode="python", exclude={"schema_version"}),
+    }
+    intent_sha = hashlib.sha256(canonical_json(intent_payload)).hexdigest()
+    intent = CampaignLaunchIntentV1.model_validate(
+        {**intent_payload, "intent_sha256": intent_sha}
+    )
+    intent_mac = hmac.new(secret, f"intent:{intent_sha}".encode("ascii"), "sha256").hexdigest()
+    intent_id = f"intent_{intent_sha}_{intent_mac}"
+    repository = repository_authority_for_plan(
+        request.repository,
+        snapshot_plan,
+        snapshot_root=snapshots,
+        campaign_public_id=campaign_id,
+    )
+    bundle = CampaignInputBundleV1.freeze(
+        campaign_public_id=campaign_id,
+        human_name=request.human_name,
+        repository=repository,
+        research_contract=request.research_contract,
+        research_plan=request.research_plan,
+        initial_task=request.initial_task,
+        supporting_files=request.supporting_files,
+        requested_settings=request.requested_settings,
+    )
+    frozen_payload = {
+        "schema_version": 2,
+        "launch_intent_sha256": intent_sha,
+        "repository_preparation_sha256": snapshot_plan.snapshot_id,
+        "input_bundle": bundle.model_dump(mode="python"),
+    }
+    frozen = FrozenCampaignInputV1.model_validate(
+        {
+            **frozen_payload,
+            "frozen_input_sha256": hashlib.sha256(canonical_json(frozen_payload)).hexdigest(),
+        }
+    )
+    request_bytes = canonical_json(request.model_dump(mode="json"))
+    intent_bytes = canonical_json(intent.model_dump(mode="json"))
+    frozen_bytes = canonical_json(frozen.model_dump(mode="json"))
+    request_object_sha = _publish_object(root, "requests", request_sha, request_bytes, inject)
+    intent_object_sha = _publish_object(root, "intents", intent_sha, intent_bytes)
+    frozen_object_sha = _publish_object(
+        root, "frozen-inputs", frozen.frozen_input_sha256, frozen_bytes
+    )
+    inject("after_object_fsync_before_db_transaction")
+    inject("after_durable_objects_before_receipt")
+    created_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
+    transaction_id = f"tx_{secrets.token_hex(32)}"
+    repository_input_sha = hashlib.sha256(
+        canonical_json(request.repository.model_dump(mode="json"))
+    ).hexdigest()
+    supporting_sha = hashlib.sha256(
+        canonical_json([item.model_dump(mode="json") for item in request.supporting_files])
+    ).hexdigest()
+    settings_sha = hashlib.sha256(
+        canonical_json(request.requested_settings.model_dump(mode="json"))
+    ).hexdigest()
+    plan_json = canonical_json(snapshot_plan.model_dump(mode="json"))
+    uid = os.getuid() if operator_uid is None else operator_uid
+
+    with _connect(root) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        conflict = connection.execute(
+            "SELECT * FROM starts WHERE immutable_start_request_id = ? OR preview_id = ?",
+            (request.client_start_key_sha256, request.preview_id),
+        ).fetchone()
+        if conflict is not None:
+            _require_same_request(conflict, request_sha)
+            connection.rollback()
+            committed = cast(sqlite3.Row, conflict)
+        else:
+            inject("during_start_transaction")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO snapshots(
+                    snapshot_id, import_id, source_commit, source_tree,
+                    prepared_commit, prepared_tree, plan_json, state, completed_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, 'absent', NULL)
+                """,
+                (
+                    snapshot_plan.snapshot_id,
+                    imported.import_id,
+                    imported.source_commit,
+                    imported.source_tree,
+                    snapshot_plan.prepared_commit,
+                    snapshot_plan.prepared_tree,
+                    plan_json,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO starts(
+                    start_intent_id, immutable_start_request_id, canonical_request_sha256,
+                    campaign_public_id, operator_uid, operator_gid, preview_id,
+                    repository_input_sha256, source_kind, source_display,
+                    source_locator_sha256, source_commit, source_tree,
+                    contract_sha256, plan_sha256, task_sha256,
+                    supporting_manifest_sha256, settings_sha256,
+                    input_bundle_sha256, frozen_input_sha256, intent_sha256,
+                    creation_transaction_id, import_id, expected_snapshot_id,
+                    current_snapshot_id, request_object_sha256, intent_object_sha256,
+                    frozen_object_sha256, created_at
+                ) VALUES(
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    NULL, ?, ?, ?, ?
                 )
-            return _reference_from_receipt(root, existing, secret)
-        preview_receipt = _receipt_for_preview(root, request.preview_id)
-        if preview_receipt is not None:
-            if preview_receipt.start_request_sha256 != request_sha:
-                raise QualifiedCampaignInputError(
-                    "campaign preview was already started with different fields"
-                )
-            return _reference_from_receipt(root, preview_receipt, secret)
-
-        if (
-            require_repository_descriptor
-            and request.repository.source_kind == "existing_folder"
-            and repository_bundle_descriptor is None
-        ):
-            raise QualifiedCampaignInputError("new Start requires the selected repository object")
-
-        campaign_mac = hmac.new(
-            secret,
-            f"campaign:{request.client_start_key_sha256}".encode("ascii"),
-            "sha256",
-        ).hexdigest()
-        campaign_id = f"campaign-{campaign_mac[:24]}"
-        intent_payload = {
-            "schema_version": 1,
-            "campaign_public_id": campaign_id,
-            "start_request_sha256": request_sha,
-            **request.model_dump(mode="python", exclude={"schema_version"}),
-        }
-        intent_sha = hashlib.sha256(canonical_json(intent_payload)).hexdigest()
-        intent = CampaignLaunchIntentV1.model_validate(
-            {**intent_payload, "intent_sha256": intent_sha}
-        )
-        intent_mac = hmac.new(secret, f"intent:{intent_sha}".encode("ascii"), "sha256").hexdigest()
-        intent_id = f"intent_{intent_sha}_{intent_mac}"
-
-        # Local import happens exactly once at Start, while the service holds a
-        # stable descriptor for an existing-folder source.
-        from research_automation_supervisor.safe_git import prepare_repository_snapshot
-
-        repository, preparation = prepare_repository_snapshot(
-            intent,
-            snapshot_root=snapshots,
-            operator_uid=operator_uid,
-            operator_gid=operator_gid,
-            repository_bundle_descriptor=repository_bundle_descriptor,
-        )
-        bundle = CampaignInputBundleV1.freeze(
-            campaign_public_id=campaign_id,
-            human_name=request.human_name,
-            repository=repository,
-            research_contract=request.research_contract,
-            research_plan=request.research_plan,
-            initial_task=request.initial_task,
-            supporting_files=request.supporting_files,
-            requested_settings=request.requested_settings,
-        )
-        frozen_payload = {
-            "schema_version": 1,
-            "launch_intent_sha256": intent_sha,
-            "repository_preparation_sha256": preparation.receipt_sha256,
-            "input_bundle": bundle.model_dump(mode="python"),
-        }
-        frozen = FrozenCampaignInputV1.model_validate(
-            {
-                **frozen_payload,
-                "frozen_input_sha256": hashlib.sha256(canonical_json(frozen_payload)).hexdigest(),
-            }
-        )
-        _publish_object(
-            root / "objects" / request_sha[:2] / f"{request_sha}.json",
-            canonical_json(request.model_dump(mode="json")),
-            "Start request object",
-            inject=inject,
-        )
-        _publish_object(
-            root / "objects" / intent_sha[:2] / f"{intent_sha}.json",
-            canonical_json(intent.model_dump(mode="json")),
-            "launch intent object",
-        )
-        _publish_object(
-            root / "frozen-inputs" / f"{intent_sha}.json",
-            canonical_json(frozen.model_dump(mode="json")),
-            "frozen input object",
-        )
-        inject("after_durable_objects_before_receipt")
-        created_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
-        receipt_payload = {
-            "schema_version": 1,
-            "campaign_public_id": campaign_id,
-            "preview_id": request.preview_id,
-            "client_start_key_sha256": request.client_start_key_sha256,
-            "start_request_sha256": request_sha,
-            "launch_intent_sha256": intent_sha,
-            "launch_intent_id_sha256": hashlib.sha256(intent_id.encode("ascii")).hexdigest(),
-            "frozen_input_sha256": frozen.frozen_input_sha256,
-            "input_bundle_sha256": bundle.bundle_sha256,
-            "repository_preparation_sha256": preparation.receipt_sha256,
-            "created_at": created_at,
-        }
-        receipt = CampaignLaunchReceiptV1.model_validate(
-            {
-                **receipt_payload,
-                "receipt_sha256": hashlib.sha256(canonical_json(receipt_payload)).hexdigest(),
-            }
-        )
-        _publish_object(
-            root / "receipts" / f"{request.client_start_key_sha256}.json",
-            canonical_json(receipt.model_dump(mode="json")),
-            "launch receipt",
-        )
-        inject("after_receipt_before_response")
-        return CampaignLaunchReferenceV1(
-            campaign_public_id=campaign_id,
-            launch_intent_id=intent_id,
-            launch_intent_sha256=intent_sha,
-            input_bundle_sha256=bundle.bundle_sha256,
-        )
+                """,
+                (
+                    intent_id,
+                    request.client_start_key_sha256,
+                    request_sha,
+                    campaign_id,
+                    uid,
+                    operator_gid,
+                    request.preview_id,
+                    repository_input_sha,
+                    request.repository.source_kind,
+                    request.repository.source_display,
+                    request.repository.source_locator_sha256,
+                    imported.source_commit,
+                    imported.source_tree,
+                    request.research_contract.sha256,
+                    request.research_plan.sha256,
+                    request.initial_task.sha256,
+                    supporting_sha,
+                    settings_sha,
+                    bundle.bundle_sha256,
+                    frozen.frozen_input_sha256,
+                    intent_sha,
+                    transaction_id,
+                    imported.import_id,
+                    snapshot_plan.snapshot_id,
+                    request_object_sha,
+                    intent_object_sha,
+                    frozen_object_sha,
+                    created_at,
+                ),
+            )
+            inject("immediately_before_commit")
+            connection.commit()
+            committed = _row_for_intent_connection(connection, intent_id)
+    _secure_database_files(root)
+    inject("immediately_after_commit_before_response")
+    inject("after_receipt_before_response")
+    _ensure_snapshot(root, snapshots, committed, inject)
+    refreshed = _row_for_intent(root, intent_id)
+    return _reference_from_row(root, refreshed, secret)
 
 
 def get_start_intent(authority_root: Path, launch_intent_id: str) -> CampaignLaunchSummaryV1:
     root = _existing_authority_root(authority_root)
-    secret = _read_store_secret(root)
-    receipt, intent, frozen = _load_committed_intent(root, launch_intent_id, secret)
+    row = _row_for_intent(root, launch_intent_id)
+    _verify_intent_mac(row, launch_intent_id, _read_store_secret(root))
+    snapshot_state = _snapshot_state(root, str(row["expected_snapshot_id"]))
     return CampaignLaunchSummaryV1(
-        campaign_public_id=intent.campaign_public_id,
-        preview_id=intent.preview_id,
+        campaign_public_id=str(row["campaign_public_id"]),
+        preview_id=str(row["preview_id"]),
         launch_intent_id=launch_intent_id,
-        launch_intent_sha256=intent.intent_sha256,
-        input_bundle_sha256=frozen.input_bundle.bundle_sha256,
-        human_name=intent.human_name,
-        repository_display=intent.repository.source_display,
-        created_at=receipt.created_at,
+        launch_intent_sha256=str(row["intent_sha256"]),
+        input_bundle_sha256=str(row["input_bundle_sha256"]),
+        human_name=_load_intent(root, row).human_name,
+        repository_display=str(row["source_display"]),
+        created_at=str(row["created_at"]),
+        snapshot_state=snapshot_state,
+        snapshot_identity=(
+            str(row["current_snapshot_id"])
+            if row["current_snapshot_id"] is not None
+            else None
+        ),
     )
 
 
 def list_operator_campaigns(authority_root: Path) -> tuple[CampaignLaunchSummaryV1, ...]:
     root = _existing_authority_root(authority_root)
-    secret = _read_store_secret(root)
-    summaries: list[CampaignLaunchSummaryV1] = []
-    for path in _regular_receipts(root):
-        receipt = _read_model(path, CampaignLaunchReceiptV1, "launch receipt")
-        intent_id = _intent_id(secret, receipt.launch_intent_sha256)
-        summaries.append(get_start_intent(root, intent_id))
-    return tuple(sorted(summaries, key=lambda item: (item.created_at, item.campaign_public_id)))
+    with _connect(root) as connection:
+        rows = connection.execute(
+            "SELECT start_intent_id FROM starts ORDER BY created_at, campaign_public_id"
+        ).fetchall()
+    return tuple(get_start_intent(root, str(row[0])) for row in rows)
 
 
 def verify_start_intent(
@@ -335,21 +462,49 @@ def consume_start_intent_for_qualified_launch(
     expected_campaign_public_id: str,
 ) -> QualifiedLaunchMaterialV1:
     root = _existing_authority_root(authority_root)
-    secret = _read_store_secret(root)
-    _, intent, frozen = _load_committed_intent(root, launch_intent_id, secret)
-    if intent.campaign_public_id != expected_campaign_public_id:
+    row = _row_for_intent(root, launch_intent_id)
+    _verify_intent_mac(row, launch_intent_id, _read_store_secret(root))
+    if str(row["campaign_public_id"]) != expected_campaign_public_id:
         raise QualifiedCampaignInputError("launch intent belongs to another campaign")
-    return QualifiedLaunchMaterialV1(
-        campaign_public_id=intent.campaign_public_id,
+    if row["current_snapshot_id"] != row["expected_snapshot_id"]:
+        raise QualifiedCampaignStateError("sanitized repository snapshot is incomplete")
+    frozen = _load_frozen(root, row)
+    plan = _snapshot_plan(root, str(row["expected_snapshot_id"]))
+    verify_campaign_workspace(
+        Path(frozen.input_bundle.repository.prepared_workspace),
+        campaign_public_id=str(row["campaign_public_id"]),
         launch_intent_id=launch_intent_id,
-        launch_intent_sha256=intent.intent_sha256,
+        launch_intent_sha256=str(row["intent_sha256"]),
+        bundle_sha256=frozen.input_bundle.bundle_sha256,
+        snapshot_id=plan.snapshot_id,
+        baseline_commit=plan.prepared_commit,
+        baseline_tree=plan.prepared_tree,
+    )
+    return QualifiedLaunchMaterialV1(
+        campaign_public_id=str(row["campaign_public_id"]),
+        launch_intent_id=launch_intent_id,
+        launch_intent_sha256=str(row["intent_sha256"]),
         frozen_input_sha256=frozen.frozen_input_sha256,
         input_bundle=frozen.input_bundle,
+        snapshot_identity=plan.snapshot_id,
     )
 
 
-# Compatibility helpers are intentionally private-store APIs.  They are useful
-# for low-level recovery tests but are not exposed by the installed runner.
+def resume_start_snapshot(
+    authority_root: Path,
+    snapshot_root: Path,
+    launch_intent_id: str,
+    *,
+    crash_injector: CrashInjector | None = None,
+) -> CampaignLaunchSummaryV1:
+    """Deterministically resume an absent/building snapshot from frozen objects."""
+    root = _existing_authority_root(authority_root)
+    snapshots = initialize_snapshot_store(snapshot_root)
+    row = _row_for_intent(root, launch_intent_id)
+    _ensure_snapshot(root, snapshots, row, crash_injector or (lambda _boundary: None))
+    return get_start_intent(root, launch_intent_id)
+
+
 def freeze_launch_intent(
     request: CampaignLaunchRequestV1,
     authority_root: Path,
@@ -372,7 +527,9 @@ def load_launch_intent(
     expected_intent_sha256: str | None = None,
 ) -> CampaignLaunchIntentV1:
     root = _existing_authority_root(authority_root)
-    _, intent, _ = _load_committed_intent(root, launch_intent_id, _read_store_secret(root))
+    row = _row_for_intent(root, launch_intent_id)
+    _verify_intent_mac(row, launch_intent_id, _read_store_secret(root))
+    intent = _load_intent(root, row)
     if (
         expected_campaign_public_id is not None
         and intent.campaign_public_id != expected_campaign_public_id
@@ -401,12 +558,12 @@ def load_launch_summary(
 def load_frozen_campaign_input(
     authority_root: Path, intent: CampaignLaunchIntentV1
 ) -> FrozenCampaignInputV1 | None:
-    path = (
-        _existing_authority_root(authority_root) / "frozen-inputs" / f"{intent.intent_sha256}.json"
-    )
-    if not path.exists():
-        return None
-    return _read_model(path, FrozenCampaignInputV1, "frozen campaign input")
+    root = _existing_authority_root(authority_root)
+    with _connect(root) as connection:
+        row = connection.execute(
+            "SELECT * FROM starts WHERE intent_sha256 = ?", (intent.intent_sha256,)
+        ).fetchone()
+    return None if row is None else _load_frozen(root, row)
 
 
 def seal_frozen_campaign_input(
@@ -419,226 +576,366 @@ def seal_frozen_campaign_input(
     raise QualifiedCampaignInputError("frozen campaign input is committed only by atomic Start")
 
 
-def _load_committed_intent(
-    root: Path, launch_intent_id: str, secret: bytes
-) -> tuple[CampaignLaunchReceiptV1, CampaignLaunchIntentV1, FrozenCampaignInputV1]:
-    match = START_INTENT_ID.fullmatch(launch_intent_id)
-    if match is None:
-        raise QualifiedCampaignInputError("launch intent is stale or invalid")
-    intent_sha, supplied_mac = match.groups()
-    expected_mac = hmac.new(secret, f"intent:{intent_sha}".encode("ascii"), "sha256").hexdigest()
-    if not hmac.compare_digest(supplied_mac, expected_mac):
-        raise QualifiedCampaignInputError("launch intent is stale or invalid")
-    receipts = [
-        _read_model(path, CampaignLaunchReceiptV1, "launch receipt")
-        for path in _regular_receipts(root)
-    ]
-    matches = [item for item in receipts if item.launch_intent_sha256 == intent_sha]
-    if len(matches) != 1:
-        raise QualifiedCampaignInputError("launch intent is stale or ambiguous")
-    receipt = matches[0]
-    if not hmac.compare_digest(
-        receipt.launch_intent_id_sha256,
-        hashlib.sha256(launch_intent_id.encode("ascii")).hexdigest(),
-    ):
-        raise QualifiedCampaignInputError("launch intent receipt is corrupt")
-    intent = _read_model(
-        root / "objects" / intent_sha[:2] / f"{intent_sha}.json",
-        CampaignLaunchIntentV1,
-        "launch intent",
-    )
-    frozen = _read_model(
-        root / "frozen-inputs" / f"{intent_sha}.json",
-        FrozenCampaignInputV1,
-        "frozen campaign input",
-    )
-    if (
-        intent.intent_sha256 != intent_sha
-        or intent.campaign_public_id != receipt.campaign_public_id
-        or intent.start_request_sha256 != receipt.start_request_sha256
-        or frozen.launch_intent_sha256 != intent_sha
-        or frozen.frozen_input_sha256 != receipt.frozen_input_sha256
-        or frozen.input_bundle.bundle_sha256 != receipt.input_bundle_sha256
-        or frozen.repository_preparation_sha256 != receipt.repository_preparation_sha256
-        or frozen.input_bundle.campaign_public_id != receipt.campaign_public_id
-    ):
-        raise QualifiedCampaignInputError("frozen launch authority is corrupt")
-    return receipt, intent, frozen
+def authority_schema(authority_root: Path) -> tuple[str, ...]:
+    """Return the deployed schema for mechanical qualification evidence."""
+    root = _existing_authority_root(authority_root)
+    with _connect(root) as connection:
+        rows = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type IN ('table', 'index') "
+            "AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
+    return tuple(str(row[0]) for row in rows)
 
 
-def _reference_from_receipt(
-    root: Path, receipt: CampaignLaunchReceiptV1, secret: bytes
+def authoritative_start_count(authority_root: Path) -> int:
+    """Count Starts solely from committed SQLite authority."""
+    if not (authority_root / DATABASE_NAME).is_file():
+        return 0
+    root = _existing_authority_root(authority_root)
+    with _connect(root) as connection:
+        return int(connection.execute("SELECT count(*) FROM starts").fetchone()[0])
+
+
+def _ensure_snapshot(
+    root: Path,
+    snapshots: Path,
+    row: sqlite3.Row,
+    inject: CrashInjector,
+) -> None:
+    snapshot_id = str(row["expected_snapshot_id"])
+    plan = _snapshot_plan(root, snapshot_id)
+    imported = load_gitless_import(snapshots / "imports" / str(row["import_id"]))
+    with _connect(root) as connection:
+        state = str(
+            connection.execute(
+                "SELECT state FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
+            ).fetchone()[0]
+        )
+        if state == "complete":
+            snapshot = snapshots / "complete" / snapshot_id
+            verify_sanitized_snapshot(snapshot, plan)
+            if row["current_snapshot_id"] is None:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE starts SET current_snapshot_id = expected_snapshot_id "
+                    "WHERE start_intent_id = ? AND current_snapshot_id IS NULL",
+                    (str(row["start_intent_id"]),),
+                )
+                connection.commit()
+                _secure_database_files(root)
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE snapshots SET state = 'building' "
+                "WHERE snapshot_id = ? AND state != 'complete'",
+                (snapshot_id,),
+            )
+            connection.commit()
+            snapshot = build_sanitized_snapshot(
+                imported,
+                plan,
+                snapshot_root=snapshots,
+                python_executable=os.path.realpath(sys.executable),
+                crash_injector=inject,
+            )
+            completed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            with _connect(root) as commit_connection:
+                commit_connection.execute("BEGIN IMMEDIATE")
+                commit_connection.execute(
+                    "UPDATE snapshots SET state = 'complete', completed_at = ? "
+                    "WHERE snapshot_id = ?",
+                    (completed_at, snapshot_id),
+                )
+                commit_connection.execute(
+                    "UPDATE starts SET current_snapshot_id = expected_snapshot_id "
+                    "WHERE start_intent_id = ?",
+                    (str(row["start_intent_id"]),),
+                )
+                commit_connection.commit()
+            _secure_database_files(root)
+            inject("after_snapshot_commit_before_campaign_launch")
+    frozen = _load_frozen(root, row)
+    materialize_campaign_workspace(
+        snapshot,
+        plan,
+        snapshot_root=snapshots,
+        campaign_public_id=str(row["campaign_public_id"]),
+        launch_intent_id=str(row["start_intent_id"]),
+        launch_intent_sha256=str(row["intent_sha256"]),
+        bundle_sha256=frozen.input_bundle.bundle_sha256,
+        signing_secret=_read_store_secret(root),
+        operator_uid=int(row["operator_uid"]),
+        operator_gid=(int(row["operator_gid"]) if row["operator_gid"] is not None else None),
+    )
+
+
+def _reference_from_row(
+    root: Path, row: sqlite3.Row, secret: bytes
 ) -> CampaignLaunchReferenceV1:
-    intent_id = _intent_id(secret, receipt.launch_intent_sha256)
-    _load_committed_intent(root, intent_id, secret)
+    launch_intent_id = str(row["start_intent_id"])
+    _verify_intent_mac(row, launch_intent_id, secret)
+    frozen = _load_frozen(root, row)
+    if frozen.input_bundle.bundle_sha256 != row["input_bundle_sha256"]:
+        raise QualifiedCampaignStateError("transactional Start bundle is corrupt")
     return CampaignLaunchReferenceV1(
-        campaign_public_id=receipt.campaign_public_id,
-        launch_intent_id=intent_id,
-        launch_intent_sha256=receipt.launch_intent_sha256,
-        input_bundle_sha256=receipt.input_bundle_sha256,
+        campaign_public_id=str(row["campaign_public_id"]),
+        launch_intent_id=launch_intent_id,
+        launch_intent_sha256=str(row["intent_sha256"]),
+        input_bundle_sha256=str(row["input_bundle_sha256"]),
+        snapshot_identity=(
+            str(row["current_snapshot_id"])
+            if row["current_snapshot_id"] is not None
+            else None
+        ),
     )
 
 
-def _intent_id(secret: bytes, intent_sha: str) -> str:
-    mac = hmac.new(secret, f"intent:{intent_sha}".encode("ascii"), "sha256").hexdigest()
-    return f"intent_{intent_sha}_{mac}"
-
-
-def _receipt_for_request(root: Path, request_key_sha: str) -> CampaignLaunchReceiptV1 | None:
-    path = root / "receipts" / f"{request_key_sha}.json"
-    if not path.exists():
-        return None
-    return _read_model(path, CampaignLaunchReceiptV1, "launch receipt")
-
-
-def _receipt_for_preview(root: Path, preview_id: str) -> CampaignLaunchReceiptV1 | None:
-    matches: list[CampaignLaunchReceiptV1] = []
-    for path in _regular_receipts(root):
-        receipt = _read_model(path, CampaignLaunchReceiptV1, "launch receipt")
-        if receipt.preview_id == preview_id:
-            matches.append(receipt)
-    if len(matches) > 1:
-        raise QualifiedCampaignInputError("campaign preview Start authority is ambiguous")
-    return matches[0] if matches else None
-
-
-def _regular_receipts(root: Path) -> tuple[Path, ...]:
-    directory = root / "receipts"
-    _validate_directory(directory, "receipt directory")
-    values: list[Path] = []
+def _load_intent(root: Path, row: sqlite3.Row) -> CampaignLaunchIntentV1:
+    content = _load_object(
+        root, "intents", str(row["intent_object_sha256"]), "launch intent"
+    )
     try:
-        for entry in os.scandir(directory):
-            if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
-                raise QualifiedCampaignInputError("launch receipt directory is unsafe")
-            values.append(Path(entry.path))
-    except OSError as exc:
-        raise QualifiedCampaignInputError("launch receipt directory is unavailable") from exc
-    return tuple(sorted(values))
+        intent = CampaignLaunchIntentV1.model_validate_json(content)
+    except ValidationError as exc:
+        raise QualifiedCampaignStateError("launch intent object is invalid") from exc
+    if intent.intent_sha256 != row["intent_sha256"]:
+        raise QualifiedCampaignStateError("launch intent object was substituted")
+    return intent
 
 
-@contextmanager
-def _start_lock(root: Path) -> Iterator[None]:
-    path = root / "start.lock"
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+def _load_frozen(root: Path, row: sqlite3.Row) -> FrozenCampaignInputV1:
+    content = _load_object(
+        root, "frozen-inputs", str(row["frozen_object_sha256"]), "frozen input"
+    )
     try:
-        descriptor = os.open(path, flags, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    except OSError as exc:
-        raise QualifiedCampaignInputError("core Start lock is unavailable") from exc
-    finally:
-        if "descriptor" in locals():
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            finally:
-                os.close(descriptor)
+        frozen = FrozenCampaignInputV1.model_validate_json(content)
+    except ValidationError as exc:
+        raise QualifiedCampaignStateError("frozen input object is invalid") from exc
+    if (
+        frozen.frozen_input_sha256 != row["frozen_input_sha256"]
+        or frozen.launch_intent_sha256 != row["intent_sha256"]
+        or frozen.input_bundle.bundle_sha256 != row["input_bundle_sha256"]
+    ):
+        raise QualifiedCampaignStateError("frozen input object was substituted")
+    return frozen
+
+
+def _snapshot_plan(root: Path, snapshot_id: str) -> SanitizedSnapshotPlanV1:
+    with _connect(root) as connection:
+        row = connection.execute(
+            "SELECT plan_json FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
+        ).fetchone()
+    if row is None:
+        raise QualifiedCampaignStateError("snapshot transaction is missing")
+    try:
+        return SanitizedSnapshotPlanV1.model_validate_json(bytes(row[0]))
+    except ValidationError as exc:
+        raise QualifiedCampaignStateError("snapshot transaction is corrupt") from exc
+
+
+def _snapshot_state(
+    root: Path, snapshot_id: str
+) -> Literal["absent", "building", "complete"]:
+    with _connect(root) as connection:
+        row = connection.execute(
+            "SELECT state FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
+        ).fetchone()
+    if row is None or row[0] not in {"absent", "building", "complete"}:
+        raise QualifiedCampaignStateError("snapshot transaction is corrupt")
+    return cast(Literal["absent", "building", "complete"], row[0])
+
+
+def _row_for_request_identity(root: Path, request_id: str) -> sqlite3.Row | None:
+    with _connect(root) as connection:
+        row = connection.execute(
+            "SELECT * FROM starts WHERE immutable_start_request_id = ?", (request_id,)
+        ).fetchone()
+    return cast(sqlite3.Row | None, row)
+
+
+def _row_for_intent(root: Path, launch_intent_id: str) -> sqlite3.Row:
+    with _connect(root) as connection:
+        return _row_for_intent_connection(connection, launch_intent_id)
+
+
+def _row_for_intent_connection(
+    connection: sqlite3.Connection, launch_intent_id: str
+) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT * FROM starts WHERE start_intent_id = ?", (launch_intent_id,)
+    ).fetchone()
+    if row is None:
+        raise QualifiedCampaignInputError("launch intent is stale or invalid")
+    return cast(sqlite3.Row, row)
+
+
+def _require_same_request(row: sqlite3.Row, request_sha: str) -> None:
+    if not hmac.compare_digest(str(row["canonical_request_sha256"]), request_sha):
+        raise QualifiedCampaignInputError(
+            "Start request identity was already bound to different fields"
+        )
+
+
+def _verify_intent_mac(row: sqlite3.Row, launch_intent_id: str, secret: bytes) -> None:
+    intent_sha = str(row["intent_sha256"])
+    mac = hmac.new(
+        secret, f"intent:{intent_sha}".encode("ascii"), "sha256"
+    ).hexdigest()
+    expected = f"intent_{intent_sha}_{mac}"
+    if not hmac.compare_digest(expected, launch_intent_id):
+        raise QualifiedCampaignInputError("launch intent is stale or invalid")
+
+
+def _self_hash(value: BaseModel, field: str) -> str:
+    return hashlib.sha256(
+        canonical_json(value.model_dump(mode="json", exclude={field}))
+    ).hexdigest()
+
+
+def _connect(root: Path) -> sqlite3.Connection:
+    database = root / DATABASE_NAME
+    connection = sqlite3.connect(database, timeout=30, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=30000")
+    return connection
 
 
 def _authority_root(path: Path) -> Path:
     try:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        absolute = Path(os.path.abspath(path))
         resolved = path.resolve(strict=True)
-        if resolved != Path(os.path.abspath(path)) or stat.S_ISLNK(resolved.lstat().st_mode):
-            raise OSError
+        if absolute != resolved:
+            raise OSError("authority root resolves elsewhere")
+        _validate_directory(resolved, "Core authority root")
         os.chmod(resolved, 0o700)
-        for name in ("objects", "receipts", "frozen-inputs"):
+        for name in ("requests", "intents", "frozen-inputs"):
             child = resolved / name
             child.mkdir(exist_ok=True, mode=0o700)
+            _validate_directory(child, "Core authority object directory")
             os.chmod(child, 0o700)
-            _validate_directory(child, f"{name} directory")
         fsync_directory(resolved)
         return resolved
     except (OSError, RuntimeError, ValueError) as exc:
-        raise QualifiedCampaignInputError("core authority store is unavailable") from exc
-
-
-def _snapshot_root(path: Path) -> Path:
-    try:
-        path.mkdir(parents=True, exist_ok=True, mode=0o711)
-        resolved = path.resolve(strict=True)
-        if resolved != Path(os.path.abspath(path)) or stat.S_ISLNK(resolved.lstat().st_mode):
-            raise OSError
-        os.chmod(resolved, 0o711)
-        return resolved
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise QualifiedCampaignInputError("core repository snapshot store is unavailable") from exc
+        raise QualifiedCampaignStateError("Core authority storage is unavailable") from exc
 
 
 def _existing_authority_root(path: Path) -> Path:
     try:
         absolute = Path(os.path.abspath(path))
         resolved = path.resolve(strict=True)
-        status = resolved.lstat()
+        if absolute != resolved:
+            raise OSError("authority root resolves elsewhere")
+        _validate_directory(resolved, "Core authority root")
+        return resolved
     except (OSError, RuntimeError, ValueError) as exc:
-        raise QualifiedCampaignInputError("core authority store is unavailable") from exc
-    if absolute != resolved or stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise QualifiedCampaignInputError("core authority store is unsafe")
-    return resolved
+        raise QualifiedCampaignInputError("Core authority storage is unavailable") from exc
+
+
+def _validate_directory(path: Path, label: str) -> None:
+    status = path.lstat()
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+        raise OSError(f"{label} is unsafe")
 
 
 def _store_secret(root: Path) -> bytes:
     path = root / "store-key-v1"
     if path.exists():
         return _read_store_secret(root)
-    value = secrets.token_bytes(32)
-    _publish_object(path, value, "core authority key", mode=0o600)
-    return value
+    content = secrets.token_bytes(32)
+    _write_new_regular(path, content, mode=0o600)
+    fsync_directory(root)
+    return content
 
 
 def _read_store_secret(root: Path) -> bytes:
-    value = _read_regular(root / "store-key-v1", "core authority key", max_bytes=32)
-    if len(value) != 32:
-        raise QualifiedCampaignInputError("core authority key is invalid")
-    return value
+    content = _read_regular(root / "store-key-v1", "Core authority key", max_bytes=32)
+    if len(content) != 32:
+        raise QualifiedCampaignStateError("Core authority key is invalid")
+    return content
 
 
 def _publish_object(
-    path: Path,
+    root: Path,
+    kind: str,
+    identity: str,
     content: bytes,
-    label: str,
-    *,
-    mode: int = 0o400,
     inject: CrashInjector | None = None,
-) -> None:
-    parent_created = not path.parent.exists()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _validate_directory(path.parent, f"{label} directory")
-    if parent_created:
-        fsync_directory(path.parent.parent)
-    if path.exists():
-        if _read_regular(path, label, max_bytes=MAX_AUTHORITY_BYTES) != content:
-            raise QualifiedCampaignInputError(f"{label} was replaced")
-        return
-    temporary = path.parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    linked = False
+) -> str:
+    digest = hashlib.sha256(content).hexdigest()
+    del identity
+    kind_directory = root / kind
+    directory = kind_directory / digest[:2]
+    created_shard = False
     try:
-        descriptor = os.open(temporary, flags, mode)
-        midpoint = max(1, len(content) // 2)
-        _write_all(descriptor, content[:midpoint])
+        directory.mkdir(mode=0o700)
+        created_shard = True
+    except FileExistsError:
+        pass
+    _validate_directory(directory, "Core object shard")
+    if created_shard:
+        fsync_directory(kind_directory)
+    path = directory / f"{digest}.json"
+    if path.exists():
+        observed = _read_regular(path, "immutable object", max_bytes=MAX_AUTHORITY_BYTES)
+        if not hmac.compare_digest(observed, content):
+            raise QualifiedCampaignStateError("immutable object identity collided")
+        return digest
+    descriptor, temporary_name = tempfile.mkstemp(dir=directory, prefix=".object-")
+    temporary = Path(temporary_name)
+    try:
+        _write_all(descriptor, content)
         if inject is not None:
-            inject("during_durable_object_write")
-        _write_all(descriptor, content[midpoint:])
-        os.fchmod(descriptor, mode)
+            inject("during_input_object_creation")
+        os.fchmod(descriptor, 0o400)
         os.fsync(descriptor)
         os.close(descriptor)
-        descriptor = None
+        descriptor = -1
         os.link(temporary, path, follow_symlinks=False)
-        linked = True
-        temporary.unlink()
-        fsync_directory(path.parent)
+        fsync_directory(directory)
     except FileExistsError:
-        if _read_regular(path, label, max_bytes=MAX_AUTHORITY_BYTES) != content:
-            raise QualifiedCampaignInputError(f"{label} was replaced") from None
-    except OSError as exc:
-        raise QualifiedCampaignInputError(f"{label} could not be committed") from exc
+        observed = _read_regular(path, "immutable object", max_bytes=MAX_AUTHORITY_BYTES)
+        if not hmac.compare_digest(observed, content):
+            raise QualifiedCampaignStateError(
+                "immutable object identity collided"
+            ) from None
     finally:
-        if descriptor is not None:
+        if descriptor >= 0:
             os.close(descriptor)
-        if not linked:
-            temporary.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+    return digest
+
+
+def _load_object(root: Path, kind: str, digest: str, label: str) -> bytes:
+    content = _read_regular(
+        root / kind / digest[:2] / f"{digest}.json",
+        label,
+        max_bytes=MAX_AUTHORITY_BYTES,
+    )
+    if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), digest):
+        raise QualifiedCampaignStateError(f"{label} hash is invalid")
+    return content
+
+
+def _write_new_regular(path: Path, content: bytes, *, mode: int) -> None:
+    descriptor = os.open(
+        path,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
+    try:
+        _write_all(descriptor, content)
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -646,51 +943,43 @@ def _write_all(descriptor: int, content: bytes) -> None:
     while offset < len(content):
         written = os.write(descriptor, content[offset:])
         if written <= 0:
-            raise OSError("short authority write")
+            raise OSError("short Core authority write")
         offset += written
 
 
 def _read_regular(path: Path, label: str, *, max_bytes: int) -> bytes:
-    _validate_directory(path.parent, f"{label} directory")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
         try:
             status = os.fstat(descriptor)
             if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:
-                raise OSError
+                raise OSError("unsafe immutable object")
             chunks: list[bytes] = []
             remaining = max_bytes + 1
             while remaining:
-                chunk = os.read(descriptor, min(64 * 1024, remaining))
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
                 if not chunk:
                     break
                 chunks.append(chunk)
                 remaining -= len(chunk)
+            content = b"".join(chunks)
+            if len(content) > max_bytes:
+                raise OSError("immutable object exceeds limit")
+            return content
         finally:
             os.close(descriptor)
     except OSError as exc:
-        raise QualifiedCampaignInputError(f"{label} is missing or unsafe") from exc
-    content = b"".join(chunks)
-    if len(content) > max_bytes:
-        raise QualifiedCampaignInputError(f"{label} is too large")
-    return content
+        raise QualifiedCampaignStateError(f"{label} is unavailable or unsafe") from exc
 
 
-def _validate_directory(path: Path, label: str) -> None:
-    try:
-        absolute = Path(os.path.abspath(path))
-        resolved = path.resolve(strict=True)
-        status = resolved.lstat()
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise QualifiedCampaignInputError(f"{label} is missing or unsafe") from exc
-    if absolute != resolved or stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise QualifiedCampaignInputError(f"{label} is missing or unsafe")
-
-
-def _read_model(path: Path, model: type[ModelT], label: str) -> ModelT:
-    try:
-        content = _read_regular(path, label, max_bytes=MAX_AUTHORITY_BYTES)
-        return model.model_validate_json(content)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError) as exc:
-        raise QualifiedCampaignInputError(f"{label} is corrupt") from exc
+def _secure_database_files(root: Path) -> None:
+    for name in (DATABASE_NAME, f"{DATABASE_NAME}-wal", f"{DATABASE_NAME}-shm"):
+        path = root / name
+        if path.exists():
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+                raise QualifiedCampaignStateError("Core transaction database is unsafe")
+            os.chmod(path, 0o600)

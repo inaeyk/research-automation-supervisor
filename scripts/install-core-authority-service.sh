@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 022
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run this one-time installer with administrator authorization." >&2
@@ -32,18 +33,25 @@ usermod -a -G research-supervisor-custodian "$operator_name"
 usermod -a -G research-supervisor-custodian research-supervisor-core
 
 install -d -o root -g root -m 0755 /opt/research-supervisor-core
-if [ ! -x /opt/research-supervisor-core/venv/bin/python ]; then
-    python3 -m venv /opt/research-supervisor-core/venv
+venv_root=/opt/research-supervisor-core/venv
+if [ ! -x "$venv_root/bin/python" ]; then
+    python3 -m venv "$venv_root"
 fi
-/opt/research-supervisor-core/venv/bin/python -m pip install \
+"$venv_root/bin/python" -m pip install \
     --disable-pip-version-check --upgrade "$project_root"
+find "$venv_root" -xdev -exec chown -h root:root {} +
+find "$venv_root" -xdev -type d -exec chmod 0755 {} +
+find "$venv_root" -xdev -type f -perm /0111 -exec chmod 0755 {} +
+find "$venv_root" -xdev -type f ! -perm /0111 -exec chmod 0644 {} +
 
-install -d -o research-supervisor-core -g research-supervisor-core -m 0711 \
+install -d -o research-supervisor-core -g research-supervisor-custodian -m 0711 \
     /var/lib/research-supervisor-core
-install -d -o research-supervisor-core -g research-supervisor-core -m 0700 \
+install -d -o research-supervisor-core -g research-supervisor-custodian -m 0700 \
     /var/lib/research-supervisor-core/authority
-install -d -o research-supervisor-core -g research-supervisor-core -m 0711 \
+install -d -o research-supervisor-core -g research-supervisor-custodian -m 0710 \
     /var/lib/research-supervisor-core/snapshots
+install -d -o research-supervisor-core -g research-supervisor-custodian -m 2710 \
+    /var/lib/research-supervisor-core/snapshots/workspaces
 install -d -o root -g root -m 0755 /etc/research-supervisor-core
 environment_file=/etc/research-supervisor-core/service.env
 temporary_environment=/etc/research-supervisor-core/.service.env.tmp
@@ -55,6 +63,7 @@ install -o root -g root -m 0644 \
     "$project_root/scripts/research-supervisor-core-authority.service" \
     /etc/systemd/system/research-supervisor-core-authority.service
 systemctl daemon-reload
-systemctl enable --now research-supervisor-core-authority.service
+systemctl enable research-supervisor-core-authority.service
+systemctl restart research-supervisor-core-authority.service
 
 echo "Core Authority Service installed. Sign out and back in once before ordinary use."

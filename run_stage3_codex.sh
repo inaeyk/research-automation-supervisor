@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ -d .git ]] || { echo "Run from the repository root." >&2; exit 2; }
+repository_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$repository_root" && "$repository_root" -ef . ]] || {
+  echo "Run from the repository root." >&2
+  exit 2
+}
 [[ -f STAGE_3_CONTRACT.md ]] || { echo "Missing Stage 3 contract." >&2; exit 2; }
 [[ -f CODEX_STAGE_3_PROMPT.md ]] || { echo "Missing Stage 3 prompt." >&2; exit 2; }
 [[ -x .venv/bin/python ]] || { echo "Virtual environment missing." >&2; exit 2; }

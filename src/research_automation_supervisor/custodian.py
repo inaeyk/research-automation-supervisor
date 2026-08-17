@@ -466,7 +466,11 @@ class CampaignCustodian:
         self.previews = _safe_child_directory(self.custodian_state, "previews")
         self.runner_logs = _safe_child_directory(self.custodian_state, "runner-logs")
 
-    def environment(self) -> EnvironmentReportV1:
+    def environment(self, *, snapshot_complete: bool = False) -> EnvironmentReportV1:
+        if self.environment_inspector is inspect_environment:
+            return inspect_environment(
+                self.data_root, allow_program_execution=snapshot_complete
+            )
         return self.environment_inspector(self.data_root)
 
     def sign_in(self) -> int:
@@ -569,7 +573,7 @@ class CampaignCustodian:
             projection=projection,
         )
         self._persist_record(record)
-        environment = self.environment()
+        environment = self.environment(snapshot_complete=True)
         if not environment.ready:
             blocked = record.model_copy(
                 update={
@@ -671,7 +675,7 @@ class CampaignCustodian:
     def continue_campaign(self, campaign_public_id: str) -> CustodianCampaignRecordV1:
         record = self.get_record(campaign_public_id, refresh=False)
         intent = self._validated_intent(record)
-        environment = self.environment()
+        environment = self.environment(snapshot_complete=True)
         if not environment.ready:
             updated = record.model_copy(
                 update={"projection": _environment_blocked_projection(intent, environment)}
@@ -826,6 +830,12 @@ class CampaignCustodian:
     def _record_from_core(
         self, summary: CampaignLaunchSummaryV1, *, refresh: bool
     ) -> CustodianCampaignRecordV1:
+        snapshot_resume_failed = False
+        if summary.snapshot_state != "complete":
+            try:
+                summary = self.core.resume_start_snapshot(summary.launch_intent_id)
+            except Exception:
+                snapshot_resume_failed = True
         campaign_id = summary.campaign_public_id
         exchange = prepare_operator_exchange(self.exchange_root, campaign_id)
         authority = self.authorities / campaign_id
@@ -875,11 +885,26 @@ class CampaignCustodian:
             projection=projection,
         )
         self._persist_record(record)
+        if snapshot_resume_failed or summary.snapshot_state != "complete":
+            blocked = record.model_copy(
+                update={
+                    "projection": _verification_blocked_projection(
+                        summary,
+                        "sanitized_snapshot_incomplete",
+                        (
+                            "The committed Start is intact, but its sanitized repository "
+                            "snapshot is incomplete. Continue after Core service recovery."
+                        ),
+                    )
+                }
+            )
+            self._persist_record(blocked)
+            return blocked
         if authority.exists():
             return self._refresh_record(record) if refresh else record
         if runner_pid is not None:
             return record
-        environment = self.environment()
+        environment = self.environment(snapshot_complete=True)
         if not environment.ready:
             blocked = record.model_copy(
                 update={"projection": _environment_blocked_projection(summary, environment)}
@@ -1111,6 +1136,7 @@ def _runner_environment() -> dict[str, str]:
     allowed = {
         "PATH",
         "HOME",
+        "CODEX_HOME",
         "USER",
         "LOGNAME",
         "LANG",
@@ -1132,31 +1158,12 @@ def _runner_environment() -> dict[str, str]:
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": "/bin/false",
-            "SSH_ASKPASS": "/bin/false",
-            "GIT_EXTERNAL_DIFF": "",
             "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": "*",
         }
     )
-    sealed = (
-        ("safe.directory", "*"),
-        ("core.hooksPath", "/dev/null"),
-        ("core.fsmonitor", "false"),
-        ("core.attributesFile", "/dev/null"),
-        ("core.sshCommand", "/bin/false"),
-        ("credential.helper", ""),
-        ("diff.external", ""),
-        ("fetch.recurseSubmodules", "false"),
-        ("submodule.recurse", "false"),
-        ("protocol.ext.allow", "never"),
-        ("protocol.file.allow", "never"),
-        ("protocol.ssh.allow", "never"),
-        ("protocol.git.allow", "never"),
-    )
-    environment["GIT_CONFIG_COUNT"] = str(len(sealed))
-    for index, (key, value) in enumerate(sealed):
-        environment[f"GIT_CONFIG_KEY_{index}"] = key
-        environment[f"GIT_CONFIG_VALUE_{index}"] = value
     return environment
 
 

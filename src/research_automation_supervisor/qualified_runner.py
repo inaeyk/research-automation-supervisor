@@ -30,6 +30,7 @@ from research_automation_supervisor.qualified_campaign import (
 
 def main(argv: list[str] | None = None) -> int:
     _seal_production_git_environment()
+    _establish_shared_workspace_umask()
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "operation",
@@ -136,8 +137,19 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _establish_shared_workspace_umask() -> None:
+    """Keep later Worker-created workspace content cooperative with Core.
+
+    The root installer provisions the mutable workspace root with the shared GID
+    and SGID inheritance.  The ordinary qualified runner supplies the matching
+    creation mask so its workflow children retain group write permission without
+    a later chmod/chown or any elevated capability.
+    """
+    os.umask(0o007)
+
+
 def _seal_production_git_environment() -> None:
-    """Seal every legacy Git subprocess reachable from the installed runner."""
+    """Ignore host config; snapshot-local config is trusted-generated authority."""
     preserved = {key: os.environ[key] for key in ("CODEX_HOME",) if key in os.environ}
     os.environ.clear()
     os.environ.update(
@@ -150,32 +162,15 @@ def _seal_production_git_environment() -> None:
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": "/bin/false",
-            "SSH_ASKPASS": "/bin/false",
-            "GIT_EXTERNAL_DIFF": "",
             "GIT_OPTIONAL_LOCKS": "0",
             "LANG": "C.UTF-8",
         }
     )
-    sealed = (
-        ("safe.directory", "*"),
-        ("core.hooksPath", "/dev/null"),
-        ("core.fsmonitor", "false"),
-        ("core.attributesFile", "/dev/null"),
-        ("core.sshCommand", "/bin/false"),
-        ("credential.helper", ""),
-        ("diff.external", ""),
-        ("fetch.recurseSubmodules", "false"),
-        ("submodule.recurse", "false"),
-        ("protocol.ext.allow", "never"),
-        ("protocol.file.allow", "never"),
-        ("protocol.ssh.allow", "never"),
-        ("protocol.git.allow", "never"),
-    )
-    os.environ["GIT_CONFIG_COUNT"] = str(len(sealed))
-    for index, (key, value) in enumerate(sealed):
-        os.environ[f"GIT_CONFIG_KEY_{index}"] = key
-        os.environ[f"GIT_CONFIG_VALUE_{index}"] = value
+    # The only command-scope setting is ownership qualification for the
+    # cross-UID workspace.  It does not neutralize repository configuration.
+    os.environ["GIT_CONFIG_COUNT"] = "1"
+    os.environ["GIT_CONFIG_KEY_0"] = "safe.directory"
+    os.environ["GIT_CONFIG_VALUE_0"] = "*"
 
 
 def _print_json(value: object, *, stream: TextIO = sys.stdout) -> None:

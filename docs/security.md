@@ -68,27 +68,54 @@ a model process can reach protected material.
 
 Started scientific inputs live only in the mode-0700 authority store owned by the
 non-login `research-supervisor-core` service identity. The ordinary Custodian UID has
-no filesystem authority over its key, objects, receipts, frozen inputs, or authoritative
+no filesystem authority over its key, database, objects, frozen inputs, or authoritative
 launch records. Custodian previews/cards are replaceable projections and are rebuilt
 from the authenticated Unix-socket service. Strict `SO_PEERCRED`-authenticated IPC
 exposes only typed preview/Create/Get/List/Verify/Consume operations.
 
-Start is a request-keyed atomic single assignment. Core validates every supplied field,
-holds a no-follow repository descriptor, creates the sanitized snapshot and complete
-frozen bundle, fsyncs the objects/directories, and publishes the receipt as the sole
-commit point. Identical retries return the same immutable intent; any changed field,
-stale ID, corrupt object, or cross-campaign substitution fails closed. The installed
-runner accepts only `--launch-intent`; no mutable `--bundle` launch exists.
+Start is a request-keyed SQLite transaction with WAL and `synchronous=FULL`. Core binds
+every supplied field, complete bundle identity, creation transaction, expected snapshot,
+and current snapshot when complete. External immutable objects are fsynced before the
+transaction. Only a committed `starts` row is authority: orphan objects, staging trees,
+cards, and partial files count as zero Starts. Identical retries return the same immutable
+intent; any changed field, stale ID, corrupt object, or cross-campaign substitution fails
+closed. The installed runner accepts only `--launch-intent`; no mutable `--bundle` launch
+exists.
 
-Selected repositories are untrusted source material before Bubblewrap. SafeGit permits only direct
-audited Git built-ins for identity/object inspection and an HTTPS or local-source
-`--no-checkout` import. Existing roots are held by no-follow descriptor, bound by
-device/inode, and revalidated after import; later production paths use only the one
-core-created sanitized snapshot. SafeGit supplies a sterile HOME, disables system/global config,
-hooks, fsmonitor, external diff, attributes files, credential helpers and prompts, and
-denies command-executing/unsupported transports. Checkout and preparation commit run
-only inside Bubblewrap `--unshare-all`. A content-hashed receipt preserves the exact
-argv/environment/isolation proof.
+Before snapshot completion, neither Custodian nor Core has a Git subprocess path. A
+retained no-follow directory descriptor is the only local source capability. Core copies
+only a hashed object/ref byte stream produced through that retained descriptor, ignores
+config/hooks/alternates, and uses Dulwich to validate Git
+objects without executing attributes, filters, helpers, aliases, fsmonitor, diff, or
+credentials. Credential-free HTTPS is the only URL transport; ext, file/local URL, SSH,
+git, custom helpers, redirects, and downgrade/origin changes are rejected. Snapshot state
+is explicit: absent, building, and
+complete. Only complete is committed back to Start authority and can produce a campaign
+workspace. The immutable snapshot/config/metadata and derived `.git` control authority
+remain core-only; only worktree content is delegated for workflow changes. Pre-snapshot
+environment reporting performs no process execution, and the optional Linux folder picker
+uses only a root-owned absolute system program. The original path is never read again.
+
+Every exposed workspace binding is canonical JSON signed with a domain-separated Ed25519
+key derived inside Core from `store-key-v1`. The binding covers its exact absolute path,
+campaign and Start identities, bundle, snapshot, commit, and tree. Only the raw public key
+is exposed at the fixed root-owned snapshot trust anchor. Operator-side Git verifies that
+signature, the exact Core workspace root, ownership/modes, commit/tree, and trusted control
+directory without access to private `complete/` content. Core independently re-verifies the
+private immutable snapshot before consume. The installed `research-supervisor` entrypoint
+also gates the frozen legacy doctor/Codex worktree probes on this signed post-snapshot
+binding, so those retained Git callsites are not pre-snapshot campaign paths.
+
+The mutable workspace boundary uses no runtime ownership capability. The root-only
+installer creates `snapshots/workspaces` once as Core-owned, shared-group, mode 02710.
+Linux SGID inheritance then supplies the shared GID to Core-created campaign directories
+and later ordinary-Worker descendants; the qualified runner uses umask 0007 so mutable
+files remain group-writable. Core never asks to set a SUID or SGID bit at runtime and
+never chowns workspace content. `RestrictSUIDSGID=true`, `NoNewPrivileges=true`, the
+empty capability sets, `ProtectSystem=strict`, and the unit's two narrow writable roots
+therefore remain in force. In particular, Core cannot create a setuid-Core executable in
+the operator-accessible workspace. Inherited SGID is cleared from `.git`, whose files and
+directories are then sealed Core-owned and non-group-writable; no path is world-writable.
 
 The PA-2 Physics Oracle runner has a narrower, distinct policy. It accepts no CLI argv
 and executes only a trusted catalog's hash-pinned system-Python intent. Bubblewrap

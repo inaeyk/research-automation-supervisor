@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ -d .git ]] || {
+repository_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$repository_root" && "$repository_root" -ef . ]] || {
   echo "Run this script from the repository root." >&2
   exit 2
 }

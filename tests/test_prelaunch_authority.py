@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
+import os
+import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
 
+import research_automation_supervisor.gitless_repository as gitless_repository_module
 from research_automation_supervisor.core_authority_models import CampaignLaunchRequestV1
 from research_automation_supervisor.custodian_errors import QualifiedCampaignInputError
 from research_automation_supervisor.custodian_models import (
@@ -13,11 +16,11 @@ from research_automation_supervisor.custodian_models import (
     FrozenInputFileV1,
 )
 from research_automation_supervisor.prelaunch_authority import (
+    authoritative_start_count,
     consume_start_intent_for_qualified_launch,
     create_start_intent,
     get_start_intent,
     list_operator_campaigns,
-    load_launch_intent,
     verify_start_intent,
 )
 from research_automation_supervisor.safe_git import inspect_requested_repository
@@ -77,7 +80,157 @@ def test_atomic_start_commits_complete_bundle_and_one_sanitized_snapshot(tmp_pat
     workspace = Path(material.input_bundle.repository.prepared_workspace)
     assert workspace.is_dir()
     assert len(tuple((snapshots / "workspaces").glob("*/repository"))) == 1
-    assert len(tuple((authority / "receipts").glob("*.json"))) == 1
+    assert authoritative_start_count(authority) == 1
+    assert summary.snapshot_state == "complete"
+    assert len(tuple((snapshots / "complete").glob("*"))) == 1
+
+
+def test_snapshot_store_modes_are_exact_under_service_umask(tmp_path: Path) -> None:
+    snapshots = tmp_path / "snapshots"
+    previous_umask = os.umask(0o077)
+    try:
+        gitless_repository_module.initialize_snapshot_store(snapshots)
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(snapshots.stat().st_mode) == 0o710
+    for name in ("imports", "staging", "complete"):
+        assert stat.S_IMODE((snapshots / name).stat().st_mode) == 0o700
+    workspaces = snapshots / "workspaces"
+    assert stat.S_IMODE(workspaces.stat().st_mode) == 0o2710
+
+    workspaces.chmod(0o700)
+    previous_umask = os.umask(0o077)
+    try:
+        gitless_repository_module.initialize_snapshot_store(snapshots)
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(workspaces.stat().st_mode) == 0o2710
+
+
+def test_workspace_delegation_retains_core_uid_and_uses_only_shared_gid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    authority = tmp_path / "authority"
+    snapshots = tmp_path / "snapshots"
+    core_uid = os.getuid()
+    shared_gid = os.getgid()
+    chowns: list[tuple[int, int]] = []
+    chmod_modes: list[int] = []
+    real_chmod = os.chmod
+
+    def group_only_chown(
+        path: os.PathLike[str] | str,
+        uid: int,
+        gid: int,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        chowns.append((uid, gid))
+        raise PermissionError("runtime workspace delegation attempted chown")
+
+    def reject_runtime_setid_chmod(
+        path: os.PathLike[str] | str,
+        mode: int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        chmod_modes.append(mode)
+        if mode & (stat.S_ISUID | stat.S_ISGID):
+            raise PermissionError("RestrictSUIDSGID rejected runtime chmod")
+        real_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    gitless_repository_module.initialize_snapshot_store(snapshots)
+
+    monkeypatch.setattr(gitless_repository_module.os, "chown", group_only_chown)
+    monkeypatch.setattr(gitless_repository_module.os, "chmod", reject_runtime_setid_chmod)
+    reference = create_start_intent(
+        request,
+        authority,
+        snapshots,
+        operator_uid=core_uid + 10_000,
+        operator_gid=shared_gid,
+    )
+    material = consume_start_intent_for_qualified_launch(
+        authority,
+        reference.launch_intent_id,
+        expected_campaign_public_id=reference.campaign_public_id,
+    )
+    workspace = Path(material.input_bundle.repository.prepared_workspace)
+
+    assert chowns == []
+    assert chmod_modes
+    assert all(not mode & (stat.S_ISUID | stat.S_ISGID) for mode in chmod_modes)
+    for path in (workspace, *workspace.rglob("*")):
+        status = path.lstat()
+        assert not stat.S_ISLNK(status.st_mode)
+        assert status.st_uid == core_uid
+        assert status.st_gid == shared_gid
+        assert not status.st_mode & stat.S_IWOTH
+
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o3770
+    assert stat.S_IMODE((workspace / "README.md").stat().st_mode) == 0o660
+    assert stat.S_IMODE((workspace / ".research-supervisor").stat().st_mode) == 0o2770
+    assert stat.S_IMODE(
+        (workspace / ".research-supervisor" / "acceptance.py").stat().st_mode
+    ) == 0o770
+    assert stat.S_IMODE((workspace / ".git").stat().st_mode) == 0o550
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o550
+        for path in (workspace / ".git").rglob("*")
+        if path.is_dir()
+    )
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o440
+        for path in (workspace / ".git").rglob("*")
+        if path.is_file()
+    )
+    previous_umask = os.umask(0o007)
+    try:
+        inherited = workspace / "worker-created"
+        inherited.mkdir(mode=0o770)
+        output = inherited / "result.txt"
+        output.write_text("worker output\n", encoding="utf-8")
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(inherited.stat().st_mode) == 0o2770
+    assert inherited.stat().st_gid == shared_gid
+    assert stat.S_IMODE(output.stat().st_mode) == 0o660
+    assert output.stat().st_gid == shared_gid
+
+
+def test_multiple_starts_bind_one_shared_complete_snapshot(tmp_path: Path) -> None:
+    repository = create_repository(tmp_path)
+    authority = tmp_path / "authority"
+    snapshots = tmp_path / "snapshots"
+    first = create_start_intent(
+        _request(tmp_path / "first", repository=repository), authority, snapshots
+    )
+    second = create_start_intent(
+        _request(
+            tmp_path / "second",
+            preview="preview-" + "b" * 24,
+            start_key="second start identity",
+            name="Second immutable campaign",
+            repository=repository,
+        ),
+        authority,
+        snapshots,
+    )
+
+    assert first.snapshot_identity == second.snapshot_identity
+    assert first.campaign_public_id != second.campaign_public_id
+    assert authoritative_start_count(authority) == 2
+    assert len(tuple((snapshots / "complete").glob("*"))) == 1
+    for reference in (first, second):
+        material = consume_start_intent_for_qualified_launch(
+            authority,
+            reference.launch_intent_id,
+            expected_campaign_public_id=reference.campaign_public_id,
+        )
+        assert material.snapshot_identity == reference.snapshot_identity
 
 
 @pytest.mark.parametrize(
@@ -140,10 +293,15 @@ def test_reuse_binds_every_caller_supplied_field(tmp_path: Path, changed: str) -
 @pytest.mark.parametrize(
     ("boundary", "committed"),
     (
-        ("before_core_transaction", False),
-        ("during_durable_object_write", False),
-        ("after_durable_objects_before_receipt", False),
-        ("after_receipt_before_response", True),
+        ("before_input_object_creation", False),
+        ("during_input_object_creation", False),
+        ("after_object_fsync_before_db_transaction", False),
+        ("during_start_transaction", False),
+        ("immediately_before_commit", False),
+        ("immediately_after_commit_before_response", True),
+        ("during_repository_snapshot_staging", True),
+        ("after_snapshot_content_before_snapshot_db_commit", True),
+        ("after_snapshot_commit_before_campaign_launch", True),
     ),
 )
 def test_start_crash_matrix_recovers_zero_or_exactly_one(
@@ -164,8 +322,8 @@ def test_start_crash_matrix_recovers_zero_or_exactly_one(
             snapshots,
             crash_injector=crash,
         )
-    receipts = tuple((authority / "receipts").glob("*.json")) if authority.exists() else ()
-    assert bool(receipts) is committed
+    count = authoritative_start_count(authority)
+    assert count == int(committed)
     if committed:
         recovered = list_operator_campaigns(authority)
         assert len(recovered) == 1
@@ -237,14 +395,23 @@ def test_stale_and_cross_campaign_intent_substitution_fail_closed(tmp_path: Path
         get_start_intent(authority, stale)
 
 
-def test_replaced_receipt_or_frozen_input_fails_closed(tmp_path: Path) -> None:
+def test_replaced_transaction_bound_frozen_input_fails_closed(tmp_path: Path) -> None:
     request = _request(tmp_path)
     authority = tmp_path / "authority"
     reference = create_start_intent(request, authority, tmp_path / "snapshots")
-    receipt_path = authority / "receipts" / f"{request.client_start_key_sha256}.json"
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    receipt["campaign_public_id"] = "campaign-corrupt0000000000"
-    receipt_path.unlink()
-    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-    with pytest.raises(QualifiedCampaignInputError):
-        load_launch_intent(authority, reference.launch_intent_id)
+    with sqlite3.connect(authority / "authority.sqlite3") as connection:
+        digest = str(
+            connection.execute(
+                "SELECT frozen_object_sha256 FROM starts WHERE start_intent_id = ?",
+                (reference.launch_intent_id,),
+            ).fetchone()[0]
+        )
+    frozen = authority / "frozen-inputs" / digest[:2] / f"{digest}.json"
+    frozen.chmod(0o600)
+    frozen.write_bytes(b"{}")
+    with pytest.raises(Exception, match="frozen input|hash"):
+        consume_start_intent_for_qualified_launch(
+            authority,
+            reference.launch_intent_id,
+            expected_campaign_public_id=reference.campaign_public_id,
+        )

@@ -106,6 +106,7 @@ class CampaignLaunchReferenceV1(BaseModel):
     launch_intent_id: StartIntentId
     launch_intent_sha256: Sha256
     input_bundle_sha256: Sha256
+    snapshot_identity: Sha256 | None = None
 
 
 class CampaignLaunchSummaryV1(BaseModel):
@@ -119,6 +120,8 @@ class CampaignLaunchSummaryV1(BaseModel):
     human_name: Annotated[str, Field(min_length=1, max_length=160)]
     repository_display: Annotated[str, Field(min_length=1, max_length=1024)]
     created_at: Annotated[str, Field(min_length=20, max_length=40)]
+    snapshot_state: Literal["absent", "building", "complete"] = "complete"
+    snapshot_identity: Sha256 | None = None
 
 
 class QualifiedLaunchMaterialV1(BaseModel):
@@ -129,3 +132,4 @@ class QualifiedLaunchMaterialV1(BaseModel):
     launch_intent_sha256: Sha256
     frozen_input_sha256: Sha256
     input_bundle: CampaignInputBundleV1
+    snapshot_identity: Sha256 | None = None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -8,11 +9,18 @@ from pathlib import Path
 
 import pytest
 
+import research_automation_supervisor.gitless_repository as gitless_repository_module
+from research_automation_supervisor.core_authority_models import CampaignLaunchRequestV1
 from research_automation_supervisor.custodian_models import (
     CampaignInputBundleV1,
+    CampaignProfileSettingsV1,
     FrozenInputFileV1,
-    RepositoryAuthorityV1,
     render_qualified_acceptance_runner,
+)
+from research_automation_supervisor.gitless_repository import inspect_requested_repository
+from research_automation_supervisor.prelaunch_authority import (
+    consume_start_intent_for_qualified_launch,
+    create_start_intent,
 )
 from research_automation_supervisor.qualified_campaign import (
     BUNDLE_FILE,
@@ -23,33 +31,21 @@ from research_automation_supervisor.qualified_campaign import (
 from research_automation_supervisor.replay_campaign_sources import (
     load_replay_campaign_specification,
 )
-from tests.custodian_helpers import create_repository, git
+from tests.custodian_helpers import create_repository
 
 
-def qualified_bundle(tmp_path: Path) -> CampaignInputBundleV1:
+def qualified_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> CampaignInputBundleV1:
     repository = create_repository(tmp_path)
-    campaign_root = tmp_path / "workspace" / "campaign-cccccccccccc"
-    campaign_root.mkdir(parents=True)
-    worktree = campaign_root / "repository"
-    git(repository, "worktree", "add", "--detach", str(worktree), "HEAD")
-    support = worktree / ".research-supervisor"
-    support.mkdir()
-    (support / "acceptance.py").write_bytes(render_qualified_acceptance_runner(sys.executable))
-    git(worktree, "add", ".research-supervisor/acceptance.py")
-    git(worktree, "commit", "-q", "-m", "add qualified runner")
-    authority = RepositoryAuthorityV1(
-        source_kind="existing_folder",
-        source_display="source-repository",
-        source_locator_sha256="1" * 64,
-        prepared_workspace=str(worktree),
-        baseline_commit=git(worktree, "rev-parse", "HEAD"),
-        baseline_tree=git(worktree, "rev-parse", "HEAD^{tree}"),
-        repository_id="source-repository",
+    requested = inspect_requested_repository(
+        "existing_folder", str(repository), sterile_root=tmp_path / "preview"
     )
-    return CampaignInputBundleV1.freeze(
-        campaign_public_id="campaign-cccccccccccc",
+    request = CampaignLaunchRequestV1(
+        preview_id="preview-" + "c" * 24,
+        client_start_key_sha256=hashlib.sha256(b"qualified campaign test").hexdigest(),
         human_name="Qualified campaign",
-        repository=authority,
+        repository=requested,
         research_contract=FrozenInputFileV1.from_bytes(
             "contract.md", b"Do the bounded research task.\n"
         ),
@@ -57,13 +53,29 @@ def qualified_bundle(tmp_path: Path) -> CampaignInputBundleV1:
             "plan.md", b"Implement and independently audit the task.\n"
         ),
         initial_task=FrozenInputFileV1.from_bytes("task.md", b"Implement the research task.\n"),
+        requested_settings=CampaignProfileSettingsV1(),
     )
+    reference = create_start_intent(
+        request, tmp_path / "core-authority", tmp_path / "workspace"
+    )
+    bundle = consume_start_intent_for_qualified_launch(
+        tmp_path / "core-authority",
+        reference.launch_intent_id,
+        expected_campaign_public_id=reference.campaign_public_id,
+    ).input_bundle
+    # Production pins /var/lib.  Same-process Core fixtures explicitly pin
+    # their isolated snapshot root instead of weakening production discovery.
+    snapshot_root = Path(bundle.repository.prepared_workspace).parents[2]
+    monkeypatch.setattr(
+        gitless_repository_module, "_required_snapshot_root", lambda: snapshot_root
+    )
+    return bundle
 
 
 def test_qualified_materialization_compiles_plain_inputs_into_existing_strict_core(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bundle = qualified_bundle(tmp_path)
+    bundle = qualified_bundle(tmp_path, monkeypatch)
     authority = tmp_path / "qualified"
     authority.mkdir()
     manifest = _materialize_visible_authority(bundle, authority)
@@ -82,8 +94,10 @@ def test_qualified_materialization_compiles_plain_inputs_into_existing_strict_co
     assert all(path.stat().st_mode & 0o222 == 0 for path in control.rglob("*") if path.is_file())
 
 
-def test_operator_status_cannot_fabricate_completed_from_unverified_state(tmp_path: Path) -> None:
-    bundle = qualified_bundle(tmp_path)
+def test_operator_status_cannot_fabricate_completed_from_unverified_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = qualified_bundle(tmp_path, monkeypatch)
     authority = tmp_path / "qualified"
     authority.mkdir()
     (authority / BUNDLE_FILE).write_text(
@@ -113,9 +127,12 @@ def test_operator_status_cannot_fabricate_completed_from_unverified_state(tmp_pa
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="Bubblewrap unavailable")
 def test_repository_acceptance_cannot_escape_workspace(tmp_path: Path) -> None:
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    outside = tmp_path / "outside-campaign-authority.txt"
+    snapshot_root = tmp_path / "snapshots"
+    campaign = snapshot_root / "workspaces" / "campaign-sandbox-test"
+    repository = campaign / "repository"
+    repository.mkdir(parents=True)
+    (snapshot_root / "workspace-verification-key-v1").write_bytes(b"k" * 32)
+    outside = campaign / "outside-campaign-authority.txt"
     (repository / "test_escape.py").write_text(
         "from pathlib import Path\n"
         "def test_escape():\n"

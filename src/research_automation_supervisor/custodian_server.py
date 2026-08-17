@@ -496,38 +496,19 @@ def _required_string(value: dict[str, object], key: str) -> str:
 
 
 def _pick_repository_folder() -> str:
-    if _is_wsl() and _which("powershell.exe"):
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$dialog=New-Object System.Windows.Forms.FolderBrowserDialog; "
-            "$dialog.Description='Choose a Git repository'; "
-            "if($dialog.ShowDialog() -eq 'OK'){[Console]::Write($dialog.SelectedPath)}"
-        )
+    # Before selection/snapshot, never execute ambient or repository-controlled
+    # programs.  WSL browser integration is deferred to PA-5C4-U; Linux uses
+    # only a root-owned absolute system picker when installed.
+    zenity = _trusted_system_program(Path("/usr/bin/zenity"))
+    if zenity is not None:
         completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-STA", "-Command", script],
+            [str(zenity), "--file-selection", "--directory", "--title=Choose a repository"],
             check=False,
             capture_output=True,
             text=True,
             timeout=300,
-        )
-        selected = completed.stdout.strip()
-        if completed.returncode == 0 and selected:
-            converted = subprocess.run(
-                ["wslpath", "-u", selected],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if converted.returncode == 0 and converted.stdout.strip():
-                return converted.stdout.strip()
-    if _which("zenity"):
-        completed = subprocess.run(
-            ["zenity", "--file-selection", "--directory", "--title=Choose a Git repository"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=300,
+            cwd="/",
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         )
         if completed.returncode == 0 and completed.stdout.strip():
             return completed.stdout.strip()
@@ -536,30 +517,20 @@ def _pick_repository_folder() -> str:
 
 def _open_repository(path: Path) -> None:
     resolved = path.resolve(strict=True)
-    if _is_wsl() and _which("explorer.exe"):
-        converted = subprocess.run(
-            ["wslpath", "-w", str(resolved)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if converted.returncode == 0:
-            subprocess.Popen(
-                ["explorer.exe", converted.stdout.strip()],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-            return
-    if _which("xdg-open"):
+    if _is_wsl():
+        # Windows/browser UX qualification is intentionally deferred to
+        # PA-5C4-U instead of trusting executables from mounted Windows PATHs.
+        raise ValueError("Repository folder could not be opened automatically.")
+    opener = _trusted_system_program(Path("/usr/bin/xdg-open"))
+    if opener is not None:
         subprocess.Popen(
-            ["xdg-open", str(resolved)],
+            [str(opener), str(resolved)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            cwd="/",
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         )
         return
     raise ValueError("Repository folder could not be opened automatically.")
@@ -578,10 +549,24 @@ def _is_wsl() -> bool:
         return False
 
 
-def _which(name: str) -> bool:
-    import shutil
-
-    return shutil.which(name) is not None
+def _trusted_system_program(path: Path) -> Path | None:
+    try:
+        resolved = path.resolve(strict=True)
+        status = resolved.stat()
+        if (
+            not resolved.is_file()
+            or status.st_uid != 0
+            or status.st_mode & 0o022
+            or not status.st_mode & 0o111
+        ):
+            return None
+        for parent in (resolved.parent, *resolved.parents):
+            parent_status = parent.stat()
+            if parent_status.st_uid != 0 or parent_status.st_mode & 0o022:
+                return None
+        return resolved
+    except (OSError, RuntimeError):
+        return None
 
 
 def _error_code(exc: Exception) -> str:

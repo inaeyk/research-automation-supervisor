@@ -24,7 +24,8 @@ if current < minimum:
 print(f"Python OK: {sys.version.split()[0]}")
 PY
 
-if [[ ! -d .git ]]; then
+repository_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$repository_root" || ! "$repository_root" -ef . ]]; then
   git init -b main
 fi
 

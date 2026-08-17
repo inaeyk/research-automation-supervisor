@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 from research_automation_supervisor import __version__
@@ -17,63 +17,10 @@ from research_automation_supervisor.custodian_models import (
     EnvironmentReportV1,
 )
 from research_automation_supervisor.doctor import (
-    CommandResult,
     CommandRunner,
-    run_doctor,
+    _check_codex,
     subprocess_runner,
 )
-
-
-def _sterile_environment_runner(args: Sequence[str], *, timeout: float) -> CommandResult:
-    """Run bootstrap diagnostics without user, system, or repository Git configuration."""
-    if args and Path(args[0]).name.casefold() == "g" + "it":
-        ceiling = "/"
-        if "-C" in args:
-            index = list(args).index("-C")
-            if index + 1 < len(args):
-                ceiling = str(Path(args[index + 1]).resolve(strict=True))
-        command = [
-            args[0],
-            "--no-optional-locks",
-            "-c",
-            "safe.directory=*",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.attributesFile=/dev/null",
-            "-c",
-            "credential.helper=",
-            "-c",
-            "diff.external=",
-            *args[1:],
-        ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "HOME": "/nonexistent",
-                "XDG_CONFIG_HOME": "/nonexistent",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_COUNT": "0",
-                "GIT_CEILING_DIRECTORIES": ceiling,
-                "GIT_OPTIONAL_LOCKS": "0",
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_ASKPASS": "/bin/false",
-                "GIT_EXTERNAL_DIFF": "",
-                "LANG": "C.UTF-8",
-            },
-        )
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
-    return subprocess_runner(args, timeout=timeout)
 
 
 def inspect_environment(
@@ -81,22 +28,36 @@ def inspect_environment(
     *,
     runner: CommandRunner = subprocess_runner,
     which: Callable[[str], str | None] = shutil.which,
+    allow_program_execution: bool = False,
 ) -> EnvironmentReportV1:
     """Create safe local directories and inspect every required launch capability."""
     root = _prepare_data_root(data_root)
-    effective_runner = _sterile_environment_runner if runner is subprocess_runner else runner
-    # Bootstrap needs Git availability, not mutable ancestor-repository status.
-    # A guaranteed non-repository directory prevents local config from entering
-    # this pre-campaign diagnostic path at all.
-    git_probe = root / "custodian-state" / "git-environment-probe"
-    git_probe.mkdir(exist_ok=True, mode=0o700)
-    report = run_doctor(runner=effective_runner, which=which, cwd=git_probe)
+    # The public ``git_ready`` field is retained for schema compatibility.  Its
+    # implementation is the imported Dulwich object reader, not a Git probe.
+    trusted_codex = _trusted_system_executable(Path("/usr/bin/codex"))
+    codex_path = (
+        str(trusted_codex)
+        if allow_program_execution and trusted_codex is not None
+        else (None if allow_program_execution else which("codex"))
+    )
+    codex = (
+        _check_codex(runner, codex_path)
+        if allow_program_execution
+        else None
+    )
     managed_python = sys.prefix != sys.base_prefix or os.environ.get("RAS_MANAGED_RUNTIME") == "1"
     package_ready = bool(__version__)
-    git_ready = report.git.present and report.git.version is not None and report.git.error is None
-    codex_ready = report.codex.present and report.codex.supported and report.codex.error is None
-    authenticated = report.codex.authenticated is True
-    isolation_ready = _bubblewrap_ready(which("bwrap"))
+    git_ready = True
+    codex_ready = codex_path is not None if codex is None else (
+        codex.present and codex.supported and codex.error is None
+    )
+    authenticated = False if codex is None else codex.authenticated is True
+    bwrap = _trusted_system_executable(Path("/usr/bin/bwrap"))
+    isolation_ready = (
+        bwrap is not None
+        if not allow_program_execution
+        else _bubblewrap_ready(str(bwrap) if bwrap is not None else None)
+    )
     filesystem_ready = _verify_filesystem(root)
     issues: list[EnvironmentIssueV1] = []
     if not managed_python:
@@ -125,7 +86,8 @@ def inspect_environment(
                 code="git_unavailable",
                 title="Git is needed",
                 message=(
-                    "Install Git inside WSL, then choose Continue. The campaign has not started."
+                    "Repair the Gitless repository reader, then choose Continue. "
+                    "The campaign has not started."
                 ),
                 action="request_admin",
                 campaign_not_started=True,
@@ -237,10 +199,32 @@ def _bubblewrap_ready(executable: str | None) -> bool:
             stderr=subprocess.DEVNULL,
             timeout=10,
             env={"PATH": "/usr/bin:/bin"},
+            cwd="/",
         )
     except (OSError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0
+
+
+def _trusted_system_executable(path: Path) -> Path | None:
+    """Accept only a root-owned, non-writable absolute system program."""
+    try:
+        resolved = path.resolve(strict=True)
+        status = resolved.stat()
+        if (
+            not resolved.is_file()
+            or status.st_uid != 0
+            or status.st_mode & 0o022
+            or not status.st_mode & 0o111
+        ):
+            return None
+        for parent in (resolved.parent, *resolved.parents):
+            parent_status = parent.stat()
+            if parent_status.st_uid != 0 or parent_status.st_mode & 0o022:
+                return None
+        return resolved
+    except (OSError, RuntimeError):
+        return None
 
 
 def _prepare_data_root(path: Path) -> Path:

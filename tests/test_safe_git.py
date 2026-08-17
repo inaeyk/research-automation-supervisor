@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import os
 from pathlib import Path
 
@@ -13,15 +12,17 @@ from research_automation_supervisor.custodian_models import (
     CampaignProfileSettingsV1,
     FrozenInputFileV1,
 )
+from research_automation_supervisor.gitless_repository import (
+    freeze_repository_import,
+    open_repository_directory,
+)
 from research_automation_supervisor.prelaunch_authority import (
     CampaignLaunchRequestV1,
+    consume_start_intent_for_qualified_launch,
+    create_start_intent,
     freeze_launch_intent,
-    load_launch_intent,
 )
-from research_automation_supervisor.safe_git import (
-    inspect_requested_repository,
-    prepare_repository,
-)
+from research_automation_supervisor.safe_git import inspect_requested_repository
 from tests.custodian_helpers import create_repository, git
 
 
@@ -69,7 +70,7 @@ def _hostile_repository(root: Path, marker: Path) -> Path:
     return repository
 
 
-def _intent(root: Path, repository: Path):  # type: ignore[no-untyped-def]
+def _start(root: Path, repository: Path) -> Path:
     requested = inspect_requested_repository(
         "existing_folder", str(repository), sterile_root=root / "preview-sterile"
     )
@@ -84,50 +85,26 @@ def _intent(root: Path, repository: Path):  # type: ignore[no-untyped-def]
         requested_settings=CampaignProfileSettingsV1(),
     )
     authority = root / "authority"
-    reference = freeze_launch_intent(request, authority)
-    return authority, load_launch_intent(authority, reference.launch_intent_id)
+    reference = create_start_intent(request, authority, root / "snapshots")
+    material = consume_start_intent_for_qualified_launch(
+        authority,
+        reference.launch_intent_id,
+        expected_campaign_public_id=reference.campaign_public_id,
+    )
+    return Path(material.input_bundle.repository.prepared_workspace)
 
 
-def test_hostile_repository_programs_never_execute_before_bubblewrap(tmp_path: Path) -> None:
+def test_hostile_repository_programs_never_execute_during_gitless_import(tmp_path: Path) -> None:
     marker = tmp_path / "HOSTILE_PROGRAM_EXECUTED"
     repository = _hostile_repository(tmp_path, marker)
-    authority, intent = _intent(tmp_path, repository)
-    del authority
+    workspace = _start(tmp_path, repository)
     assert not marker.exists()
-    prepared, receipt = prepare_repository(intent, preparation_root=tmp_path / "preparation")
-    assert Path(prepared.prepared_workspace).is_dir()
+    assert workspace.is_dir()
     assert not marker.exists()
-    snapshot_config = (Path(prepared.prepared_workspace) / ".git/config").read_text()
+    snapshot_config = (workspace / ".git/config").read_text()
     assert "include" not in snapshot_config
     assert "filter" not in snapshot_config
     assert "remote" not in snapshot_config
-    assert receipt.checkout_outside_isolation is False
-    assert receipt.allowed_clone_protocol == "existing_folder"
-    pre_isolation = [
-        command for command in receipt.commands if command.isolation == "pre_isolation_nonexecuting"
-    ]
-    isolated = [
-        command for command in receipt.commands if command.isolation == "bubblewrap_unshare_all_v1"
-    ]
-    assert {command.phase for command in isolated} == {
-        "clone_no_checkout",
-        "isolated_checkout",
-        "isolated_commit",
-    }
-    assert all(command.argv[0] == "/usr/bin/git" for command in pre_isolation)
-    exact = " ".join(" ".join(command.argv) for command in receipt.commands)
-    for restriction in (
-        "GIT_CONFIG_NOSYSTEM",
-        "core.hooksPath=/dev/null",
-        "core.fsmonitor=false",
-        "core.attributesFile=/dev/null",
-        "credential.helper=",
-        "protocol.ext.allow=never",
-        "protocol.file.allow=never",
-        "--no-checkout",
-        "--no-recurse-submodules",
-    ):
-        assert restriction in (exact + repr(pre_isolation))
 
 
 @pytest.mark.parametrize(
@@ -151,13 +128,13 @@ def test_existing_repository_symlink_and_path_tricks_fail_closed(tmp_path: Path)
     repository = create_repository(tmp_path)
     link = tmp_path / "repository-link"
     link.symlink_to(repository, target_is_directory=True)
-    with pytest.raises(QualifiedCampaignInputError, match="unsafe"):
+    with pytest.raises(QualifiedCampaignInputError, match="safe|unsafe"):
         inspect_requested_repository(
             "existing_folder", str(link), sterile_root=tmp_path / "sterile"
         )
     nested = repository / "nested"
     nested.mkdir()
-    with pytest.raises(QualifiedCampaignInputError, match="top-level"):
+    with pytest.raises(QualifiedCampaignInputError, match="safe|HEAD|metadata"):
         inspect_requested_repository(
             "existing_folder", str(nested), sterile_root=tmp_path / "other"
         )
@@ -165,19 +142,28 @@ def test_existing_repository_symlink_and_path_tricks_fail_closed(tmp_path: Path)
 
 def test_stale_repository_identity_is_rejected_before_checkout(tmp_path: Path) -> None:
     repository = create_repository(tmp_path)
-    _, intent = _intent(tmp_path, repository)
+    requested = inspect_requested_repository(
+        "existing_folder", str(repository), sterile_root=tmp_path / "sterile"
+    )
+    request = CampaignLaunchRequestV1(
+        preview_id="preview-" + "a" * 24,
+        client_start_key_sha256="b" * 64,
+        human_name="Stale repository identity",
+        repository=requested,
+        research_contract=FrozenInputFileV1.from_bytes("contract.md", b"contract\n"),
+        research_plan=FrozenInputFileV1.from_bytes("plan.md", b"plan\n"),
+        initial_task=FrozenInputFileV1.from_bytes("task.md", b"task\n"),
+        requested_settings=CampaignProfileSettingsV1(),
+    )
     (repository / "changed.txt").write_text("changed\n", encoding="utf-8")
     git(repository, "add", "changed.txt")
     git(repository, "commit", "-q", "-m", "changed after Start")
-    marker = tmp_path / "preparation/workspaces"
     with pytest.raises(QualifiedCampaignInputError, match="changed after preview"):
-        prepare_repository(intent, preparation_root=tmp_path / "preparation")
-    # A no-checkout clone may exist, but no working-tree file was materialized.
-    workspaces = tuple(marker.glob("*/repository/changed.txt")) if marker.exists() else ()
-    assert not workspaces
+        create_start_intent(request, tmp_path / "authority", tmp_path / "snapshots")
+    assert not tuple((tmp_path / "snapshots/workspaces").glob("*/repository"))
 
 
-def test_local_upload_pack_hook_is_confined_inside_bubblewrap(tmp_path: Path) -> None:
+def test_local_upload_pack_hook_is_ignored_by_object_reader(tmp_path: Path) -> None:
     repository = create_repository(tmp_path)
     marker = tmp_path / "UPLOAD_PACK_HOOK_EXECUTED_OUTSIDE"
     git(
@@ -186,10 +172,7 @@ def test_local_upload_pack_hook_is_confined_inside_bubblewrap(tmp_path: Path) ->
         "uploadpack.packObjectsHook",
         f"sh -c 'touch {marker}; exit 1'",
     )
-    _, intent = _intent(tmp_path, repository)
-    _, receipt = prepare_repository(intent, preparation_root=tmp_path / "preparation")
-    clone = next(command for command in receipt.commands if command.phase == "clone_no_checkout")
-    assert clone.isolation == "bubblewrap_unshare_all_v1"
+    _start(tmp_path, repository)
     assert not marker.exists()
 
 
@@ -236,55 +219,43 @@ def test_repository_path_replacement_between_preview_and_start_fails_closed(
         initial_task=FrozenInputFileV1.from_bytes("task.md", b"task\n"),
         requested_settings=CampaignProfileSettingsV1(),
     )
-    with pytest.raises(QualifiedCampaignInputError, match="replaced after preview"):
+    with pytest.raises(QualifiedCampaignInputError, match="changed after preview"):
         freeze_launch_intent(request, tmp_path / "authority")
 
 
-def test_repository_path_swap_during_descriptor_import_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_repository_path_swap_cannot_substitute_retained_descriptor(
+    tmp_path: Path,
 ) -> None:
     repository = create_repository(tmp_path)
-    _, intent = _intent(tmp_path, repository)
-    import research_automation_supervisor.safe_git as safe_git_module
-
-    original_run = safe_git_module._run_isolated
-    swapped = False
-
-    def swapping_run(*args: object, **kwargs: object) -> None:
-        nonlocal swapped
-        if not swapped:
-            swapped = True
-            moved = tmp_path / "swapped-original"
-            repository.rename(moved)
-            replacement_root = tmp_path / "swap-replacement"
-            replacement_root.mkdir()
-            create_repository(replacement_root).rename(repository)
-        original_run(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(safe_git_module, "_run_isolated", swapping_run)
-    with pytest.raises(QualifiedCampaignInputError, match="changed during"):
-        prepare_repository(intent, preparation_root=tmp_path / "second-preparation")
+    requested = inspect_requested_repository(
+        "existing_folder", str(repository), sterile_root=tmp_path / "sterile"
+    )
+    _, descriptor = open_repository_directory(str(repository))
+    try:
+        moved = tmp_path / "swapped-original"
+        repository.rename(moved)
+        replacement_root = tmp_path / "swap-replacement"
+        replacement_root.mkdir()
+        create_repository(replacement_root).rename(repository)
+        imported = freeze_repository_import(
+            requested,
+            import_root=tmp_path / "imports",
+            repository_descriptor=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+    assert imported.source_commit == requested.requested_commit
 
 
 def test_production_git_invocations_are_mechanically_confined_to_safe_git() -> None:
-    production = (
-        Path("src/research_automation_supervisor/custodian.py"),
-        Path("src/research_automation_supervisor/custodian_bootstrap.py"),
-        Path("src/research_automation_supervisor/core_authority_service.py"),
-        Path("src/research_automation_supervisor/custodian_models.py"),
+    for path in (
+        Path("src/research_automation_supervisor/gitless_repository.py"),
         Path("src/research_automation_supervisor/prelaunch_authority.py"),
-        Path("src/research_automation_supervisor/qualified_campaign.py"),
-        Path("src/research_automation_supervisor/qualified_runner.py"),
-    )
-    for path in production:
+        Path("src/research_automation_supervisor/core_authority_service.py"),
+        Path("src/research_automation_supervisor/core_authority_client.py"),
+    ):
         source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        string_literals = {
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        }
-        assert "/usr/bin/git" not in string_literals, path
-        assert "git" not in string_literals, path
+        assert "import subprocess" not in source
+        assert "subprocess." not in source
     bootstrap = Path("scripts/custodian-bootstrap.sh").read_text(encoding="utf-8")
     assert "git -C" not in bootstrap

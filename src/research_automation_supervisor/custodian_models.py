@@ -39,7 +39,6 @@ MAX_SUPPORTING_FILES = 20
 
 QUALIFIED_ACCEPTANCE_RUNNER_V1 = b"""\
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -57,10 +56,15 @@ elif profile == "repository_integrity":
              "run_repository_integrity_acceptance as run; run()"]
 else:
     raise SystemExit(64)
-bwrap = shutil.which("bwrap")
-if bwrap is None:
+bwrap = Path("/usr/bin/bwrap")
+if not bwrap.is_file() or not os.access(bwrap, os.X_OK):
     raise SystemExit(69)
-command = [bwrap, "--die-with-parent", "--new-session", "--unshare-all",
+campaign = repository.parent
+snapshot_root = campaign.parents[1]
+verification_key = snapshot_root / "workspace-verification-key-v1"
+if not verification_key.is_file():
+    raise SystemExit(77)
+command = [str(bwrap), "--die-with-parent", "--new-session", "--unshare-all",
            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
            "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin"]
 for system_path in ("/lib", "/lib64", "/etc"):
@@ -69,7 +73,14 @@ for system_path in ("/lib", "/lib64", "/etc"):
 runtime_prefix = qualified_python.parent.parent
 if runtime_prefix not in (Path("/usr"), Path("/usr/local")):
     command += ["--ro-bind", str(runtime_prefix), str(runtime_prefix)]
-command += ["--bind", str(repository), "/workspace", "--chdir", "/workspace",
+reserved = {Path("/"), Path("/usr"), Path("/bin"), Path("/lib"),
+            Path("/lib64"), Path("/etc"), Path("/proc"), Path("/dev"), Path("/tmp")}
+for directory in sorted(set(snapshot_root.parents) - reserved,
+                        key=lambda item: (len(item.parts), str(item))):
+    command += ["--dir", str(directory)]
+command += ["--ro-bind", str(snapshot_root), str(snapshot_root),
+            "--bind", str(repository), str(repository),
+            "--chdir", str(repository),
             "--setenv", "HOME", "/tmp/operator", "--setenv", "PATH", "/usr/bin:/bin",
             "--setenv", "PYTHONNOUSERSITE", "1", "--"] + inner
 result = subprocess.run(command, cwd=repository, check=False,

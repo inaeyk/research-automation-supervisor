@@ -3,12 +3,15 @@ from __future__ import annotations
 import ast
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
+import research_automation_supervisor.qualified_runner as qualified_runner_module
 from research_automation_supervisor.custodian import (
     CampaignCustodian,
+    SubprocessQualifiedRunner,
     WizardSubmissionV1,
     _runner_environment,
 )
@@ -47,6 +50,17 @@ def submission(repository: Path) -> WizardSubmissionV1:
 def token_factory() -> object:
     values = iter(("a" * 24, "b" * 24, "c" * 24, "d" * 24))
     return lambda: next(values)
+
+
+def _intent_object_path(authority: Path, intent_id: str) -> Path:
+    with sqlite3.connect(authority / "authority.sqlite3") as connection:
+        digest = str(
+            connection.execute(
+                "SELECT intent_object_sha256 FROM starts WHERE start_intent_id = ?",
+                (intent_id,),
+            ).fetchone()[0]
+        )
+    return authority / "intents" / digest[:2] / f"{digest}.json"
 
 
 def human_request(campaign_id: str, bundle_sha256: str) -> HumanActionRequestV1:
@@ -114,12 +128,7 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
         custodian.start(preview.preview_id, client_start_key="start_qrstuvwxyzabcdef")
     assert runner.started == 1
     assert runner.core_root is not None
-    frozen_object = (
-        runner.core_root
-        / "objects"
-        / record.launch_intent_sha256[:2]
-        / f"{record.launch_intent_sha256}.json"
-    )
+    frozen_object = _intent_object_path(runner.core_root, record.launch_intent_id)
     assert frozen_object.stat().st_mode & 0o222 == 0
 
     runner.current = projection(campaign_id, status="blocked")
@@ -228,10 +237,61 @@ def test_runner_environment_does_not_leak_unapproved_environment(
     monkeypatch.setenv("SCORER_ONLY_SECRET", "hidden")
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setenv("PATH", os.environ["PATH"])
+    codex_home = Path("/managed/codex-home")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     environment = _runner_environment()
     assert "SCORER_ONLY_SECRET" not in environment
     assert "OPENAI_API_KEY" not in environment
     assert "PATH" in environment
+    assert environment["CODEX_HOME"] == str(codex_home)
+
+
+def test_qualified_runner_main_establishes_group_cooperative_workspace_umask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[int] = []
+    monkeypatch.setattr(qualified_runner_module.os, "umask", observed.append)
+    monkeypatch.setattr(qualified_runner_module, "_seal_production_git_environment", lambda: None)
+    monkeypatch.setattr(qualified_runner_module, "run_qualified_authentication", lambda: None)
+    monkeypatch.setattr(qualified_runner_module, "_print_json", lambda _value: None)
+
+    assert qualified_runner_module.main(["authenticate"]) == 0
+
+    assert observed == [0o007]
+
+
+def test_authentication_runner_preserves_only_managed_codex_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    observed: dict[str, object] = {}
+
+    class Process:
+        pid = 12345
+
+    def popen(command: list[str], **kwargs: object) -> Process:
+        observed["command"] = command
+        observed["environment"] = kwargs.get("env")
+        return Process()
+
+    monkeypatch.setattr("research_automation_supervisor.custodian.subprocess.Popen", popen)
+    runner = SubprocessQualifiedRunner(
+        executable="/usr/bin/python3",
+        core_socket=tmp_path / "authority.sock",
+    )
+    assert runner.launch_authentication(tmp_path / "authentication.log") == 12345
+    assert observed["command"] == [
+        "/usr/bin/python3",
+        "-m",
+        "research_automation_supervisor.qualified_runner",
+        "authenticate",
+    ]
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+    assert environment["CODEX_HOME"] == str(codex_home)
+    assert environment["PATH"] == "/usr/bin:/bin"
 
 
 def test_custodian_rejects_symlink_data_root(tmp_path: Path) -> None:
@@ -293,12 +353,7 @@ def test_frozen_authority_substitution_before_launch_fails_closed(tmp_path: Path
     preview = custodian.preview(submission(repository))
     record = custodian.start(preview.preview_id, client_start_key="start_abcdefghijklmnop")
     assert runner.core_root is not None
-    object_path = (
-        runner.core_root
-        / "objects"
-        / record.launch_intent_sha256[:2]
-        / f"{record.launch_intent_sha256}.json"
-    )
+    object_path = _intent_object_path(runner.core_root, record.launch_intent_id)
     altered = json.loads(object_path.read_text(encoding="utf-8"))
     altered["research_contract"] = FrozenInputFileV1.from_bytes(
         "contract.md", b"altered contract\n"

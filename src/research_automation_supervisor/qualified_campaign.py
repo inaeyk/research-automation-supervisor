@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import zipfile
@@ -49,6 +48,7 @@ from research_automation_supervisor.errors import (
     ReplayCampaignError,
     WorkflowError,
 )
+from research_automation_supervisor.gitless_repository import verify_operator_campaign_workspace
 from research_automation_supervisor.replay_campaign_engine import (
     ReplayCampaignServices,
     replay_campaign_status,
@@ -96,19 +96,70 @@ def start_qualified_launch(
 
 def run_qualified_authentication() -> None:
     """Start the approved Codex authentication flow outside Custodian authority."""
-    executable = shutil.which("codex")
+    executable = _trusted_system_program(Path("/usr/bin/codex"))
     if executable is None:
         raise QualifiedCampaignInputError("Codex is not installed in the managed environment")
+    codex_home = _managed_codex_home()
     try:
         completed = subprocess.run(
-            [executable, "login"],
+            [str(executable), "login"],
             check=False,
             timeout=600,
+            cwd="/",
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/nonexistent",
+                "CODEX_HOME": str(codex_home),
+                "LANG": "C.UTF-8",
+            },
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise QualifiedCampaignStateError("Codex authentication could not be completed") from exc
     if completed.returncode != 0:
         raise QualifiedCampaignStateError("Codex authentication was not completed")
+
+
+def _managed_codex_home() -> Path:
+    value = os.environ.get("CODEX_HOME")
+    if value is None or not Path(value).is_absolute():
+        raise QualifiedCampaignInputError("Managed Codex credential storage is unavailable")
+    try:
+        path = Path(value)
+        resolved = path.resolve(strict=True)
+        status = path.lstat()
+        if (
+            path != resolved
+            or stat.S_ISLNK(status.st_mode)
+            or not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+            or status.st_mode & 0o022
+        ):
+            raise OSError("unsafe Codex credential directory")
+        return resolved
+    except (OSError, RuntimeError) as exc:
+        raise QualifiedCampaignInputError(
+            "Managed Codex credential storage is unavailable"
+        ) from exc
+
+
+def _trusted_system_program(path: Path) -> Path | None:
+    try:
+        resolved = path.resolve(strict=True)
+        status = resolved.stat()
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_uid != 0
+            or status.st_mode & 0o022
+            or not status.st_mode & 0o111
+        ):
+            return None
+        for parent in (resolved.parent, *resolved.parents):
+            parent_status = parent.stat()
+            if parent_status.st_uid != 0 or parent_status.st_mode & 0o022:
+                return None
+        return resolved
+    except (OSError, RuntimeError):
+        return None
 
 
 class QualifiedCampaignLocatorV1(BaseModel):
@@ -562,6 +613,30 @@ def _verified_workspace(bundle: CampaignInputBundleV1) -> Path:
         raise QualifiedCampaignInputError("prepared repository is unavailable") from exc
     if absolute != resolved or stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
         raise QualifiedCampaignInputError("prepared repository path is unsafe")
+    binding = _read_json_file(
+        resolved.parent / "snapshot-binding-v1.json", "sanitized snapshot binding"
+    )
+    if (
+        binding.get("schema_version") != 1
+        or binding.get("campaign_public_id") != bundle.campaign_public_id
+        or binding.get("bundle_sha256") != bundle.bundle_sha256
+        or binding.get("baseline_commit") != bundle.repository.baseline_commit
+        or binding.get("baseline_tree") != bundle.repository.baseline_tree
+        or not isinstance(binding.get("snapshot_id"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(binding.get("snapshot_id"))) is None
+    ):
+        raise QualifiedCampaignInputError("prepared repository snapshot binding is invalid")
+    verified_binding = verify_operator_campaign_workspace(
+        resolved,
+    )
+    if (
+        verified_binding.get("campaign_public_id") != bundle.campaign_public_id
+        or verified_binding.get("bundle_sha256") != bundle.bundle_sha256
+        or verified_binding.get("snapshot_id") != binding["snapshot_id"]
+        or verified_binding.get("baseline_commit") != bundle.repository.baseline_commit
+        or verified_binding.get("baseline_tree") != bundle.repository.baseline_tree
+    ):
+        raise QualifiedCampaignInputError("prepared repository snapshot binding is invalid")
     if _git(resolved, "rev-parse", "HEAD") != bundle.repository.baseline_commit:
         raise QualifiedCampaignInputError("prepared repository commit changed before Start")
     if _git(resolved, "rev-parse", "HEAD^{tree}") != bundle.repository.baseline_tree:

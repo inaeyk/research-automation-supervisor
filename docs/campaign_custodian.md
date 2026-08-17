@@ -44,10 +44,11 @@ The default path is:
 5. Review the repository version, input identities, acceptance profile, editable
    areas, environment readiness, and immutability warning.
 6. Press **Start** once. The Custodian sends the complete canonical request over the
-   authenticated local socket. The Core Authority Service imports exactly one sanitized
-   repository snapshot, freezes the complete input bundle, and fsyncs all objects before
-   atomically publishing the Start receipt. An identical retry with the same request
-   identity returns the exact intent; any changed supplied field fails closed.
+   authenticated local socket. The Core Authority Service freezes source objects with a
+   non-executing reader, fsyncs immutable inputs, and commits exactly one Start in SQLite.
+   Snapshot construction then advances independently from absent to building to complete.
+   An identical retry with the same request identity returns the exact intent; any changed
+   supplied field fails closed.
 7. Follow the dashboard. If qualified core authority needs a human decision, inspect
    safe evidence, choose an allowed response, add a note/file if appropriate, and
    submit it. The Custodian never preselects an answer.
@@ -107,12 +108,16 @@ qualified-campaigns/
 /var/lib/research-supervisor-core/
   authority/                       # mode 0700, service identity only
     store-key-v1
-    objects/<sha-prefix>/<launch-intent-sha>.json
-    receipts/<start-request-sha>.json
-    frozen-inputs/<launch-intent-sha>.json
+    authority.sqlite3              # WAL, synchronous FULL
+    requests/<sha-prefix>/<object-sha>.json
+    intents/<sha-prefix>/<object-sha>.json
+    frozen-inputs/<sha-prefix>/<object-sha>.json
   snapshots/
-    receipts/
-    workspaces/
+    workspace-verification-key-v1 # read-only Ed25519 public trust anchor
+    imports/                       # core-only non-executing object imports
+    staging/                       # never authoritative
+    complete/                      # immutable sanitized snapshots
+    workspaces/                    # Core:shared 02710 inheritance anchor
 
 /run/research-supervisor-core/
   authority.sock                   # mode 0660, peer UID checked
@@ -121,10 +126,18 @@ qualified-campaigns/
 The Custodian and operator-exchange roots are explicitly non-authoritative. The core
 authority root is owned by the non-login `research-supervisor-core` identity and mode
 0700. The ordinary Custodian UID cannot traverse, read, write, rename, or replace its
-key, objects, receipts, or frozen inputs. A card contains only the public campaign ID,
+key, database, objects, or frozen inputs. A card contains only the public campaign ID,
 bundle SHA-256, and opaque HMAC-bound immutable intent ID; it contains no authoritative
 scientific bytes.
 A Custodian card or process exit can never create a completed projection.
+
+Mutable campaign repositories remain Core-owned and use the
+`research-supervisor-custodian` shared GID. The installer, not the running service,
+provisions the mode-02710 workspace anchor. Campaign roots and mutable descendants
+inherit SGID (03770/02770), while qualified ordinary-user processes use umask 0007 so
+Worker-created files stay group-writable. The service keeps `RestrictSUIDSGID=true`,
+has no capabilities, and performs no runtime workspace chown or setid chmod. Protected
+`.git` control material is Core-owned mode 0550/0440 and never delegated for writes.
 
 ## Core IPC and atomic Start
 
@@ -132,23 +145,39 @@ The service accepts one strict JSON request per Unix-socket connection and authe
 the peer with Linux `SO_PEERCRED`. Envelope and operation payload models all use
 `extra="forbid"`; unknown operations and fields fail closed. The only operations are
 `inspect_repository`, `create_start_intent`, `get_start_intent`,
-`list_operator_campaigns`, `verify_start_intent`, and
+`list_operator_campaigns`, `resume_start_snapshot`, `verify_start_intent`, and
 `consume_start_intent_for_qualified_launch`. There is no file, command, or generic data
 operation.
 
-At **Start**, `create_start_intent` locks the store and validates the complete
+At **Start**, `create_start_intent` validates the complete
 `CampaignLaunchRequestV1`: request and preview identities; name; repository locator hash,
 captured device/inode, commit, and tree; exact contract, plan, task, and every support
 file; and every profile, model, reasoning, repair, editable-area, and execution choice.
 
-While holding a no-follow repository directory descriptor, core imports one sanitized
-snapshot, revalidates device/inode, builds the complete `CampaignInputBundleV1`, and
-publishes content-addressed request, intent, and frozen-input objects. Every file and
-directory is fsynced. The request-keyed receipt is the sole atomic commit point. Crashes
-before it mean no Start; crashes after it mean exactly one immutable Start. Receipt
-enumeration reconstructs cards after a lost response, deleted/replaced Custodian state,
-or restart. Reuse compares the full canonical request hash; there are no weakly bound
-fields.
+While holding a no-follow repository directory descriptor, core copies only object/ref
+bytes into a core-owned import and reads them with Dulwich. It never copies or evaluates
+source config, hooks, filters, attributes, helpers, or scripts. Core computes the
+deterministic sanitized commit and complete `CampaignInputBundleV1`, then fsyncs
+content-addressed request, intent, and frozen-input objects. One `BEGIN IMMEDIATE`
+transaction inserts the Start and its absent snapshot plan. The committed `starts` row
+is the sole Start authority: crashes before commit mean zero Starts; crashes after commit
+mean exactly one. SQLite enumeration reconstructs cards after a lost response,
+deleted/replaced Custodian state, or restart. Reuse compares the full canonical request
+hash; there are no weakly bound fields.
+
+After Start commit, snapshot state advances `absent → building → complete`. Core builds
+under a private staging identity, fsyncs all repository content and metadata, atomically
+finalizes a content-addressed snapshot, then commits its identity to SQLite. Only
+`complete` can produce the separate group-writable campaign workspace. A crash in
+building leaves the Start intact and launch forbidden; resume deterministically rebuilds
+from the frozen import without reopening the original path.
+
+The workspace projection carries a canonical, Core-signed binding over its exact path,
+Start ID/hash, bundle, snapshot, prepared commit, and tree. Its public verification key is
+read-only at the fixed snapshot root; the private signing seed remains derivable only from
+the Core-owned store key. Qualified operator processes therefore verify committed descent
+without traversing the private snapshot store. Acceptance isolation read-only binds that
+snapshot root at the same pathname and overlays only `repository/` writable.
 
 ## CampaignInputBundleV1
 
@@ -165,8 +194,8 @@ self-hashed. It contains:
   reasoning, repair limit, and normalized editable areas;
 - `bundle_sha256`: SHA-256 of canonical JSON excluding only the self-hash field.
 
-The Core service derives `FrozenCampaignInputV1`/`CampaignInputBundleV1` during atomic
-Start, before publishing the receipt. The qualified runner consumes those bytes only by
+The Core service derives `FrozenCampaignInputV1`/`CampaignInputBundleV1` before the Start
+transaction commits. The qualified runner consumes those bytes only by
 immutable intent ID. The installed runner exposes
 `start --launch-intent <immutable-id>` and has no `start --bundle` option. Every later
 runner operation re-verifies the core intent and exact local bundle binding before
@@ -201,23 +230,30 @@ The one-time administrator installer creates only the service identity, shared s
 group, managed service environment, service-owned authority/snapshot roots, and systemd
 unit. The ordinary launcher creates user-owned UI data and its managed Python
 environment; it fails closed if the Core socket is absent or inaccessible. The backend
-then verifies Python/package identity, Git, Codex
+then verifies Python/package identity, the Gitless reader, Codex
 version, Codex authentication, Bubblewrap, WSL/Linux backend, and atomic rename and
 hard-link filesystem capabilities. Preview performs only sterile identity inspection.
-Repository preparation uses `/usr/bin/git` with system/global config disabled, a
-sterile HOME, hooks and fsmonitor disabled, external diff/textconv/helper paths
-neutralized, prompts disabled, and `ext`, file, SSH, and git protocols denied. All
-production Git calls in Custodian/core/bootstrap/setup and resume are mechanically
-confined to one SafeGit implementation or occur inside the already-qualified sandbox. New
-remote repositories use only credential-free HTTPS and
-`clone --no-checkout --no-tags --no-recurse-submodules`. Existing roots are opened once
-with no-follow directory flags, bound into import by descriptor, and revalidated by
-device/inode after import. They use the same no-checkout clone after exact commit/tree
-revalidation. Checkout and the preparation
-commit run only under Bubblewrap `--unshare-all`; the receipt records every exact
-argv/environment and asserts `checkout_outside_isolation=false`. The clone-generated
-`.git/config` is replaced by core's minimal sterile configuration. After receipt
-publication no production path returns to the original repository.
+Repository intake never executes Git. Existing roots are opened component-by-component
+with no-follow flags. Under the selecting UID, Custodian serializes only HEAD, refs,
+packed refs, and object storage into an unlinked, fsynced, per-record-hashed regular-file
+descriptor; Core receives that descriptor over the authenticated socket and revalidates
+the complete transfer. This supports private `0700` operator repositories without giving
+Core access to the original pathname. Alternates and all executable/config authority are
+excluded. Dulwich
+validates object hashes, history, trees, and refs without attributes or checkout filters.
+Remote scope is credential-free HTTPS through the same library; ext, file, local URL,
+SSH, git, helpers, redirects, origin changes, and HTTPS downgrades are rejected. Core
+creates a new repository with one trusted-generated config, one sanitized ref, and the
+required reachable history.
+
+Git becomes reachable only after SQLite says the sanitized snapshot is complete and the
+core-issued workspace binding is verified. The repository-wide AST inventory discovers
+every process callsite, rejects any change from its reviewed callsite digest, scans
+non-Python launchers, and forbids Git-likely execution in pre-snapshot callsites.
+The derived worktree is operator-writable, but its `.git` control tree and trusted config
+remain Core-owned and read-only. Post-snapshot Git receives only that workspace; no
+request, bundle, manifest, or locator retains the original pathname as an operational
+input. The systemd service additionally makes `/usr/bin/git` and `/bin/git` inaccessible.
 
 Missing login, administrator permission, isolation, or filesystem capability produces
 an Action Needed card. The card states that the campaign has not started. Codex sign-in

@@ -8,6 +8,7 @@ import grp
 import json
 import os
 import socket
+import stat
 import struct
 from pathlib import Path
 from typing import Annotated, Literal
@@ -17,15 +18,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from research_automation_supervisor.core_authority_client import MAX_IPC_BYTES
 from research_automation_supervisor.core_authority_models import CampaignLaunchRequestV1
 from research_automation_supervisor.custodian_errors import QualifiedCampaignInputError
+from research_automation_supervisor.gitless_repository import inspect_requested_repository
 from research_automation_supervisor.prelaunch_authority import (
     consume_start_intent_for_qualified_launch,
     create_start_intent,
     get_start_intent,
     initialize_authority_store,
     list_operator_campaigns,
+    resume_start_snapshot,
     verify_start_intent,
 )
-from research_automation_supervisor.safe_git import inspect_requested_repository
 
 
 class _RequestEnvelopeV1(BaseModel):
@@ -37,6 +39,7 @@ class _RequestEnvelopeV1(BaseModel):
         "create_start_intent",
         "get_start_intent",
         "list_operator_campaigns",
+        "resume_start_snapshot",
         "verify_start_intent",
         "consume_start_intent_for_qualified_launch",
     ]
@@ -86,17 +89,19 @@ class CoreAuthorityService:
         *,
         operator_uid: int,
         socket_gid: int | None = None,
+        qualification_crash_at: str | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.authority_root = authority_root
         self.snapshot_root = snapshot_root
         self.operator_uid = operator_uid
         self.socket_gid = socket_gid
+        self.qualification_crash_at = qualification_crash_at
         self._server: socket.socket | None = None
 
     def serve_forever(self) -> None:
         initialize_authority_store(self.authority_root, self.snapshot_root)
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        _prepare_socket_directory(self.socket_path.parent, self.socket_gid)
         if self.socket_path.exists() or self.socket_path.is_symlink():
             status = self.socket_path.lstat()
             if not stat_is_socket(status.st_mode):
@@ -134,7 +139,19 @@ class CoreAuthorityService:
             request = _RequestEnvelopeV1.model_validate_json(request_bytes)
             result = self._dispatch(request, descriptors)
             _send_response(connection, ok=True, result=result)
-        except (ValidationError, ValueError, QualifiedCampaignInputError) as exc:
+            if request.operation == "create_start_intent":
+                self._inject_crash("after_ipc_response_before_custodian_card")
+        except QualifiedCampaignInputError as exc:
+            transfer_required = str(exc) == "new Start requires the selected repository object"
+            _send_response(
+                connection,
+                ok=False,
+                error_code=(
+                    "repository_transfer_required" if transfer_required else "request_rejected"
+                ),
+                message=str(exc)[:2048] or "Core authority rejected the request.",
+            )
+        except (ValidationError, ValueError) as exc:
             _send_response(
                 connection,
                 ok=False,
@@ -166,8 +183,9 @@ class CoreAuthorityService:
                 self.snapshot_root,
                 operator_uid=self.operator_uid,
                 operator_gid=self.socket_gid,
-                repository_bundle_descriptor=descriptors[0] if descriptors else None,
+                repository_transfer_descriptor=descriptors[0] if descriptors else None,
                 require_repository_descriptor=True,
+                crash_injector=self._inject_crash,
             )
             return reference.model_dump(mode="json")
         if descriptors and (operation != "inspect_repository" or len(descriptors) != 1):
@@ -181,7 +199,7 @@ class CoreAuthorityService:
                 inspect_payload.source_kind,
                 inspect_payload.locator,
                 sterile_root=self.snapshot_root / "preview-sterile",
-                repository_bundle_descriptor=descriptors[0] if descriptors else None,
+                repository_transfer_descriptor=descriptors[0] if descriptors else None,
                 source_device=inspect_payload.source_device,
                 source_inode=inspect_payload.source_inode,
             )
@@ -197,6 +215,14 @@ class CoreAuthorityService:
                 item.model_dump(mode="json")
                 for item in list_operator_campaigns(self.authority_root)
             ]
+        if operation == "resume_start_snapshot":
+            intent_payload = _IntentIdV1.model_validate(request.payload)
+            return resume_start_snapshot(
+                self.authority_root,
+                self.snapshot_root,
+                intent_payload.launch_intent_id,
+                crash_injector=self._inject_crash,
+            ).model_dump(mode="json")
         if operation == "verify_start_intent":
             verify_payload = _VerifyIntentV1.model_validate(request.payload)
             return verify_start_intent(
@@ -212,6 +238,11 @@ class CoreAuthorityService:
             consume_payload.launch_intent_id,
             expected_campaign_public_id=consume_payload.expected_campaign_public_id,
         ).model_dump(mode="json")
+
+    def _inject_crash(self, boundary: str) -> None:
+        """Qualification-only hard process termination at an exact boundary."""
+        if self.qualification_crash_at == boundary:
+            os._exit(91)
 
 
 def _peer_uid(connection: socket.socket) -> int:
@@ -280,9 +311,29 @@ def _send_response(
 
 
 def stat_is_socket(mode: int) -> bool:
-    import stat
-
     return stat.S_ISSOCK(mode)
+
+
+def _prepare_socket_directory(path: Path, socket_gid: int | None) -> Path:
+    """Create or repair the Core-owned runtime directory despite a strict umask."""
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o750)
+        absolute = Path(os.path.abspath(path))
+        resolved = path.resolve(strict=True)
+        status = resolved.lstat()
+        if (
+            absolute != resolved
+            or stat.S_ISLNK(status.st_mode)
+            or not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.geteuid()
+        ):
+            raise OSError("unsafe Core Authority runtime directory")
+        if socket_gid is not None and status.st_gid != socket_gid:
+            os.chown(resolved, -1, socket_gid, follow_symlinks=False)
+        os.chmod(resolved, 0o750, follow_symlinks=False)
+        return resolved
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError("Core Authority runtime directory is unsafe") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -292,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot-root", type=Path, required=True)
     parser.add_argument("--operator-uid", type=int, required=True)
     parser.add_argument("--socket-group")
+    parser.add_argument("--qualification-crash-at", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     socket_gid = grp.getgrnam(args.socket_group).gr_gid if args.socket_group else None
     service = CoreAuthorityService(
@@ -300,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         args.snapshot_root,
         operator_uid=args.operator_uid,
         socket_gid=socket_gid,
+        qualification_crash_at=args.qualification_crash_at,
     )
     service.serve_forever()
     return 0
