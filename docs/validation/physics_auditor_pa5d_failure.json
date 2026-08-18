@@ -1,0 +1,129 @@
+{
+  "authority_verification": {
+    "catalog_canonical_sha256": "f4b52fe2f70baf87ca1ec19dff294490088e5571f45918b112ff00b936abb088",
+    "catalog_file_sha256": "01e621c06c47cb253be3d03e367b30b976717d4ba7ad2d575d12ab9135995372",
+    "fixture_qualification_sha256": "1fdb54d40ae2828225be35966ab7844ca3114fb6e3f6d730089f0a987576056b",
+    "frozen_scientific_tree_sha256": "8d7d7bb580bc0a14d899a20fc0ccb321c633488691323fd14c252e56c3096ae8",
+    "frozen_scientific_tree_unchanged": true,
+    "gl_source_commit": "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1",
+    "pa5c1_approved_subject_count": 31,
+    "pa5c1_gl_manifest_count": 10,
+    "pa5c1_model_launched": false,
+    "pa5c1_pair_manifest_count": 21,
+    "pa5c1_pilot_launched": false,
+    "pa5c1_qualified_commit": "ce54764",
+    "pa5c2_qualified_commit": "87be443",
+    "pa5c3_qualified_commit": "0ee2bc9",
+    "pa5c4_operator_evidence_sha256": "6897d0c4a0d830e49995a9b745f9631182426a3b866e97d97cf5ea597285c385",
+    "pa5c4_qualified_commit": "df3553f584c6e9109c0e4561eab58e480a78b4b5",
+    "process_inventory_sha256": "dc2ded7e1c14774af428538bd9a9e3d7157b578166f2505cf91c9f3a325f445e",
+    "review_packet_sha256": "4aafec7dd51ab66e8190699a72a9514e46c3228379d0d835e2b1c1220cd34cfb",
+    "scorer_root_manifest_sha256": "4a4ea8e3ea95563381571d1745e8825b8f7a51280827d14a221324ea52436f79"
+  },
+  "audits": {
+    "independent_physics_quality": "NOT QUALIFIED: inferring the missing schedule, thresholds, variant selection, model/configuration, or GL execution design would be retrospective and scientifically invalid",
+    "independent_technical": "HARD STOP: the tracked tree has no complete qualified PA-5D launch authority"
+  },
+  "base_commit": "df3553f584c6e9109c0e4561eab58e480a78b4b5",
+  "benchmark": {
+    "action_roots_created": 0,
+    "expected_session_count": 41,
+    "freshness_proof": "No Physics Auditor action was launched; therefore no session identity exists to reuse or duplicate.",
+    "gl_model_session_count": 0,
+    "observed_session_count": 0,
+    "pa5c2_run_identities": [],
+    "provider_session_ids": [],
+    "scientific_results_visible": false
+  },
+  "branch": "feature/physics-auditor-final-calibration",
+  "events": {
+    "duplicate_external_actions": 0,
+    "human_action_events": [],
+    "recovery_events": []
+  },
+  "gl_pilot": {
+    "authority_fixture_count": 10,
+    "model_sessions": 0,
+    "result": "not_started",
+    "source_commit": "7d04b5b9882dcd476c1457b8d711ac7b5520b2c1"
+  },
+  "hard_stop_receipt_sha256": "40b08cbaf3b1fd7a68f4555d5b335c1f08e7f75d8f5231e4143bd850f41039f8",
+  "head_commit": "df3553f584c6e9109c0e4561eab58e480a78b4b5",
+  "head_tree": "9cc8c52f1dc83e78da1c48b1b08312208cc2456f",
+  "metrics": {
+    "aggregate": "unavailable: zero scientific runs",
+    "duration": "unavailable: zero scientific runs",
+    "per_category": "unavailable: zero scientific runs",
+    "token_usage": "unavailable: no authoritative model runtime counters were produced"
+  },
+  "missing_preregistration_authorities": [
+    "exact 41-run case/variant/repetition schedule",
+    "qualified PA-5D threshold table",
+    "benchmark model, reasoning, executable, and execution configuration selection",
+    "per-run rendered prompt identities",
+    "41 PA-4 child specification paths and hashes",
+    "expected benchmark action/run-root identities",
+    "qualified GL pilot execution and scoring orchestration",
+    "expected GL action/run-root identities"
+  ],
+  "pa6_release_closure_authorized": false,
+  "preregistration": {
+    "completed": false,
+    "receipt_sha256": null,
+    "reason": "The hard freeze could not bind all required PA-5D authorities without inventing or importing non-qualified experimental-design choices."
+  },
+  "recorded_at": "2026-08-18T22:20:08+08:00",
+  "schema_version": 1,
+  "stage": "PA-5D",
+  "status": "NOT QUALIFIED",
+  "thresholds": [
+    {
+      "metric": "clean_case_pass_rate_min",
+      "qualified_value": null,
+      "status": "missing authority"
+    },
+    {
+      "metric": "critical_defect_detection_rate_min",
+      "qualified_value": null,
+      "status": "missing authority"
+    },
+    {
+      "metric": "false_critical_finding_rate_max",
+      "qualified_value": null,
+      "status": "missing authority"
+    },
+    {
+      "metric": "correct_escalation_rate_min",
+      "qualified_value": null,
+      "status": "missing authority"
+    },
+    {
+      "metric": "repeated_run_route_consistency_min",
+      "qualified_value": null,
+      "status": "missing authority"
+    },
+    {
+      "metric": "infrastructure_failure_rate_max",
+      "qualified_value": null,
+      "status": "missing authority"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": "unavailable",
+    "output_tokens": "unavailable",
+    "retries_repairs_and_repeated_audits": "unavailable",
+    "sessions": {
+      "independent_physics_quality_auditor": "unavailable",
+      "independent_technical_auditor": "unavailable",
+      "supervisor_custodian": "unavailable"
+    },
+    "total_tokens": "unavailable"
+  },
+  "validation": {
+    "candidate_code_changed": false,
+    "complete_suite": "not required: no candidate code changed and scientific execution never began",
+    "focused_pa5c1_pa5c2_pa5c3_pa5c4": "138 passed, 1 explicit network-qualification skip",
+    "ruff": "passed",
+    "strict_mypy": "passed, 74 source files"
+  }
+}
