@@ -137,6 +137,12 @@ Start → answer Human Action cards → inspect or export verified results. Run 
 branches, virtual environments, YAML/JSON, and shell commands are not part of this
 workflow.
 
+Blocked and Human Action cards state what happened, what the operator must do, and what
+happens next. Verified completion shows the outcome, stage, applicable final commit,
+Worker/Auditor/repair/human-decision counts, executive summary, reports, diff,
+provenance, repository opener, and campaign-bundle export. Browser notifications are
+opt-in and completion is announced only after durable completion verification.
+
 The interface uses progressive disclosure. A running campaign defaults to “Campaign
 is running”, a human stage label, and the last meaningful activity. Internal state,
 journal, proof, and process identities remain behind qualified verification and do not

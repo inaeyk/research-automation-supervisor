@@ -80,6 +80,7 @@ include = [
   "/tests/pa5c4_acceptance_backend.py",
   "/tests/pa5c4_acceptance_services.py",
   "/tests/real_windows_browser_acceptance.py",
+  "/tests/real_windows_operator_ux_acceptance.py",
   "/src",
 ]
 exclude = [

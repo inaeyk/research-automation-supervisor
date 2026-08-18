@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — PA-5C4
+## Unreleased — PA-5C4-U
+
+- Qualify the real zero-shell Windows operator journey with the production VBS →
+  PowerShell → WSL → browser → Custodian → Core seams, actual default-browser opening,
+  full browser and Custodian process restarts, the real WSL failure dialog, visible
+  completion notification, Human Action evidence/choice/note/file response, final
+  reports, and bundle export. Add strict self-hashed `UXAcceptanceEvidenceV1` candidate,
+  process, transcript, screenshot, notification, and export bindings.
+- Keep an environment-blocked Start actionable across a Custodian restart and make
+  every pause answer what happened, what the operator must do, and what happens next.
 
 - Add a low-privilege Campaign Custodian with a loopback-only progressive-disclosure
   browser UI, strict self-hashed campaign bundles, create-once operator exchange,

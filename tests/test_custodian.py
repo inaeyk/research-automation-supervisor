@@ -168,6 +168,59 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
     assert restarted.get_record(campaign_id, refresh=True).projection.status == "completed"
 
 
+def test_environment_blocked_start_remains_actionable_after_custodian_restart(
+    tmp_path: Path,
+) -> None:
+    repository = create_repository(tmp_path)
+    environment_calls = 0
+
+    def environment(_path: Path) -> EnvironmentReportV1:
+        nonlocal environment_calls
+        environment_calls += 1
+        if environment_calls == 1:
+            return ready_environment()
+        issue = EnvironmentIssueV1(
+            code="restart_setup_needed",
+            title="Setup needs attention",
+            message="Restart, then choose Continue.",
+            action="install_dependency",
+            campaign_not_started=True,
+        )
+        return EnvironmentReportV1(
+            ready=False,
+            backend="wsl",
+            managed_python_ready=True,
+            supervisor_package_ready=True,
+            git_ready=True,
+            codex_ready=True,
+            codex_authenticated=True,
+            isolation_ready=False,
+            filesystem_ready=True,
+            issues=(issue,),
+        )
+
+    runner = FakeQualifiedRunner()
+    custodian = CampaignCustodian(
+        tmp_path / "data",
+        runner=runner,
+        environment_inspector=environment,
+        token_factory=token_factory(),
+    )
+    preview = custodian.preview(submission(repository))
+    blocked = custodian.start(preview.preview_id, client_start_key="start_restart_block")
+    assert blocked.projection.status == "blocked"
+    restarted = CampaignCustodian(
+        tmp_path / "data",
+        runner=runner,
+        environment_inspector=environment,
+        token_factory=token_factory(),
+    )
+    recovered = restarted.get_record(blocked.campaign_public_id, refresh=True)
+    assert recovered.projection.status == "blocked"
+    assert recovered.projection.action_title == "Setup needs attention"
+    assert recovered.runner_operation == "start"
+
+
 def test_setup_failure_is_plain_language_and_does_not_launch_core(tmp_path: Path) -> None:
     repository = create_repository(tmp_path)
     runner = FakeQualifiedRunner()

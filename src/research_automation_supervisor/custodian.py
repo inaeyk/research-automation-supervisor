@@ -857,7 +857,7 @@ class CampaignCustodian:
                 cached = CustodianCampaignRecordV1.model_validate(
                     _read_json_regular(path, "Campaign card")
                 )
-                if (
+                bindings_match = (
                     cached.campaign_public_id == campaign_id
                     and cached.preview_id == summary.preview_id
                     and cached.launch_intent_id == summary.launch_intent_id
@@ -865,10 +865,21 @@ class CampaignCustodian:
                     and cached.input_bundle_sha256 == summary.input_bundle_sha256
                     and Path(cached.qualified_campaign_directory) == authority
                     and Path(cached.exchange_directory) == exchange.root
-                    and _pid_active(cached.runner_pid)
-                ):
+                )
+                if bindings_match and _pid_active(cached.runner_pid):
                     runner_operation = cached.runner_operation
                     runner_pid = cached.runner_pid
+                elif (
+                    bindings_match
+                    and not authority.exists()
+                    and cached.projection.status == "blocked"
+                    and cached.runner_pid is None
+                ):
+                    # A pre-launch environment pause is non-authoritative UI state,
+                    # but it must remain actionable across a Custodian restart.
+                    # Continue re-verifies Core intent and environment before launch.
+                    projection = cached.projection
+                    runner_operation = cached.runner_operation
             except (CustodianStateError, ValidationError):
                 pass
         record = CustodianCampaignRecordV1(

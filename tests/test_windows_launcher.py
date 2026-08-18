@@ -30,7 +30,12 @@ def test_double_click_launcher_is_hidden_and_uses_supported_default_wsl() -> Non
     assert "-d " not in powershell
     assert "ReadinessInstance" in powershell
     assert "Start-Process $Url" in powershell
-    assert "No scientific campaign state changed" in powershell
+    assert "Your campaign remains safe" in powershell
+    assert "What happened?" in powershell
+    assert "What do you need from me?" in powershell
+    assert "What happens next?" in powershell
+    assert "Technical detail:" not in powershell
+    assert "$($_.Exception.Message)" not in powershell
     assert "health_matches_instance" in bootstrap
     assert "launcher-evidence" in bootstrap
     assert "/run/research-supervisor-core/authority.sock" in bootstrap
@@ -310,7 +315,7 @@ def test_real_windows_vbs_launcher_reports_unavailable_wsl_in_plain_language(
     assert completed.returncode != 0
     value = json.loads(evidence.read_text(encoding="utf-8-sig"))
     assert value["title"] == "Research Supervisor needs attention"
-    assert "could not be launched through WSL" in value["message"]
+    assert "could not start WSL" in value["message"]
     assert "No scientific campaign state changed" in value["message"]
 
 

@@ -1,0 +1,4122 @@
+{
+  "backend_restart": {
+    "frozen_identity_after_sha256": "f59db531a0ceaee051df8c99623ffe5b434926dd5e28e9211d9ae3003e5a52fb",
+    "frozen_identity_before_sha256": "f59db531a0ceaee051df8c99623ffe5b434926dd5e28e9211d9ae3003e5a52fb",
+    "initial_pid": 1612375,
+    "old_process_absent": true,
+    "restarted_pid": 1612498,
+    "terminated_pid": 1612375
+  },
+  "branch": "feature/campaign-custodian-real-operator-ux",
+  "browser_name_version": "Chrome/151.0.7922.138",
+  "browser_process": {
+    "default_browser_path_exercised": true,
+    "executable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "initial_pids": [
+      29340
+    ],
+    "restarted_pids": [
+      4928
+    ],
+    "terminated_pids": [
+      29340
+    ],
+    "terminated_processes_absent": true
+  },
+  "candidate_tree": {
+    "algorithm": "sha256-path-content-manifest-v1",
+    "file_count": 644,
+    "files": [
+      {
+        "git_state": "tracked",
+        "path": ".gitignore",
+        "sha256": "d97b3ca45652abe935e42277f954aeaec8886404a077b63bda2f11ce84b999b8",
+        "size": 294
+      },
+      {
+        "git_state": "modified",
+        "path": "CHANGELOG.md",
+        "sha256": "48a61ec21bccc917b626c696e6879d68d524e5551a4917c41213327c5f361535",
+        "size": 7265
+      },
+      {
+        "git_state": "tracked",
+        "path": "CODEX_STAGE_0_PROMPT.md",
+        "sha256": "814da2b0609743bbda4a44152a85dde760ddc34662962043515201d8af271710",
+        "size": 804
+      },
+      {
+        "git_state": "tracked",
+        "path": "CODEX_STAGE_1_PROMPT.md",
+        "sha256": "8b2f227f499ddb1d550a5aea32350214ecbccf3c830d8937d77c32c1fb69aed2",
+        "size": 962
+      },
+      {
+        "git_state": "tracked",
+        "path": "CODEX_STAGE_2_PROMPT.md",
+        "sha256": "1b9dd122aae50f28c65eabaa30641ee4f107f1aa5d0f1c6eebf631057ac0ca7c",
+        "size": 1267
+      },
+      {
+        "git_state": "tracked",
+        "path": "CODEX_STAGE_3_PROMPT.md",
+        "sha256": "700105a2095589bd64e1979dfa1476e69e98c8e77110ae2d882e1dd8bbcc5a93",
+        "size": 1269
+      },
+      {
+        "git_state": "tracked",
+        "path": "CODEX_STAGE_4_PROMPT.md",
+        "sha256": "ce9804f82bdf0ab81979d8f6851fbaf14aa076f50030f72e7837a51da1d6e88d",
+        "size": 1794
+      },
+      {
+        "git_state": "tracked",
+        "path": "LICENSE",
+        "sha256": "1eb4afaf127cb9ecf34f738a167259bc89f74f61e38f638a1654d2258717483f",
+        "size": 1068
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_HUMAN_REVIEW_DECISIONS_SIGNED_FINAL.md",
+        "sha256": "91a9430b0a9f5351e135da5e6282149fcfa8529456676aa4c1a79065b0c4485c",
+        "size": 37723
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_HUMAN_REVIEW_DECISIONS_SIGNED_FINAL.md:Zone.Identifier",
+        "sha256": "b952d24cf701bc4e7a7d21e1ae85c611824e80579a89836c0cb49b193446ccfe",
+        "size": 25
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_V2_HUMAN_REVIEW_DECISIONS_SIGNED.md",
+        "sha256": "1673246951a0758b3e94e1fd9818808472ebd20dba141a0b02ae818f4a94a4e8",
+        "size": 6389
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_V2_HUMAN_REVIEW_DECISIONS_SIGNED.md:Zone.Identifier",
+        "sha256": "b952d24cf701bc4e7a7d21e1ae85c611824e80579a89836c0cb49b193446ccfe",
+        "size": 25
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_V2_HUMAN_REVIEW_DECISIONS_SIGNED_FINAL.md",
+        "sha256": "51113cff66f52afdc502d62e91046999c8755816b9b76951652125da77cad4ba",
+        "size": 6317
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_V2_HUMAN_REVIEW_DECISIONS_SIGNED_FINAL.md:Zone.Identifier",
+        "sha256": "04329aca8b7608b5851bff55e88d531ddbaf7cf5f5aba2e043f249b34b557535",
+        "size": 104
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_V2_HUMAN_REVIEW_DECISIONS_UNSIGNED_ORIGINAL.md",
+        "sha256": "16acf3678833d0973bd07d92a57a47bb64a3e069fac5be6c15ff09a1c6d34612",
+        "size": 6071
+      },
+      {
+        "git_state": "tracked",
+        "path": "PA5C1_V2_HUMAN_REVIEW_DECISIONS_UNSIGNED_ORIGINAL.md:Zone.Identifier",
+        "sha256": "04329aca8b7608b5851bff55e88d531ddbaf7cf5f5aba2e043f249b34b557535",
+        "size": 104
+      },
+      {
+        "git_state": "modified",
+        "path": "README.md",
+        "sha256": "e817906bd64cc572a0deaff49b541cb1f088a93d37effe67f97674aaef3776f4",
+        "size": 21022
+      },
+      {
+        "git_state": "tracked",
+        "path": "README_FIRST.md",
+        "sha256": "9eeb247e8d415e5b01e2965f08d3ee415ef826ee9a0de89db42cc76604c5dd4e",
+        "size": 986
+      },
+      {
+        "git_state": "tracked",
+        "path": "README_STAGE_1.md",
+        "sha256": "1e171b8264c6eae9753e666220d08f7ef0b6ce70f7228039ff6160378002deea",
+        "size": 1012
+      },
+      {
+        "git_state": "tracked",
+        "path": "README_STAGE_2.md",
+        "sha256": "3811e6485fd4faac173153191fd6294b97ab3ae161ba1aa44784cb52bb990abc",
+        "size": 1279
+      },
+      {
+        "git_state": "tracked",
+        "path": "README_STAGE_3.md",
+        "sha256": "b0f547c514485518a0cdd679d227026649c57737fac806493768f9a8469ee9b5",
+        "size": 1582
+      },
+      {
+        "git_state": "tracked",
+        "path": "README_STAGE_4.md",
+        "sha256": "90775c36120bb6b6074c340ce8e443a9aac07b708a3850ee86e578f955eeda33",
+        "size": 1845
+      },
+      {
+        "git_state": "tracked",
+        "path": "Research Supervisor.vbs",
+        "sha256": "16fcb9ad8cd68ab183c8e35abd8db9b0c98ed7a00d959a60d0a72d9abb6a2070",
+        "size": 525
+      },
+      {
+        "git_state": "tracked",
+        "path": "STAGE_0_CONTRACT.md",
+        "sha256": "6fb5b210659bec777213a6ca957cdb0fb97b102770d3f56bbaa3b7c73a9a077f",
+        "size": 4802
+      },
+      {
+        "git_state": "tracked",
+        "path": "STAGE_1_CONTRACT.md",
+        "sha256": "ba5099c08b260d5ab83469e037ae278cfd5a4dbebaa8893b3c9600979ebece8d",
+        "size": 15685
+      },
+      {
+        "git_state": "tracked",
+        "path": "STAGE_2_CONTRACT.md",
+        "sha256": "25a1fd2a0a75f63f2f0fb089dc1f9359f5dc569e59a2460d9341604d085ef818",
+        "size": 25581
+      },
+      {
+        "git_state": "tracked",
+        "path": "STAGE_3_CONTRACT.md",
+        "sha256": "e2818c95189c24eea0d36c9b84453a54961b337b3745d6f5811be27e9e2a9265",
+        "size": 13137
+      },
+      {
+        "git_state": "tracked",
+        "path": "STAGE_4_CONTRACT.md",
+        "sha256": "0b267d3b87a8845c1ff97fb22e5c4fb0841860b287c60b61217ae5ec15af38ef",
+        "size": 20768
+      },
+      {
+        "git_state": "tracked",
+        "path": "bootstrap.sh",
+        "sha256": "256da658517b33dc02832a5d88d32be900b7bfc727ba26a8af09c041c61afdf8",
+        "size": 1955
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/architecture.md",
+        "sha256": "76df3ec930530b72716f4f6a83dc3032f0040601d40a1b6d7cf065f89de015e1",
+        "size": 7014
+      },
+      {
+        "git_state": "modified",
+        "path": "docs/campaign_custodian.md",
+        "sha256": "267a305ae7ecdb5ecb8e347cb9da860be6f39a448eefe4901dee7934b7ff0dec",
+        "size": 20014
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/campaign_evaluation_split.md",
+        "sha256": "06d6505844335c0bccacdbed634e8da6ced8a472b375eb3d0bee18a4b33e7a99",
+        "size": 4845
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/campaigns.md",
+        "sha256": "3a2ec3c0b01365b6f5c781f8892d34e7ca7c4f18172863eeba952871649ee66e",
+        "size": 2918
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/codex_adapter.md",
+        "sha256": "688522af870f5bc300bac74d5fb7d72e3f93392b097711281fa352df2385a1aa",
+        "size": 9310
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/development.md",
+        "sha256": "8e49c6d768ed98605b6b46381d205f07b676ac48a036ea31f84cc56f1098ea1f",
+        "size": 2181
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/evaluation.md",
+        "sha256": "0f6b6632988778341b3b13046ecd889c2b6333a8f72567385ced20e73a538f00",
+        "size": 4686
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/getting-started.md",
+        "sha256": "d662e0e080abd2eb95913b75f932e07b53ebd78d55b620b19b96665abcc2a17c",
+        "size": 3708
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/live_shadow.md",
+        "sha256": "fe1ab8248646b40e2e92e1a54a98f5285d5ee7f70f2662ead75dacf3bed1c38e",
+        "size": 10743
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/migration/direct-historical-replay.md",
+        "sha256": "98d82caed5e74dc654b3b7431ea696c4dbc787393ca20fd440eae0926a857c9a",
+        "size": 2578
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_auditor_execution.md",
+        "sha256": "49b071c996b029e6807449a3713c364beda86bef96c52f96ad1dd2d0ce967747",
+        "size": 15363
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_auditor_foundations.md",
+        "sha256": "763d419d74c9e8cf0e45831571802df3896ba4f3d34cf0c9c1a58d61a7411142",
+        "size": 8794
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_benchmark_blind_authority.md",
+        "sha256": "2d03ef71f24799ebb81e47cd69090e312f11516097d1235b606969abd20182d8",
+        "size": 4365
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_benchmark_campaign.md",
+        "sha256": "f427025009ce992596a087ed736c6bb6e45172e41507f363eec57ac369faa554",
+        "size": 5909
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_benchmark_exact_scoring.md",
+        "sha256": "7f08de3cf6988998cc4e72bdd17b70fdfb30e13d8d7da8f85e59fa80f6f7587b",
+        "size": 5019
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_oracle_execution.md",
+        "sha256": "332840c8642070e14ec17dc1f1522a918342a07aaa20c4e8a98e88e9b9ae665c",
+        "size": 11693
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/physics_workflow_integration.md",
+        "sha256": "af28a634deb75a699b2b571bcb10e6f575a3b12826b8487043c51e7e3e720efc",
+        "size": 7883
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/release-checklist.md",
+        "sha256": "ac3d956ef48383f11790e34a2d6134cbeebf4abd5c294d9133323b738cc48f93",
+        "size": 2216
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/releases/0.2.0.md",
+        "sha256": "21f605755ed15537d3e9439fbc1b579bf954ea669f70f02a27d85d487fd2698f",
+        "size": 1397
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/roadmap/README.md",
+        "sha256": "7c1768fb1f0aefd97f8d8606f2187a39ce75d1aeee1f8731e335c13af12bd4b5",
+        "size": 1347
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/roadmap/agent_backend_abstraction.md",
+        "sha256": "02d81a2bbf7b4dad23907bfc80a9244ca2be52196e4ddac36cb9874066f40c74",
+        "size": 23660
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/roadmap/parallel_campaign_scheduler.md",
+        "sha256": "1840b71fa23450f47ccb90acaf07146d8994d4a26ecbd10f3c213450a2b0a81d",
+        "size": 27546
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/roadmap/physics_auditor_v1.md",
+        "sha256": "50d4044f4565797f7ff5c791b64b9c5a3e534d03990fd7b90b27b2a62c0fbe4c",
+        "size": 43482
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/roadmap/physics_research_profiles.md",
+        "sha256": "039ee33a5f4fae258daed928eb73f3d5a6f6f0156a220c6d1fa3314da3738f64",
+        "size": 22300
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/roadmap/upgrade_program_0.3_to_0.6.md",
+        "sha256": "3aeab2840ad3044dcedb853168ef388958753cee0838a7ed0c1ce42a8728bc06",
+        "size": 18509
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/security.md",
+        "sha256": "6b08a9d45ffc909af83efd740eb88eaeed6a19cfea5ed3aab328ce440ee9339b",
+        "size": 8726
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/shadow_calibration.md",
+        "sha256": "fe4a763f92d9a39ca965c29ee2b09f7c3e18c9470822de831625fd548ad2fa6c",
+        "size": 10591
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/troubleshooting.md",
+        "sha256": "370779c3378ce27c7c6d5b6f92596eeb0c6c9c433ed5107c1717177b3c874ce7",
+        "size": 3491
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/five_task_historical_replay.json",
+        "sha256": "5b8fb39f33d54efd582746c17dd2fa9191e4489d2d2c3d67e416cec344919e11",
+        "size": 2388
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/five_task_historical_replay.md",
+        "sha256": "1b784ae08909ed1bf498a22223455f152a248457cee55d0945e4b2305baac60d",
+        "size": 2573
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/pa5c4-real-browser-evidence.json",
+        "sha256": "858eb0eb4eaec55d4f966e5391ef6ba2c9ba026f3dcf9bc523ca80bf6d919bc3",
+        "size": 3529
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/pa5c4-real-browser/completed.png",
+        "sha256": "bc886c3461b6c4740ba79b7b71f634b7f92aefc7f91ddc8cf13ce525862e77c6",
+        "size": 151345
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/pa5c4-real-browser/environment-blocked.png",
+        "sha256": "09d4ec4a8476cbe3a906ca3aab29aee22b3adfd504c20202e1dbee38443febed",
+        "size": 158397
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/pa5c4-real-browser/human-action.png",
+        "sha256": "b79421062df3790850b9444e0c7ac7a4950a53627e2fe63e8950206d2dd3a9ed",
+        "size": 202359
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/pa5c4-real-browser/recoverable-interruption.png",
+        "sha256": "1567057c168e988e8a242946f575ced8805d67c768c8af0b543dcf73cd8fd38b",
+        "size": 148625
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/physics_auditor_pa3.json",
+        "sha256": "483dd4a3c286b979bfc003839d7d1af25ac561c4d82afc6d4052a2991f5c112a",
+        "size": 6906
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/physics_auditor_pa3.md",
+        "sha256": "bc59c7cb4e2640321572995fe0b786ca23e20ae46df0354cdc393205b0075af7",
+        "size": 4753
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/validation/physics_auditor_pa4.md",
+        "sha256": "06ac9019b9424f8decc1baa4f16d5fb983c151af1f92cfe5465a0190623560a3",
+        "size": 4463
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/workflow_engine.md",
+        "sha256": "0b652d4b7dcbe862bc7786f7cd12982edacf3bfeef8d637b4d339520490a96e8",
+        "size": 12258
+      },
+      {
+        "git_state": "tracked",
+        "path": "docs/workflow_recovery.md",
+        "sha256": "b17c6b8cae4bdef3c1d93cb5a4284859c835587b447502a6428e35b8c08f66c6",
+        "size": 3917
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/codex_requests/minimal-worker.yaml",
+        "sha256": "429f7b5786fd750180c12a8633435e45826f974d8c2db907b6e452be2690b3dd",
+        "size": 181
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/contracts/minimal.yaml",
+        "sha256": "dab79e431ae30088d7b6c399d5abf19c4ba46e33f8f8bae1c9a4ea1e149bc928",
+        "size": 481
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/live_shadow/minimal-live-shadow.yaml",
+        "sha256": "d2021475aa74399ed7242ac1660c2b5b04f07dd199f3823967a6ad9eaf694ee0",
+        "size": 528
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/live_shadow/project-context.md",
+        "sha256": "5e38fe4c561ae169437191f9e5eb97413aa4bb62f0efb5ebf13fd5c2a6949d31",
+        "size": 241
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/live_shadow/review.yaml",
+        "sha256": "7f1d1e3d7c62ce567fb49955bd2e7282405a81d94fa0f2815c504bf437371dd4",
+        "size": 327
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/live_shadow/supervisor-policy.md",
+        "sha256": "29e6a500ec4ce37bda30b30e5eb71416b1d0cea4d331324bce49fb465018ba82",
+        "size": 431
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/README.md",
+        "sha256": "f88f1b81a1ea7bcbf5ec20c29b099dd13361f298f417692e280c5f16b8611842",
+        "size": 1361
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001/contract.yaml",
+        "sha256": "7152dac4ffa7a222c1bfec7f0d810ea9e212a59bd9e690df7f2da0d6e92078c7",
+        "size": 2025
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001/implementation.py",
+        "sha256": "91ec9267d736aa05c2114e96a281bfd0f66855aacb002e37a90eac9e03c22834",
+        "size": 52
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001/observations.json",
+        "sha256": "eaa6e0d91fb3f273624a4528c9f54a7e4338ad1c991980eba2f7787e50ec52d3",
+        "size": 160
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_001/title.txt",
+        "sha256": "2bb57828dc40eabed44205b958bc39b7455fd624ac7b17ebecdcc16686985681",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002/contract.yaml",
+        "sha256": "7152dac4ffa7a222c1bfec7f0d810ea9e212a59bd9e690df7f2da0d6e92078c7",
+        "size": 2025
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002/implementation.py",
+        "sha256": "8f0cdc82f194607976013c1189495ce0a0df092e45d6f4b236ab5c0af1fb8146",
+        "size": 52
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002/observations.json",
+        "sha256": "4a59dbf75e4843537ae44a94f55b2e0e7f4e11f568db1fcc68bf8d8876f208c4",
+        "size": 160
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_001/variant_002/title.txt",
+        "sha256": "2bb57828dc40eabed44205b958bc39b7455fd624ac7b17ebecdcc16686985681",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001/contract.yaml",
+        "sha256": "fbfb637c62be662bd8a4cd4554e92736f036076d51173a7d6cf694cfc80c2398",
+        "size": 2075
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001/implementation.py",
+        "sha256": "0eee93b6ad879a9978c539631f5fdca3356f2aa56e2a246c578c651415eb2779",
+        "size": 59
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001/observations.json",
+        "sha256": "eef3a4fb74a5c0bafd66a16e4e37f3f088aaf53f873a36c104d6589235bae3d8",
+        "size": 174
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_001/title.txt",
+        "sha256": "4b79c22957cf3cfd89684907bb6f00b3f35e7657ed4003d3309b253eff3ccacb",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002/contract.yaml",
+        "sha256": "fbfb637c62be662bd8a4cd4554e92736f036076d51173a7d6cf694cfc80c2398",
+        "size": 2075
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002/implementation.py",
+        "sha256": "602021f4e669732e4c2a14e12390b6266e1ff71f5e83070ef4b52a9ca621af01",
+        "size": 58
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002/observations.json",
+        "sha256": "6b65f2e89568e4877c175ce472ef9499a29b50fd6814cb99901f612d499b73c9",
+        "size": 173
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_002/variant_002/title.txt",
+        "sha256": "4b79c22957cf3cfd89684907bb6f00b3f35e7657ed4003d3309b253eff3ccacb",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001/contract.yaml",
+        "sha256": "884efbd859d7a8ae13fad954cbab750c96796ceee45dc8162a446827073a3378",
+        "size": 2104
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001/implementation.py",
+        "sha256": "abf821323c0319fd5cc6ea78dbeba9c9f686406fb090d114e1b11bf37b35691b",
+        "size": 103
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001/observations.json",
+        "sha256": "7eecf0aa6eaec82bc921d580913a5cc6fafde77dea223caf42c4245f59dbc562",
+        "size": 163
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_001/title.txt",
+        "sha256": "74d5e65dcf674ba6b692f5fdf0d6b96f651ed7f4fef4d6250290d8c381f3fdfb",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002/contract.yaml",
+        "sha256": "884efbd859d7a8ae13fad954cbab750c96796ceee45dc8162a446827073a3378",
+        "size": 2104
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002/implementation.py",
+        "sha256": "2a9adf66882f1ddf4a0fa94f574a84e4470ff1ff99135d00dffca556463b92f2",
+        "size": 132
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002/observations.json",
+        "sha256": "cdc6a74b2d7092de198e94af0abc195a7140df4c97c0184271cd3651ee81ce61",
+        "size": 178
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_003/variant_002/title.txt",
+        "sha256": "74d5e65dcf674ba6b692f5fdf0d6b96f651ed7f4fef4d6250290d8c381f3fdfb",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001/contract.yaml",
+        "sha256": "98fef3381c6d23f783d58998414fa54231f5057ba5003ec1abf78e52d7c15b43",
+        "size": 2116
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001/implementation.py",
+        "sha256": "70fa9129de238521165f69fd1933f610e72ee3c60a9413244415ace894fe19a0",
+        "size": 108
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001/observations.json",
+        "sha256": "5b8b768b5d4165a5f2ac4b1d74bb302f21a0395ce672a81d698e8714716a92c4",
+        "size": 159
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_001/title.txt",
+        "sha256": "c4c19f74fb06a3065b2b4092af866307ab8873f56e888cf200caf172688a0923",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002/contract.yaml",
+        "sha256": "98fef3381c6d23f783d58998414fa54231f5057ba5003ec1abf78e52d7c15b43",
+        "size": 2116
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002/implementation.py",
+        "sha256": "5a6bd6e6207b78c553657f80774fe93c2d10adae0ad6abf6f347c6cc6d96b680",
+        "size": 104
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002/observations.json",
+        "sha256": "c3d5f3e11819d99a3049a0fd6d00505a496320eff177ea144fa3eaa965d28d89",
+        "size": 159
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_004/variant_002/title.txt",
+        "sha256": "c4c19f74fb06a3065b2b4092af866307ab8873f56e888cf200caf172688a0923",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001/contract.yaml",
+        "sha256": "f9ec92adf132c89e802bfcdb6e82244ee108b138c6d26cac0b69d340fcc5a676",
+        "size": 2047
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001/implementation.py",
+        "sha256": "87beef66dbd3ee7d08e6e662c1075d2beba53759bd70a45e8777f09d0af952a3",
+        "size": 59
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001/observations.json",
+        "sha256": "6505099c029eedafc279a0e29ea416eddfc9262f725ba3999a3140df2388d81b",
+        "size": 164
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_001/title.txt",
+        "sha256": "a59b72e3eabbc89925cd4d14b0325ceaa115ed0334eaf684db19389208bb698e",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002/contract.yaml",
+        "sha256": "f9ec92adf132c89e802bfcdb6e82244ee108b138c6d26cac0b69d340fcc5a676",
+        "size": 2047
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002/implementation.py",
+        "sha256": "fb8a3bd153a3a3e51768637cc00885241863ccc5bcd0396744f194a65300c11a",
+        "size": 58
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002/observations.json",
+        "sha256": "ef9cb491ca270204b71390a4f3a4cd9b27b7d4156356caa204a6148f5133b2b5",
+        "size": 163
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_005/variant_002/title.txt",
+        "sha256": "a59b72e3eabbc89925cd4d14b0325ceaa115ed0334eaf684db19389208bb698e",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001/contract.yaml",
+        "sha256": "a25d984b4c843a51da96ed1b14c6b0b5d7df0257d4d4cb87fe2595e3ef39601d",
+        "size": 2102
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001/implementation.py",
+        "sha256": "d04a869b49369ada2ddc172cd0ce6f890acda55c0200485a5d6cab05c6d5d5c9",
+        "size": 87
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001/observations.json",
+        "sha256": "ac09bd30eae0bb5a06a6b7025a8e6aab8407cf4e0cf170450e81b34d89a8aa7d",
+        "size": 166
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_001/title.txt",
+        "sha256": "a9d19a174b4e1ccb293bf91983aa8f4df5c0274cca21c5b404c751dfdae5c3aa",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002/contract.yaml",
+        "sha256": "a25d984b4c843a51da96ed1b14c6b0b5d7df0257d4d4cb87fe2595e3ef39601d",
+        "size": 2102
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002/implementation.py",
+        "sha256": "9866a9bb7499bdf9777b7f14a92a4c3c9bbb5d26ef1a954003218cab4716f609",
+        "size": 84
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002/observations.json",
+        "sha256": "f294c180b88076e4e506400a76f1c92b8ea25a38cfa18b9a295b7621f02fe245",
+        "size": 165
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_006/variant_002/title.txt",
+        "sha256": "a9d19a174b4e1ccb293bf91983aa8f4df5c0274cca21c5b404c751dfdae5c3aa",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001/contract.yaml",
+        "sha256": "c15299e58fd79f774b9adfa9a4855ebce1b151f8b07a43b3a1a4e8683f89d55f",
+        "size": 2081
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001/implementation.py",
+        "sha256": "269e887a1db787b6ee28cc7d9db70fc8ae92395c81f852be44d66bdbb72eb43f",
+        "size": 81
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001/observations.json",
+        "sha256": "c55da5c9c2161bd6b33d6d89b58a6b375abb9f133ca49fc60d16faba034861ad",
+        "size": 158
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_001/title.txt",
+        "sha256": "f1eb649cdccbfe3dbe570eb65a57e6676970f8857513e087ac64d973a0bf051d",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002/contract.yaml",
+        "sha256": "c15299e58fd79f774b9adfa9a4855ebce1b151f8b07a43b3a1a4e8683f89d55f",
+        "size": 2081
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002/implementation.py",
+        "sha256": "14847dfcf5b0f2cfc40a87ddbbf2c6a5a8be62f80516b1342fd8effaff5466cd",
+        "size": 80
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002/observations.json",
+        "sha256": "44dfc1628c07649f88d801281673add0cefb42a77d49e9c1e42c435a704c6113",
+        "size": 158
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_007/variant_002/title.txt",
+        "sha256": "f1eb649cdccbfe3dbe570eb65a57e6676970f8857513e087ac64d973a0bf051d",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001/contract.yaml",
+        "sha256": "2216f0a4e37235876a25131147f510022f8b06c61ade15e9015948f996530ab1",
+        "size": 2066
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001/implementation.py",
+        "sha256": "01d5a3c4aee877dd5078c78add7dfb64168d8fe2241d68b6a9a1ce45a657852f",
+        "size": 72
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001/observations.json",
+        "sha256": "a1e2e332190fbf1e6ac39104222d25aad0231e95926d406766080261cd0f2e89",
+        "size": 161
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_001/title.txt",
+        "sha256": "ddd0c280d123022d15c785375d3f525867ff0fbbffaf5981175a9a52a7eca59d",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002/contract.yaml",
+        "sha256": "2216f0a4e37235876a25131147f510022f8b06c61ade15e9015948f996530ab1",
+        "size": 2066
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002/implementation.py",
+        "sha256": "4c8393543e824aee6ae83943c953aef57f54021cd9eef98e0432b70bbe9c2d98",
+        "size": 76
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002/observations.json",
+        "sha256": "42170ffaf18ec2c6bc49c49413ebc8e61c23015290aa791d1e7522479c04ed16",
+        "size": 162
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_008/variant_002/title.txt",
+        "sha256": "ddd0c280d123022d15c785375d3f525867ff0fbbffaf5981175a9a52a7eca59d",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001/contract.yaml",
+        "sha256": "7a84483e0421fa6d3fd51c0d9861e25fee657ac605c98ee519b57e4e53f9f24c",
+        "size": 2107
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001/implementation.py",
+        "sha256": "1ec6251df7de76e67409fa9c2735a420e71308c1d86c95769db3fa189c608dd9",
+        "size": 155
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001/observations.json",
+        "sha256": "3ade9e24329c66474e7401dc25b2c6ea4e90fd5554bd9a3606730cbd2f681b62",
+        "size": 298
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_001/title.txt",
+        "sha256": "1484ba9a2f493c9c9138d54103641a97ef2a6896d15b71e4be7609434e5f3cae",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002/contract.yaml",
+        "sha256": "7a84483e0421fa6d3fd51c0d9861e25fee657ac605c98ee519b57e4e53f9f24c",
+        "size": 2107
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002/implementation.py",
+        "sha256": "6e1bbc1c8bd6081778647fd5b7688506081861f37383e606fe6845e6806bd165",
+        "size": 139
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002/observations.json",
+        "sha256": "8cf03818d75fd7183ad615af5ee14e660a5fa2d185573d6661707c96ca119171",
+        "size": 298
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_009/variant_002/title.txt",
+        "sha256": "1484ba9a2f493c9c9138d54103641a97ef2a6896d15b71e4be7609434e5f3cae",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001/contract.yaml",
+        "sha256": "598717652263c4b35c86ad86b9babd05b0541995dbac22e976d9309f0b6cc7eb",
+        "size": 2079
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001/implementation.py",
+        "sha256": "2c67b3c945a0e31fb970b069ad9990308a4ca2282b926396ea79ed81676249e5",
+        "size": 82
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001/observations.json",
+        "sha256": "dae06253f5603a52a4ec03eeda136b03332c64f720438dcd60c0df3dd0ad811b",
+        "size": 154
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_001/title.txt",
+        "sha256": "89b8a79c40ad62c635a7af3688b603d2dce800248af002964a4ae968672cfcd9",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002/contract.yaml",
+        "sha256": "598717652263c4b35c86ad86b9babd05b0541995dbac22e976d9309f0b6cc7eb",
+        "size": 2079
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002/implementation.py",
+        "sha256": "133efd1385b05b42f001db9bf7d15ba7d6bb156a09acae455aebe4b8e32ac94b",
+        "size": 79
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002/observations.json",
+        "sha256": "236e1ab3585c2afc76b237743ecba723643d14deac37b6927e52d1d97f93b933",
+        "size": 154
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_010/variant_002/title.txt",
+        "sha256": "89b8a79c40ad62c635a7af3688b603d2dce800248af002964a4ae968672cfcd9",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001/contract.yaml",
+        "sha256": "624f0f6fc3c952c0ffe22acf504f316ce99a866c96c992533ae2ac3e0b691bc8",
+        "size": 2066
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001/implementation.py",
+        "sha256": "891542fcc5dd86c2bc10f126077f62179a582c82d80d28b219108b345058c13c",
+        "size": 92
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001/observations.json",
+        "sha256": "310d1d71db487a4bb8e25841c94159ce25a7f24ac3e9ab4c1e9419d64de7efc9",
+        "size": 156
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_001/title.txt",
+        "sha256": "4f3343484c14c400795d15189d2e570e60bb16580c0be273b4e26de65605edea",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002/contract.yaml",
+        "sha256": "624f0f6fc3c952c0ffe22acf504f316ce99a866c96c992533ae2ac3e0b691bc8",
+        "size": 2066
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002/implementation.py",
+        "sha256": "50ee53084945fa503946bae6425a3c0d365b04428620db8bd0208ad32feb0229",
+        "size": 86
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002/observations.json",
+        "sha256": "54477d5453769be81af80b8dffe140618dd71175c34a255bf49c6cf6ffc029f2",
+        "size": 156
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_011/variant_002/title.txt",
+        "sha256": "4f3343484c14c400795d15189d2e570e60bb16580c0be273b4e26de65605edea",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001/contract.yaml",
+        "sha256": "ed1f191feb47841dc9d59085e64853c412881e1f8c60691563b0ad716cdd4645",
+        "size": 2168
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001/implementation.py",
+        "sha256": "9f6cffa9f6354afe4d4dfb8a9a1acabbed95a5d7e135db042406ce8c99c4429d",
+        "size": 98
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001/observations.json",
+        "sha256": "eccd30c9eef359f681aa759811959874a1ab7f3e21faccb803b90fc1f70f1cc2",
+        "size": 278
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_001/title.txt",
+        "sha256": "c0efdd2936b8e38455d5b3f1fcb4f51cf7a0c69a03de23ca8ec22e8e4d5a5e67",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002/contract.yaml",
+        "sha256": "ed1f191feb47841dc9d59085e64853c412881e1f8c60691563b0ad716cdd4645",
+        "size": 2168
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002/implementation.py",
+        "sha256": "ffc3fe702951e6b7c5c8c77b53a4eb9131f8f9d9fd6e114daeb951224a89790e",
+        "size": 98
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002/observations.json",
+        "sha256": "b79301d2f270ce49d82bfa0525bcb06f69f7e2f32e18285ae46ad31bb587cfbb",
+        "size": 296
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_012/variant_002/title.txt",
+        "sha256": "c0efdd2936b8e38455d5b3f1fcb4f51cf7a0c69a03de23ca8ec22e8e4d5a5e67",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001/contract.yaml",
+        "sha256": "371f85e2f1e3075404b99681bf8faa445e2809a033fccf4f1c9e3f965f40fcae",
+        "size": 2187
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001/implementation.py",
+        "sha256": "6d0c91e9f9f981c232b0f59981eb4e379a7207723ed5c5f18348eb331524dee7",
+        "size": 81
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001/observations.json",
+        "sha256": "0233a0d9551c201728b29aad73134cd455a5865192eb044a127ab89ea3db5a5f",
+        "size": 280
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_001/title.txt",
+        "sha256": "10d1b4da64437e07de840da7a34b9c384e41b7cda8f417d286c9ad2a624259ae",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002/contract.yaml",
+        "sha256": "371f85e2f1e3075404b99681bf8faa445e2809a033fccf4f1c9e3f965f40fcae",
+        "size": 2187
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002/implementation.py",
+        "sha256": "038a56965a940b9d4cad8653d0b9e74c994316fdcc01a81343843e628f8963e7",
+        "size": 81
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002/observations.json",
+        "sha256": "b8f88073422e36d2759c63f60548fbcf0005b7add44bfad632ce30a297e5a439",
+        "size": 280
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_013/variant_002/title.txt",
+        "sha256": "10d1b4da64437e07de840da7a34b9c384e41b7cda8f417d286c9ad2a624259ae",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001/contract.yaml",
+        "sha256": "f718afc70588f23918558cf13336c8b3c20769da043295840bd0e280b10d5b9c",
+        "size": 2129
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001/implementation.py",
+        "sha256": "15a521d7e7f2f847e31558e22faa2a641f37ed68870cd5aad9ea09f16ee69974",
+        "size": 51
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001/observations.json",
+        "sha256": "bf71605a3fe8fcb93d6cddbd88c06c054439bc1241b79a71a557b7bf0a73d5bc",
+        "size": 161
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_001/title.txt",
+        "sha256": "e5e984c3a404e476854801562a38233cce512a1e562a3a842734b04cffd47033",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002/contract.yaml",
+        "sha256": "f718afc70588f23918558cf13336c8b3c20769da043295840bd0e280b10d5b9c",
+        "size": 2129
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002/implementation.py",
+        "sha256": "ce30696b69985a2f846cf99b01816367f0cd3c2712b9f42029111ff30766b580",
+        "size": 50
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002/observations.json",
+        "sha256": "afaa89fe4130119b9cf272d8b7766a6e7175a174f0bcb81cc7f5c36dacaba17f",
+        "size": 160
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_014/variant_002/title.txt",
+        "sha256": "e5e984c3a404e476854801562a38233cce512a1e562a3a842734b04cffd47033",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001/contract.yaml",
+        "sha256": "0bea325125a658b1fba954941273107e23bb373eb05f3532c497eba3431db54f",
+        "size": 2148
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001/implementation.py",
+        "sha256": "1f30bc735fc277494f34c50f7a70d0f932e34f982815a5f7bf2b5c6c71186239",
+        "size": 77
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001/observations.json",
+        "sha256": "b5ba145c9031c2b895474c7cffd28f6008fd135339a871652afd7b9a2d6ed75b",
+        "size": 278
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_001/title.txt",
+        "sha256": "5dd271974388fffaae6d0f205dbbacf86a38ba89b2b2b6468e7824109c275bb0",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002/contract.yaml",
+        "sha256": "0bea325125a658b1fba954941273107e23bb373eb05f3532c497eba3431db54f",
+        "size": 2148
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002/implementation.py",
+        "sha256": "dd8c59e376d196909bc422dc901d296838b20d6924ff80cbf131fc700133c869",
+        "size": 77
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002/observations.json",
+        "sha256": "dd2e3d6b209312fa71ed77d9736da7e7460c4d7341dfcf6acba59209d289112a",
+        "size": 278
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_015/variant_002/title.txt",
+        "sha256": "5dd271974388fffaae6d0f205dbbacf86a38ba89b2b2b6468e7824109c275bb0",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001/contract.yaml",
+        "sha256": "345fdb8da86164b97e071e062154e82472f7e9e37ae97ac48ddf50100e32ecba",
+        "size": 2203
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001/implementation.py",
+        "sha256": "fd7159f6d329f18a929a837ebe8ff933a80fe5625b4e9175d2e9ced597da63ab",
+        "size": 95
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001/observations.json",
+        "sha256": "5e4bc24e2bd71b421e0d87d7bb68238babfaafa1f719c5027fbc6a9dfe284e19",
+        "size": 277
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_001/title.txt",
+        "sha256": "7db3f329958c2cabdb3e19868b86f6b04b7f0590ee72b840653252aac03471d7",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002/contract.yaml",
+        "sha256": "345fdb8da86164b97e071e062154e82472f7e9e37ae97ac48ddf50100e32ecba",
+        "size": 2203
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002/implementation.py",
+        "sha256": "8496e63be872180704fced9ed4b55b6cf7a298c205dbf67266f4757827182307",
+        "size": 95
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002/observations.json",
+        "sha256": "fdafd5b3c799ec6e22b2f473d2f496d4d5098aca64ef55dcf85c450eee5247ae",
+        "size": 277
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_016/variant_002/title.txt",
+        "sha256": "7db3f329958c2cabdb3e19868b86f6b04b7f0590ee72b840653252aac03471d7",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001/contract.yaml",
+        "sha256": "b70dce61cbb8b5a0141e6b4544f3951c55269e605ca754a8fdcf964c47de7552",
+        "size": 2115
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001/implementation.py",
+        "sha256": "6c322a106e01586016880d69b3a6f9c7cf2c438f646294ca86e7c9ee1c0141e3",
+        "size": 90
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001/observations.json",
+        "sha256": "310d1d71db487a4bb8e25841c94159ce25a7f24ac3e9ab4c1e9419d64de7efc9",
+        "size": 156
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_001/title.txt",
+        "sha256": "258362fb2b8655762f3694f924c4eccc4c5744c23c830ae0ec30f7b15d44e678",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002/contract.yaml",
+        "sha256": "b70dce61cbb8b5a0141e6b4544f3951c55269e605ca754a8fdcf964c47de7552",
+        "size": 2115
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002/implementation.py",
+        "sha256": "729e1fba05cefbb02615201fea40a0be93394d2f2b80ed3fccede9231d3323be",
+        "size": 91
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002/observations.json",
+        "sha256": "28f6acb98ae26d1a77c5e6089b8ef7a0acee80dca7b5f802f847754fb5185f4f",
+        "size": 156
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_017/variant_002/title.txt",
+        "sha256": "258362fb2b8655762f3694f924c4eccc4c5744c23c830ae0ec30f7b15d44e678",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001/contract.yaml",
+        "sha256": "556d5633604f95a26aa29c951553309f4a044d16af6266b1b635cef1bcd6d524",
+        "size": 2262
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001/implementation.py",
+        "sha256": "a84cbf0d429315b71cdc07a4b09380da2921e9084ed84fbc50465e1bf414be5c",
+        "size": 160
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001/observations.json",
+        "sha256": "9e622e548abbd4a303faa3f3121cf18e799640c42f1fd248d067a7a521463119",
+        "size": 430
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_001/title.txt",
+        "sha256": "60f79c7453de7029c735a3000e4c9b6a6194fcbf0569e68b2652243a752f936b",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002/contract.yaml",
+        "sha256": "556d5633604f95a26aa29c951553309f4a044d16af6266b1b635cef1bcd6d524",
+        "size": 2262
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002/implementation.py",
+        "sha256": "f4a5c5d2d3933afed9e96cf753ced84948b367266b22c6ceb64906aa71fbee38",
+        "size": 160
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002/observations.json",
+        "sha256": "aa2c992adfbecdf2e225a29b49046c57cd6f996c6dd4edd814441f04bfd8e157",
+        "size": 430
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_018/variant_002/title.txt",
+        "sha256": "60f79c7453de7029c735a3000e4c9b6a6194fcbf0569e68b2652243a752f936b",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001/contract.yaml",
+        "sha256": "275443b38b6a4c85ef0f61dd97a995b8b11fb6451ec865ea5ab4e2d4cb493efa",
+        "size": 2174
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001/implementation.py",
+        "sha256": "fdd28423350246029e73ebacec97cdc541706b4127baaf344bd28443421d5ae2",
+        "size": 76
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001/observations.json",
+        "sha256": "eef3a4fb74a5c0bafd66a16e4e37f3f088aaf53f873a36c104d6589235bae3d8",
+        "size": 174
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_001/title.txt",
+        "sha256": "156ab570b2cd8527bf0606b11cb89fd84eef16c08e6a77772c8b290d390c5b97",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002/contract.yaml",
+        "sha256": "275443b38b6a4c85ef0f61dd97a995b8b11fb6451ec865ea5ab4e2d4cb493efa",
+        "size": 2174
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002/implementation.py",
+        "sha256": "010a15ae593d06e84970cc2e9354b7d3d95df99f3b07fdd51d2e7311db198b08",
+        "size": 58
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002/observations.json",
+        "sha256": "6b65f2e89568e4877c175ce472ef9499a29b50fd6814cb99901f612d499b73c9",
+        "size": 173
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_019/variant_002/title.txt",
+        "sha256": "156ab570b2cd8527bf0606b11cb89fd84eef16c08e6a77772c8b290d390c5b97",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001/contract.yaml",
+        "sha256": "e45bd91bc9177b9e9a362a28639790a2338b9d87e410ee49711155ca0068b7a0",
+        "size": 2244
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001/implementation.py",
+        "sha256": "e53176bf72fbe028fdd15c19557dad91ea223c78b7b9827c30748996f1171606",
+        "size": 48
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001/observations.json",
+        "sha256": "ac49cf7e67fd43ba570a33d281aee9cf2d6de5f6ec0af88e91a27ec289650c73",
+        "size": 293
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_001/title.txt",
+        "sha256": "93742bb21258b04940f49344166f3abf5ab2607f50deb096248ab368b07924ad",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002/contract.yaml",
+        "sha256": "e45bd91bc9177b9e9a362a28639790a2338b9d87e410ee49711155ca0068b7a0",
+        "size": 2244
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002/implementation.py",
+        "sha256": "10b1068523bdc9d97f89370c632defd9d1714ef64cf8f380fead4f24617ffbed",
+        "size": 49
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002/observations.json",
+        "sha256": "c87ebbbb0ee55fc7eaee5d9a3e5b82456e440a7ca71252be4c04c46306ec76a1",
+        "size": 293
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_020/variant_002/title.txt",
+        "sha256": "93742bb21258b04940f49344166f3abf5ab2607f50deb096248ab368b07924ad",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001/contract.yaml",
+        "sha256": "6ae18cfb1293c00dcd614e567d9408aa490f85c74169dba6f6f6dbaa36050b38",
+        "size": 2168
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001/implementation.py",
+        "sha256": "c1ce278d186849740e568f156d955306310aa785204cc3d336de650fc9873a86",
+        "size": 56
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001/observations.json",
+        "sha256": "6ff1a2cc02bfad6112f8df1e20b2cb7c1e653979c680aff0bb9fb0f24673e868",
+        "size": 168
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_001/title.txt",
+        "sha256": "970865b21dd5d7164db3275e3097661da7eda5b03f0ef2e7d986435a08fbc7a9",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002/contract.yaml",
+        "sha256": "6ae18cfb1293c00dcd614e567d9408aa490f85c74169dba6f6f6dbaa36050b38",
+        "size": 2168
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002/implementation.py",
+        "sha256": "e76c44e375f008e06cdaf9402f53e28f1f55e00fd43c9dd51d18587e80cf2fe5",
+        "size": 60
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002/observations.json",
+        "sha256": "6ff1a2cc02bfad6112f8df1e20b2cb7c1e653979c680aff0bb9fb0f24673e868",
+        "size": 168
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/cases/case_021/variant_002/title.txt",
+        "sha256": "970865b21dd5d7164db3275e3097661da7eda5b03f0ef2e7d986435a08fbc7a9",
+        "size": 22
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001/contract.yaml",
+        "sha256": "6444dc30fa5babb0dc852cb0ac7a6314330aaf796ffe5ad520a843888cd34631",
+        "size": 2419
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001/implementation.py",
+        "sha256": "b85bab94f2da40922206349a575eb440a0d2146269cf4162af96674ec4e68829",
+        "size": 51
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001/observations.json",
+        "sha256": "1f6a7756c4c44157aba639183498f218157cd130284a1cf032f12b23fba22fc9",
+        "size": 297
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_001/title.txt",
+        "sha256": "6e6b606502938106b26f3f2882ae0752f0dbfdaabdda0f12c73eacde34fafaaf",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002/contract.yaml",
+        "sha256": "536d29edf1dde24eb4bf986471d18a2e8b6232e37c583abea4f1554e2c790972",
+        "size": 2750
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002/implementation.py",
+        "sha256": "49b67157ada80da5ecb5a18b50321b6519707f1e25fb3decd0853b8638bc6ca4",
+        "size": 49
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002/observations.json",
+        "sha256": "0bb0424dc176be87b477770e8feb7d2b1a249601b17ddc157f3fca79d6380272",
+        "size": 493
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_002/title.txt",
+        "sha256": "a7346d184c8991e994f1b91cf84e1ad5a53e686132bc626fb63319d780074ecb",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003/contract.yaml",
+        "sha256": "688d29b06ed6bff5cb6ce9cd10f336036dbe2dec44ed22fbf25282c5d87a3f42",
+        "size": 2599
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003/implementation.py",
+        "sha256": "9f1e2e4634fa7f4f7b2b15bc3b314e2df952f6ae4d1508f9c02c8a7283acc308",
+        "size": 46
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003/observations.json",
+        "sha256": "32706efe030eb6c38b92a77e15422a8504a85cd2df7935b023c06cfc4e37e5e3",
+        "size": 391
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_003/title.txt",
+        "sha256": "e4ea7f81d8ccc829e786da723997715ed9f77122a4a6dc81cf1113cae1dade17",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004/contract.yaml",
+        "sha256": "e3499cbf3d5236058541f604e1464e0577d2f9127a367176d9d766c7982ec957",
+        "size": 2751
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004/implementation.py",
+        "sha256": "0c01383ba8b2206a7713a5f2548b22899245982bfebbc2be9dda8d7c194ff1db",
+        "size": 51
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004/observations.json",
+        "sha256": "496d6f5a091a118f7519a02dcad89169fb14f29e6858e803ba2c012b6f05bfa3",
+        "size": 279
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_004/title.txt",
+        "sha256": "af4dc32c31039915f57c8684181ec964405435fbe5a7917dc2e2c7b350b457a8",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005/contract.yaml",
+        "sha256": "234ff4ca8307d057b1d624f0027a1eec2d6174a8d2dea31179d5c35618e6a879",
+        "size": 2599
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005/implementation.py",
+        "sha256": "c639e58680b90e18e24d8c723927aa3fb4ef25048d9e0a0d55750b7528ee3ba1",
+        "size": 52
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005/observations.json",
+        "sha256": "6937ade7b45734814628429c03c688efd62fe7effe1e57be5a0955269870aa57",
+        "size": 402
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_005/title.txt",
+        "sha256": "ac7e56d800e29a566699c752fafd0d8b2d85ac4579c749767bb7ebd750816ad9",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006/contract.yaml",
+        "sha256": "905e0bdde556993768ebf703a404155ed81ce8b8b4868ba94a891aa3cfcf6a0f",
+        "size": 2402
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006/implementation.py",
+        "sha256": "ba19618824526e259d854243b0c2bfa5fd82a4c8e0f61f7862163b7b36affd1a",
+        "size": 28
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006/observations.json",
+        "sha256": "6242985b816841baa81bae3291f26328b8a76355e9a348a042ab60bb1b162532",
+        "size": 302
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_006/title.txt",
+        "sha256": "dc0e5131015f10ff3e8e4ccde3309cc6004defc1c31123f244fa86cfbac6a2a5",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007/contract.yaml",
+        "sha256": "ea7836e71f47cd5817d82ca84f8b95d7eb02d6bffe12acaf72dd5ef0294d7304",
+        "size": 2384
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007/implementation.py",
+        "sha256": "ba19618824526e259d854243b0c2bfa5fd82a4c8e0f61f7862163b7b36affd1a",
+        "size": 28
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007/observations.json",
+        "sha256": "ca3d8cbbc1fa3c43912948f8d40daa25d8ccae0124d95f05e7329534f24cc446",
+        "size": 278
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_007/title.txt",
+        "sha256": "6dadbf11a1ffad0319889704d2d1a11d03e7c33c81b662f6c2fbd47dc3999ded",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008/contract.yaml",
+        "sha256": "23f880f235e2329e4098750f718faa66d1a1b1a8cf4974883b89d5a9063914cf",
+        "size": 2404
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008/implementation.py",
+        "sha256": "4928a26bee0f0cc1eba7261663e087778faa5fbf060b7c615bc97031f849ec1d",
+        "size": 31
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008/observations.json",
+        "sha256": "3b9bf94879ef32275a8c2f8b49e871f9a8834b13d52955d1f60b8122252ce1ab",
+        "size": 284
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_008/title.txt",
+        "sha256": "74f316030de0cf09c9c243969235fbc0994f6e055a92cf65fa2165f00e37c6ae",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009/contract.yaml",
+        "sha256": "e8d7f758cac4aaa315a31c40d8a8dbec61efd1a3772c3219e2ef05a124f172df",
+        "size": 2403
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009/implementation.py",
+        "sha256": "7bd1d692ba5eb9d30a844dae32565420ef08ae18dee5458f35f05cb513521e29",
+        "size": 37
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009/observations.json",
+        "sha256": "7531eac63858f7d925644a6bfca18a78b97e889dd49d1ac181b8650f998eaee0",
+        "size": 282
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_009/title.txt",
+        "sha256": "ec7cd11e30fcbb48b00334f7b6ed7983ef5cb7881dd3df3791d9533395ee22d2",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010/contract.yaml",
+        "sha256": "ea8cbc4ae819108a84e480de1fd863334687e55a4a4ee4451d8885d3588d066c",
+        "size": 2597
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010/evidence.md",
+        "sha256": "f7c46a6f8e0ecfe8e17eaf8d2e6c8f9d26ac43ef383d885554fa2e858e189e3b",
+        "size": 202
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010/implementation.py",
+        "sha256": "9b825b08f301b87802491dd454e905a531d2c910c40fe2aedd17e7557529556a",
+        "size": 51
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010/observations.json",
+        "sha256": "41c26703df47e40e11b1292499fbb589e60058b9fe72bcae567b39b01112118d",
+        "size": 281
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010/raw_measurement_oracle.py",
+        "sha256": "adedd1c57b6c42ebdb84f18a92fbc6cfb2028c6efe74e1f5eab6d5f54a0d070b",
+        "size": 1232
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/auditor_visible/gl/task_010/title.txt",
+        "sha256": "bd06847d4b13168ff8a0d5826ab0ad8fab990f3eb3caee4ed4971664b2127717",
+        "size": 15
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/catalog.json",
+        "sha256": "01e621c06c47cb253be3d03e367b30b976717d4ba7ad2d575d12ab9135995372",
+        "size": 45756
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review-packet.json",
+        "sha256": "94d72117113e3a59c33037e32f0da22f2431a1a64ecfcd9487fcd0040372f6ae",
+        "size": 9153
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_001.json",
+        "sha256": "e3d0c6fb8b0b8a2f11d7d1182d0567db678a4e9934c38c195974d7f92a02d319",
+        "size": 1056
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_002.json",
+        "sha256": "301d2d861fe300abe9b6168ff977e21c287f0ad7628cf9b9a0b125529a49f068",
+        "size": 994
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_003.json",
+        "sha256": "ee6e4c529d564ba07b0814963786a6c174d50de6069361a42914aa6acf30aee4",
+        "size": 987
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_004.json",
+        "sha256": "a9cc47f15534f986ae269818c15393be6aaefc11af2c1537dc6bdd36e8fc8e9a",
+        "size": 1019
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_005.json",
+        "sha256": "e8419e3d910fa0204e605858e81161a746b29113ffde0b9338ac44fa753a3613",
+        "size": 953
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_006.json",
+        "sha256": "9a0768bece8cdd25a73b27fa48cff52dffcbc74e0a7b858770aa77debe67efab",
+        "size": 972
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_007.json",
+        "sha256": "14e5c2b196583ed10dcb7427639060a21ed10bf1866ea800a7bf9164042d4cb0",
+        "size": 957
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_008.json",
+        "sha256": "7acdc5584cf2f57fa6419ae55cd80409886a7a631a3dd9c193278d9e45c4480a",
+        "size": 946
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_009.json",
+        "sha256": "d22d4cf3e95332b3ab6b2b9e59db8908719509e04e7358ae542419cfb72de7c1",
+        "size": 1195
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_009_v2.json",
+        "sha256": "fe7421d614d0ff7b0b4107ec656e6af05b4573f4541dfcc51c399ed48aac68fb",
+        "size": 1454
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_010.json",
+        "sha256": "04726729595fe0351066d4f5ff678e3393a7624030f2e11449ba98b96d98336e",
+        "size": 949
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_011.json",
+        "sha256": "697e0b9e8d976ab0fa44a7140069419cd015b992cd102ce7427cec91ee861773",
+        "size": 914
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_012.json",
+        "sha256": "f73723b19ac639b8410d64f3e3855eaa8ca76b15660c6bed540d851e9ccb5a37",
+        "size": 1082
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_013.json",
+        "sha256": "c54b1077de41170de92b85962c9934dc5bb9855727aa93c06a8e74e790fe9e24",
+        "size": 1126
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_014.json",
+        "sha256": "a9451fc1fac3e1cae9805c6a087abe010d8bcd60cb34c1712275467efb2e884a",
+        "size": 997
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_015.json",
+        "sha256": "b079246f872fd2a7edc1ede99fe6ae782a390ae33a19e0c5b3f6345c54afbe5f",
+        "size": 987
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_016.json",
+        "sha256": "67a7820c35b28aab990f178fea65f08b7025259e191838bb2d8dd27c6899cc86",
+        "size": 1048
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_017.json",
+        "sha256": "2c30803b94189b24bf57a48c909b1ed5f22db0bf06c9425eabd8df3bbc512240",
+        "size": 987
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_018.json",
+        "sha256": "6e99a65909e846226a257b490ed76cd2ac546355a7f041bb7b5e2413be20ae7c",
+        "size": 1262
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_018_v2.json",
+        "sha256": "6f577a52622ef3d39988210a126495f57d7a0635985e72e989d094bb9e2d5964",
+        "size": 1447
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_019.json",
+        "sha256": "de6f80dc5da8be4b8efbc8af6b1eea877f772d658ecdccb7b23cfc0f9f8d31a7",
+        "size": 1043
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_020.json",
+        "sha256": "3fc5ac642a895eb14ee83b69321eaec17eb6f0f2ae0263a07f1c32c7666d99c9",
+        "size": 1034
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/case_021.json",
+        "sha256": "5d7bfc5fe8dc3808542a187bcfde17ddd4981ec371f280c41f9bc1e3ff48b16d",
+        "size": 1063
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_001.json",
+        "sha256": "5bdac954c4616874d6fb606bf9a9da794052194a2bae45a21f3992eeb905353e",
+        "size": 913
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_002.json",
+        "sha256": "b456a3bd206a1c10cd4d883ea4986dd3c44888ab9a637de9311f015b1912f07c",
+        "size": 893
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_003.json",
+        "sha256": "715e3f324d69e17da12540f4d46bc2935787e4551843e0a7ade573ffc8ee0c0a",
+        "size": 941
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_004.json",
+        "sha256": "ba1ce14143dce20d01cdc400b3ca13d483e25270eb149f7ae464f12fe592f124",
+        "size": 907
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_005.json",
+        "sha256": "a235154f53ac8f4df78b161665df4ad12e485a7908882dd743b7984c7f6c6fa6",
+        "size": 885
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_006.json",
+        "sha256": "3fb386c4401f97db9c3f17ee85a7b3b7d03f6f956a049e54e8b8074d5fca2b73",
+        "size": 954
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_007.json",
+        "sha256": "aeeb13975a15736c14f39c3230f4dfabbdfe066ddb89859a3b8400f3444db145",
+        "size": 934
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_008.json",
+        "sha256": "26bac83feb852041a8b377ae4aacb9cce1e795853f3e969f40a0ab3df4d4b9af",
+        "size": 956
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_009.json",
+        "sha256": "a8303f0757ed1e88e57b1bc0132eff43570c0fa85ebaba08c7fe30c62c8b92a7",
+        "size": 916
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/benchmark_v1/scorer_only/review_receipts/task_010.json",
+        "sha256": "16a7a02f60ffb866a180d062cd9ba5ce2b733a328a77ecf78b82d4b797876da8",
+        "size": 923
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/README.md",
+        "sha256": "6ba147366e62cddfa74ff8f00d7a7764abde7b84de716cbf422403c670056ac0",
+        "size": 1639
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/clean/derivation.md",
+        "sha256": "d09d1f2e8d7a255928f701508fab873cf848b2be5111ca012340a0f092f80fb6",
+        "size": 231
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/clean/implementation.py",
+        "sha256": "543d6610dcb8230755724aad95c9cad909a5dcf0dbb48b02cbb737aaa2266265",
+        "size": 189
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/clean/oracle.py",
+        "sha256": "f3a5dc446a9d822f6e12ad7cf034c105ae54322ba968bea1acc2ee3d1624e4ae",
+        "size": 856
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/contract.yaml",
+        "sha256": "603e8df13478faafccc233fe69144c1727b84149963859e8e5790c64004e89c0",
+        "size": 1927
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/correct_alternative/derivation.md",
+        "sha256": "cd9b2de682ef7342d384b8ae49463fc4ae1e42b932b8a0617bc4767f8b451c4b",
+        "size": 117
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/correct_alternative/implementation.py",
+        "sha256": "94931b62519c12fe0099c55bf0ee477abd3d1a1037abd5c77fd1724afb1b3c67",
+        "size": 263
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/execution-config.yaml",
+        "sha256": "9ca0ddace619141c79a85c08b6b65499bf38042413d5c185ee8a2649fbe9a1bd",
+        "size": 497
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/prompt-golden.json",
+        "sha256": "bd3ff50caff662b70c9f2193ae031aba5d04c680e9cefc0ba0b4c591b72367b7",
+        "size": 444
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/adversarial_unknown_field.json",
+        "sha256": "a9edaa7f10c09218bf0773c56a453ec1ef428f07c5e46cf04c2305d3e7615c6e",
+        "size": 350
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/clean.json",
+        "sha256": "cc1c48f25ad5fc001a3417637bada2d49eca931909596835a2cc3d8a82e7003e",
+        "size": 1743
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/convention_change.json",
+        "sha256": "c7409abcbcb5ed51080f44d649421d669e9650fc403898073219cd2a9bdbf38a",
+        "size": 1820
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/gauge_ambiguity.json",
+        "sha256": "21ce010f908f274c445b54dcb675950399f20496dc903be89ac06587048d7f09",
+        "size": 2219
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/insufficient_evidence.json",
+        "sha256": "aa913e976547a3c81b3842cf71322ed635c228ff6235cc4b0ca4707f566e29fe",
+        "size": 1900
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/sign_error.json",
+        "sha256": "7aa3c5e3bfa53f83854433bd08712bccd83de83025566e8110e70726b5a8a706",
+        "size": 2046
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/reports/unsupported_claim.json",
+        "sha256": "6e6c5d549a4173802b711a83d3afc73a66f4a65e3d2bd63ea90c4b2c168205fc",
+        "size": 1942
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/sign_error/derivation.md",
+        "sha256": "cd65cf906c2d68b73a43dffe7c11358a29b9d6ceada4ba51b51d1d453d08c776",
+        "size": 117
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/physics_auditor/synthetic/sign_error/implementation.py",
+        "sha256": "09d5861addc1b792d8753429399c5568dcf7c9f1f86d77e3bf03d5639b6d0bc4",
+        "size": 165
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/prompts/auditor.md",
+        "sha256": "47dd1b4c519558f167e0d0f256eab225ba6e53b5a5ca512b918f6d0556580154",
+        "size": 206
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/prompts/minimal-worker.md",
+        "sha256": "0f1056f20ad8e39ade3180591ceb9860b6772ee8a19c01ef9613635b6dd84e97",
+        "size": 130
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/prompts/worker-initial.md",
+        "sha256": "7fe1cd93610d43f20fefeadf0063bf53bfa65f7b804084ac950281180cd6aaff",
+        "size": 177
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/prompts/worker-repair.md",
+        "sha256": "6adfd813044b3e7e64819da8e978d815941e45d8c6f624bc60837a52bdd15dfe",
+        "size": 195
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/shadow/minimal-shadow.yaml",
+        "sha256": "7ab494f3957cb75ba6a4dc6875c1b658b416e882f16a3a0db92e1133f8b31eea",
+        "size": 456
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/shadow/project-context.md",
+        "sha256": "0f1e359655260f029d689eb5cb0a5a71176f52d9165031375f3090a3e2f8c3ef",
+        "size": 217
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/shadow/review.yaml",
+        "sha256": "d6082396abf08ae5362e57c8357616b58191ec32871cebec7d58706122a1fc8b",
+        "size": 315
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/shadow/supervisor-policy.md",
+        "sha256": "2ae89abace020c28542fdcf64044a03b6d9f8e0548ae0578e0f695cdebcc64b3",
+        "size": 382
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/workflows/minimal-stage-contract.md",
+        "sha256": "b236b4d1f57289831b1ec8c342614ef4c7460de44aa2116c7352f0da0d558e98",
+        "size": 271
+      },
+      {
+        "git_state": "tracked",
+        "path": "examples/workflows/minimal-substage.yaml",
+        "sha256": "1f1f4bcfadb963e63fdfea06745e1fa6c3b7cd0a105c66b9702c8fdcd08b3365",
+        "size": 987
+      },
+      {
+        "git_state": "tracked",
+        "path": "first-run-research-supervisor.cmd",
+        "sha256": "dc20f884221691a5d852353cb89c8d89138be8df13dc5f1b4739b470b937e0e1",
+        "size": 94
+      },
+      {
+        "git_state": "tracked",
+        "path": "launch-research-supervisor.cmd",
+        "sha256": "9d3ab3cf07fbae85e6244b6e571090b9db12395db1d45e141a4d969e4b9db609",
+        "size": 84
+      },
+      {
+        "git_state": "modified",
+        "path": "launch-research-supervisor.ps1",
+        "sha256": "2f2aade24fcce8f06d2aa42a47e24cae1830629f88fb6ee1e7b2a99b60ab55fe",
+        "size": 5924
+      },
+      {
+        "git_state": "modified",
+        "path": "pyproject.toml",
+        "sha256": "27cc4950f1d14f90aa7df84c52aadbf80f47b8ae2a402957cecc17a3c1761e03",
+        "size": 3576
+      },
+      {
+        "git_state": "tracked",
+        "path": "run_stage0_codex.sh",
+        "sha256": "5081354945b1428ced4022b7fcace99743e133503cedecb0db772e71ec0be1b3",
+        "size": 1245
+      },
+      {
+        "git_state": "tracked",
+        "path": "run_stage1_codex.sh",
+        "sha256": "0f43459aa4b6fd2ebd9e971be232e45f9760a98c25c06155a47a3a830361e40d",
+        "size": 1972
+      },
+      {
+        "git_state": "tracked",
+        "path": "run_stage2_codex.sh",
+        "sha256": "c052deebf945ef6adad9efc1770c662bd43339a67a7f038558845888b688bbcb",
+        "size": 2098
+      },
+      {
+        "git_state": "tracked",
+        "path": "run_stage3_codex.sh",
+        "sha256": "3d936a1adeba622ed5bba6aba004afcb2e24b05f82657879525e29a37a376e53",
+        "size": 1584
+      },
+      {
+        "git_state": "tracked",
+        "path": "run_stage4_codex.sh",
+        "sha256": "e7a6dc966358955435b3de0f7ed2704d2ead603eab3981170e3b8bb7017ae57a",
+        "size": 1744
+      },
+      {
+        "git_state": "tracked",
+        "path": "runs/.gitkeep",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/build_pa5c1_blind_fixtures.py",
+        "sha256": "74e97dbeb199448731ed5649a53aee96dae3b49ed4b4f3ad513cf36b4051823e",
+        "size": 37511
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/custodian-bootstrap.sh",
+        "sha256": "a7df15ede545d460b85942835990d114c9f19edc58566ccd1f4756d82694c45e",
+        "size": 6240
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/install-core-authority-service.sh",
+        "sha256": "e5d9326a7a8d9fa79ae463fb58a45bf5f8f7da9da2158152a6b96192787e55c6",
+        "size": 2896
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/research-supervisor-core-authority.service",
+        "sha256": "65cab09e13b2b9166c06dc39f8fc47dbf56bd53d48a77636ad63fd924eb33799",
+        "size": 1195
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/verify_pa5c4_frozen_tree.py",
+        "sha256": "1fb17cd4cd5d0922325a9cf501f6eed91e5039ebeded483eff9eb07b7f806256",
+        "size": 1937
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/verify_pa5c4_git_inventory.py",
+        "sha256": "7c136b3d0357c5260ac4bebf094d4dcc50a984ff82ce45f8fa227699df3d118c",
+        "size": 13632
+      },
+      {
+        "git_state": "tracked",
+        "path": "scripts/windows-cdp-relay.ps1",
+        "sha256": "059311fdc1c3f8d65b27a228df1a99371a93fa9f069c157c1c78227e0db11380",
+        "size": 1476
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/__init__.py",
+        "sha256": "f4d097a04ef49d57934be89133b1ea8863d94231db7cca5c0091dc9264bd64fa",
+        "size": 69
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/auth_confidentiality.py",
+        "sha256": "44fe143cedffcafc6b12c6bb7d67e027976942195230db77de1446c4b48fa6b4",
+        "size": 9632
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/candidate_export.py",
+        "sha256": "77c26c44b242d083c11b5e112d69433246a350973ed1ef859d66af7f056c9968",
+        "size": 26006
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/cli.py",
+        "sha256": "5ee4138a82c3fdf79e14ba595b76dddedfaf0822da2de0ca2464f123dbf1d1d9",
+        "size": 73337
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/codex_adapter.py",
+        "sha256": "f244e37827ce1f172b3b606a96d1ceb85f0e96a5696f1af3e62285c373845e9b",
+        "size": 58070
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/codex_models.py",
+        "sha256": "6942f0ebfd235124b7d892a3758eec5b14c57885bfeaee4c77ef81a8cad9ac99",
+        "size": 9243
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/contract.py",
+        "sha256": "f62efe9aa491c26954aca56c22d5a7d3439b106aa8a92320586f5106b2defd96",
+        "size": 5675
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/core_authority_client.py",
+        "sha256": "d80eb3825f49505e29eedbc4fcaa040dd5e6d2aba57e88635e0f02c38fd793b5",
+        "size": 12058
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/core_authority_models.py",
+        "sha256": "abe63819701b2c6c93ab1a62b74f5c954cd79fd134d9ad874d4701d59b7a2fc1",
+        "size": 5394
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/core_authority_service.py",
+        "sha256": "57a45d3fafa1f334e4725775c59a912ef30212050fd6d0c97a144c9438fc6147",
+        "size": 14697
+      },
+      {
+        "git_state": "modified",
+        "path": "src/research_automation_supervisor/custodian.py",
+        "sha256": "2f913305cfd9662900a1a2c1ebf98aba67b42fa819b0437b11d835884d2502ac",
+        "size": 46467
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/custodian_bootstrap.py",
+        "sha256": "47395a7524f2d405433de395b02bf36a0951b094add03bf15902748e07a4d8b7",
+        "size": 9295
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/custodian_errors.py",
+        "sha256": "b22844cf01902ef5378f6b8ac663b8b9620a970eb62b1c1fa06459515101f900",
+        "size": 989
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/custodian_exchange.py",
+        "sha256": "1d214e0b6efd78a1f0deb6226a82d43e7f227b0b03aec6a253ead25ac3813690",
+        "size": 12245
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/custodian_models.py",
+        "sha256": "9d4d5ea20af10b56bf266f90dce5732d35e46a2d71fd945a24c3f84cbae0505f",
+        "size": 23140
+      },
+      {
+        "git_state": "modified",
+        "path": "src/research_automation_supervisor/custodian_server.py",
+        "sha256": "67168de2268cfc5add1c221eeb3a12840126a2e13ef2a075bc2cdb2559e11d6a",
+        "size": 55910
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/direct_historical_replay.py",
+        "sha256": "268a911588ef4ba95966b47e548004f0bd26d119e3021b16d03598baa5088d60",
+        "size": 59439
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/doctor.py",
+        "sha256": "f57642b1a72d0a3a8089fc45c71a9eda2de4aad6041a4b4dbaeec4d5b2448a96",
+        "size": 9467
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/durable_state.py",
+        "sha256": "3541152b891c55c3f9f3fa6e07472cc673c1a7f6f1156667548a25d51ab7093f",
+        "size": 9067
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/errors.py",
+        "sha256": "6f033c2823f836f478cd0882131cd457b486f1cab457946617226a6057783ba0",
+        "size": 7320
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_bundle.py",
+        "sha256": "d477401e9c3a476d668d37cb1efe33b2f78ad2c37e0ffe55af368e2d35d09516",
+        "size": 2626
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/README.md",
+        "sha256": "27f41d1dee3e86b88208c5cb5573c395c7b0088cbb6932e03fe09e123e3a9fa5",
+        "size": 1072
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/config/substage.yaml",
+        "sha256": "62eec8d4ee24c0fd9f6da5b8a547a90e11a3d913f5f047c818dfb2725b03523b",
+        "size": 813
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/control/auditor.md",
+        "sha256": "0379dabc21c50036f04081c24633667b04e04e20766a7eb86ce879602b7a8a58",
+        "size": 169
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/control/contract.md",
+        "sha256": "7eb6eb42eb955b04ab3fb69578c1092c65ea8c9496d16f56ac5ba868d1b9d72b",
+        "size": 176
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/control/worker-initial.md",
+        "sha256": "040ad4af6bf3665f9fd8377c967681b7fb7662d9815de0718c16fc768a9d6190",
+        "size": 128
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/control/worker-repair.md",
+        "sha256": "8ec4e4456eed094625f5beb9a18fb7effbbdcc2d1f346ddde15f2d7cebd6621e",
+        "size": 122
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/src/.gitkeep",
+        "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/tools/acceptance.py",
+        "sha256": "3f499e811c9ef8c3f09beb750cb5af392c869e7be0837830530fb169fe74ddd6",
+        "size": 186
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/example_data/synthetic_quickstart/project/tools/codex",
+        "sha256": "a7de88b6686217f521fdd4e127829b56922f22b2e8447bbdb94add96bab56fe8",
+        "size": 1968
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/git_evidence.py",
+        "sha256": "1d9b7a72c7e0027bd5fda6bcf6bb29e4f18ae31124057ff91efca76542d1d1c3",
+        "size": 17568
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/gitless_repository.py",
+        "sha256": "4ee782b022a806118820a619df5827055ab78822b5296a272f6a884f29aacbbb",
+        "size": 87537
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/live_shadow_engine.py",
+        "sha256": "11a45ff4d26479a079f68ce4e785f9952dcd718fca7e3d775eac897c01aa0d7e",
+        "size": 221982
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/live_shadow_isolation.py",
+        "sha256": "994760dd488fb151853325783e4c9554b1ee1b749b785a71fdfef6fc8a18e8e7",
+        "size": 70699
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/live_shadow_models.py",
+        "sha256": "fcec36601833d4d69b40b20f7f49de2b9ed00b8db6e780ba542fede07f0637e1",
+        "size": 16838
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/live_shadow_prompts.py",
+        "sha256": "9a38294ef1152aecf76fa2670e71ba8c7639b7cb23696602926ea0cd443f0510",
+        "size": 8576
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/live_shadow_review.py",
+        "sha256": "bde3f9b05a404a242f8f80e245e0f0972eaab13a9e89710557b049b77ec1c1e5",
+        "size": 5648
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/live_shadow_sources.py",
+        "sha256": "0c7712cd70b16c19c85a765da07353bd026fd4a7379027a3d33dac3fa887ef41",
+        "size": 25958
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/offline_evaluation_package.py",
+        "sha256": "4fc14495c28c6ed5b6bd808da274035af95dcd5bf32b9d8ccae9cc9722b77deb",
+        "size": 117218
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/offline_replay_evaluator.py",
+        "sha256": "d6f9022ea21155c0a250d179fbaf82d8287582dab9e4e1d1f123d468e273defa",
+        "size": 100359
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_auditor_evidence.py",
+        "sha256": "a5458bf46d98c18be26a1ea8433619ad351584efcd09e506ff4e75f31ef08f63",
+        "size": 24740
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_auditor_execution.py",
+        "sha256": "636d70a4107b4e31b5426e7e3be1f4821170180ea163fdcbd028c8f4173b6bbc",
+        "size": 90710
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_auditor_models.py",
+        "sha256": "0af1924c1656591fcfcb2ea29afbb1638e337739ffa703590e6c39819d09c3ea",
+        "size": 30183
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_auditor_projection.py",
+        "sha256": "38b8e7c09f341300e05022f3e53901aac44bcb4d02fc4e12ace29e8724165e02",
+        "size": 20026
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_auditor_prompts.py",
+        "sha256": "59d7f92db30b203b8c51975d2574a0ec408ed6f8484d1276404d01a9e51c4185",
+        "size": 8909
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_benchmark_blindness.py",
+        "sha256": "976b9a17b94fc664491367743bb3889c0cb8272bd0bda3dd5ca64b704ad63426",
+        "size": 91490
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_benchmark_campaign.py",
+        "sha256": "e93b4859d345754a248822ca836ed4d5b0d1a764f5576f8e12e01a03f5dd7452",
+        "size": 82595
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_benchmark_campaign_models.py",
+        "sha256": "af8a459fe8e2632b2ef2304708d93883b1d05b744610f11ef114349e55ea05c6",
+        "size": 15984
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_benchmark_child_workflow.py",
+        "sha256": "036706a5683a3b842467ff832713301593bf2d0f9dd8cea31871d418b9e727f4",
+        "size": 3757
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_benchmark_scoring.py",
+        "sha256": "63334771ed60e47be78db008959893c21dcef3f0c6dbd558281c0ca35e0cb885",
+        "size": 39039
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_models.py",
+        "sha256": "5e66136240abf20c5be94dcb74a67f76ec32932ae91bc7b0b7c0ccbaf37e775f",
+        "size": 36852
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_oracle_execution.py",
+        "sha256": "99c0921062379eb9dd3e60de67d4aba7dcd5c4a016aa0fd4fded2dc3db1a0f92",
+        "size": 77845
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_oracle_models.py",
+        "sha256": "1207207c098e034d03823ee53e2139b5693e85c404a50e91e4479e0867ee8310",
+        "size": 25732
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_oracle_workspace.py",
+        "sha256": "848780a8ddd408850d7cfd9f10a6a972d90e08fd5eca23c848a196061ea20e24",
+        "size": 13151
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_routing.py",
+        "sha256": "9fdce94981e35ba8addf97aa26d9a1dd22a095f2f36d570bdd0d6dea9cec23d8",
+        "size": 14632
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_workflow.py",
+        "sha256": "601f986ec9c953a3939ea097f732cab3c4458d56cd10ab6ddb70f17799ff760d",
+        "size": 85292
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/physics_workflow_models.py",
+        "sha256": "543cffc438dea1d6337ea04ae13b7d23909a1d7a9779eba71fab5e07df2c01ce",
+        "size": 23906
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/prelaunch_authority.py",
+        "sha256": "a0ba2bd38a076e7fed8e66609a4080dc53da45c46cd1f3396493b427e3a04af3",
+        "size": 39795
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/qualified_campaign.py",
+        "sha256": "d3610ed9b9c6eefc07f530ba3170be9828c84b197238602c56a81c85af9d79bd",
+        "size": 55614
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/qualified_runner.py",
+        "sha256": "09026ab2e0423807415498e988f4867f5d309018420f46d37ba7772876b72c21",
+        "size": 6728
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/redaction.py",
+        "sha256": "9735336930ae48fdd0d28f585ffb121a2ba1123713394fd187a495724d4ae748",
+        "size": 5316
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/replay_campaign_engine.py",
+        "sha256": "f891eb07849e2a7dee17fd24ca94ce3762062943b881b04db1b214465ea04b6b",
+        "size": 100836
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/replay_campaign_models.py",
+        "sha256": "df76bfbf657b0b88ecf19b1db1b30cc991f70ac9bd9e30f8dae5a15427d16b08",
+        "size": 11999
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/replay_campaign_prompts.py",
+        "sha256": "41223476682642161365decf95deb083225610938c5d0dccd290413460c3843e",
+        "size": 8668
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/replay_campaign_sources.py",
+        "sha256": "0b8161592ee5db1e1474c62250fdae7f2b316803558996d0b896742d33d393ab",
+        "size": 14246
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/safe_git.py",
+        "sha256": "24e8c292d1701a060fb0f4594ca1580da62d76ffc4d2f10fef739c3fc377da1a",
+        "size": 5932
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/secure_cli.py",
+        "sha256": "956ee1d3a0a0964133f697dda2f1f87edf32467d35363327f030328f5cb1ef80",
+        "size": 5172
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/shadow_confidentiality.py",
+        "sha256": "30de39930dd2c9cdc2377d06f4bd43727fe69d0377f01d0452969e6b97d0dd5a",
+        "size": 2624
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/shadow_engine.py",
+        "sha256": "b6e424ba97891fa0edc67e4329c0fa67477a6c7c829dab609a11504a98fc1967",
+        "size": 137642
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/shadow_models.py",
+        "sha256": "706e07d70be1d520e04da1413f2980bda3017b5c08e90c15eea8285af5a9511b",
+        "size": 20941
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/shadow_prompts.py",
+        "sha256": "195b203e28ae7086fbff612545b4c8e59474d313d26737f27bff14bc45fd654e",
+        "size": 10812
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/shadow_review.py",
+        "sha256": "031e2c91f7b84093b523c260c9b59653ee186c812a4ed3c42e0142ad0c1f8b66",
+        "size": 7869
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/shadow_sources.py",
+        "sha256": "bba8dfa60a0344dd16581bf88ae21a82167a20d0fec9011aaf12896065c0e9bc",
+        "size": 41749
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/structured_outputs.py",
+        "sha256": "f31fe6cbb8f5c8a500b0254c036acc83dff884fb3752e7255bb288d42a533c21",
+        "size": 11624
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/test_runner.py",
+        "sha256": "abe407d106fe52a347bbb6e4bb1ac755608b2c0aaf2ea1caa88b38db50ee458d",
+        "size": 22003
+      },
+      {
+        "git_state": "untracked",
+        "path": "src/research_automation_supervisor/ux_acceptance.py",
+        "sha256": "8535422b4e207d1197b7b20d3002f474e2f6affe78fed211217aec50d9cdd40c",
+        "size": 8687
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/workflow_engine.py",
+        "sha256": "56623e925ab5a3a961138f9c294f3eca12a7a12cc835194780982252bf9536cb",
+        "size": 181466
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/workflow_integrity.py",
+        "sha256": "3fa498af599ccccbce1326f900c016e19fb029dce3484cefabcd4abd7724307c",
+        "size": 41646
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/workflow_models.py",
+        "sha256": "aa5630832e8b0f397df32034fada7e9be21454382f63dc736932df9a92867540",
+        "size": 43989
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/workflow_prompts.py",
+        "sha256": "9442153d035eae9736f6f70cbe96e816059a1ae5d11243bcf895aaee5837cb20",
+        "size": 13751
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/workflow_recovery.py",
+        "sha256": "8bd1f04a36cd5b105c55019a47b54e1c267faebcc730c16ecb290632e158961c",
+        "size": 66955
+      },
+      {
+        "git_state": "tracked",
+        "path": "src/research_automation_supervisor/workflow_recovery_models.py",
+        "sha256": "a68dde52aa484667baa96c711de242255c29ef31481f37190b29bedfb0aa11dc",
+        "size": 9602
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/__init__.py",
+        "sha256": "bbb24d036ce1ab99031e43bc580ce6b8d0fe968d86979f90fef4a011c1d42b5d",
+        "size": 66
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/custodian_helpers.py",
+        "sha256": "dc79fa5f9a80ce710428bfcf3434834ebac23ffa2b66e21afd11175489e60c95",
+        "size": 8942
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/auditor_result.json",
+        "sha256": "1cc5c9d3e388e7203a834dae4c83ce9f48e5fa7fdf39bb47a1a661309fc395ff",
+        "size": 513
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/campaign.yaml",
+        "sha256": "95cff5d317bce67e6dafa944d6b88922581c5423f28e1850da72a80947d744cd",
+        "size": 861
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/campaign_state.json",
+        "sha256": "16baa0eea1a416e4eb1bb0b6b4a2530a795b98418d859f199ec6717b62731f67",
+        "size": 1060
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/codex_action_record.json",
+        "sha256": "6b476c32c7994c1d4b9dbdb6557d589b45596ceac13ddd92fa24814c6c495876",
+        "size": 1463
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/compatibility_manifest.json",
+        "sha256": "98f55d545773d9fe8639cc77678f255ee05aa0f52258dd83082c1a3b5c1a416d",
+        "size": 1945
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/journal_semantic_forms.json",
+        "sha256": "efcfa02e527ec0328d0fe1b19c2306fc0a696bc2892c51d6d757e61be80da2e5",
+        "size": 161
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/ordinary_transition_sequence.json",
+        "sha256": "1db07c7c283f4177bfcf7fa31fb0a6bdfc45eeab1868b9fe7e701056a1707682",
+        "size": 1272
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/pending_action.json",
+        "sha256": "e4102f4cc19d066c9b9200a036e684ce059e5e862d26ebbf284d0649ec42b8b2",
+        "size": 1254
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/workflow_services.json",
+        "sha256": "d493350b875977226c0bf6e8ac7d21f15a3edfc85851b4b6c96d1efa8e7b2826",
+        "size": 391
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/compatibility_0_2_0/workflow_state.json",
+        "sha256": "c663d3f00f8f641b61a0f8d560b51411f7fc4f5bbd46320310fa70a6b7e45220",
+        "size": 1741
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/fake_codex.py",
+        "sha256": "0a885274182e295db59e42484d65abd25baffc74b3fdc46fbb89b201a9bddf25",
+        "size": 13109
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/convention_change_report.json",
+        "sha256": "b71fb5babddb8bcda5c4dc82ea63ccbcabc869e3ecec44bdbe0448d40e5af455",
+        "size": 2627
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/full_contract.yaml",
+        "sha256": "5b44f3681456a76fada1c2cda00857fc68ef412d2a183eb10275171319947c99",
+        "size": 2634
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/insufficient_evidence_report.json",
+        "sha256": "3461b4fba7d3d8ef0255cc6045e15d8c3e7bb3f0c607e46511914ec770a0ef7e",
+        "size": 2436
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/malformed_contract.yaml",
+        "sha256": "ca0489bc962c95819f965e116114a6a9e1164cf1ce4d23b0f68f1c3ca6f8358c",
+        "size": 43
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/malformed_report.json",
+        "sha256": "80f5b5ebbcb5f2d8ee11be1fa7ae3bf9042f44873e8699f88fb2dc9b5401fe38",
+        "size": 35
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/minimal_contract.yaml",
+        "sha256": "6a6f007279c4cc8a818e3a0e5371ac3a6c99d8646511ad6c708d7b87ea0bb6af",
+        "size": 1304
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/negative_cases.json",
+        "sha256": "4fb248bcf5029d9389da90f25030699f4c76a3b3784988a3d1db468c7f6cf689",
+        "size": 1297
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/ordinary_non_physics_substage.yaml",
+        "sha256": "07e2285cd68de8ff0ee5eeb9be21f7554ffa661e80809efc16636f000149eb24",
+        "size": 800
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/passing_report.json",
+        "sha256": "f025c1e162dd4259a06d3f7865e4c4e9d496a2dcce18f1b3fba07b02eae2df90",
+        "size": 2684
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/physics/repairable_report.json",
+        "sha256": "aa490b76042ba068fa7b27afa226934f953fc74c74444ff5c9b77c8b7d55c905",
+        "size": 2767
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/stage3_real_supervisor_result.json",
+        "sha256": "6dcf1fea7bd5b00aa3e5b76bcf3b847a5f32a3769240358b3a525df54a6f527a",
+        "size": 3199
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/fixtures/stage4_byte_size_role_confusion.json",
+        "sha256": "81be8426f8b8ed22a575a350f57d0ac704543086a7ca66c28c3e4c728b16aa72",
+        "size": 2490
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/live_shadow_helpers.py",
+        "sha256": "a9208f13798bb8ec8006ee9c260a00ffbca8513e08eaa552c6452bae3438b06b",
+        "size": 5172
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/pa5c4_acceptance_backend.py",
+        "sha256": "51846b7cad696333344d1bb7bb152846b8f5dc858ef85480c833da5be2780bcf",
+        "size": 1579
+      },
+      {
+        "git_state": "modified",
+        "path": "tests/pa5c4_acceptance_services.py",
+        "sha256": "5b9fa651812554cfd2ae63b9b06c9d16a2723f65242825b256a70aa81b063d56",
+        "size": 17679
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/real_windows_browser_acceptance.py",
+        "sha256": "f684c8f47aac24d691089c7387c948d8c2dd7c25b04b2c35b905f4cc1db407db",
+        "size": 17344
+      },
+      {
+        "git_state": "untracked",
+        "path": "tests/real_windows_operator_ux_acceptance.py",
+        "sha256": "602959025be581157c58e22124cfa24ddaa9cd6dcbb95262ca29ce01fc42f504",
+        "size": 42144
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/shadow_helpers.py",
+        "sha256": "bb424d4e2154a47b4a86504b369815907911608f52b4d03c5005fa426769ee0e",
+        "size": 7371
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_campaign_evaluation_split.py",
+        "sha256": "a9ed4ad9f50c7620e00aac19013e95f384776b060c1d7d67ef8f1dfaf9bb2613",
+        "size": 36873
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_cli.py",
+        "sha256": "5785aaaea4d0a2f34b199c5ddec4253b965847cc4331c3460d6e4b4c02f01f57",
+        "size": 11993
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_codex_adapter.py",
+        "sha256": "73cedb3f91929f249e2ba7576e840444aca4b5930e9d63826199d846b28923fe",
+        "size": 49663
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_codex_models.py",
+        "sha256": "1f3bfb9288b42264bf1d4cdbd447bc9679f224087f7c8bacf051a13d5c0fefe5",
+        "size": 8775
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_contract.py",
+        "sha256": "c81a5b7d5a58e8a586ac9270923c35e23b300094a5a5e7c83c4625febc743a65",
+        "size": 9096
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_core_authority_service.py",
+        "sha256": "5eb6ec6cbb5b27a267d0664cabe8a85318e80203c5dac667a838019f1398b945",
+        "size": 29601
+      },
+      {
+        "git_state": "modified",
+        "path": "tests/test_custodian.py",
+        "sha256": "cced5d69f0ba9a61454660030fb2d0cd23eec07531fc037281f498bacee0520c",
+        "size": 20476
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_custodian_models.py",
+        "sha256": "21e4f2dde2b423aab4f35b8b4e0bc5ed3eab169ffa44b2c6d57b12d4228fbfab",
+        "size": 7749
+      },
+      {
+        "git_state": "modified",
+        "path": "tests/test_custodian_server.py",
+        "sha256": "2e5356355b52f049e227ee0599c2318eabb7446b0c513b29f77ef4aa4c116803",
+        "size": 7804
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_direct_historical_replay.py",
+        "sha256": "1960ee1e61b6463f2ae814b13459a5bb70ef84bb22b804c2257d47fd0510dc1a",
+        "size": 15352
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_doctor.py",
+        "sha256": "001fb75e87a2a47f1986a543d5834595e5eb88aca2c7183de7e078ecb8f698b1",
+        "size": 17493
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_documentation.py",
+        "sha256": "885e3bf37088bb7fe9ee16b03275dce1fe66ba864bcce354fb18d5eab540e4af",
+        "size": 3545
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_example_bundle.py",
+        "sha256": "36e8ce205feedfdfc4579b44b34d8a48443511c1d10231eacbf9a9748e35b39d",
+        "size": 2324
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_git_evidence.py",
+        "sha256": "79b57b82576df9521598b415c3444a6e062d28c893695eb234e69902baf10fe8",
+        "size": 3591
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_gitless_linked_worktree.py",
+        "sha256": "d1696cc18117f5664df5c5830c71798966f86fa2025ece904435e8496484a55f",
+        "size": 17393
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_cli.py",
+        "sha256": "4fbe453b04a90667791c49da36a25f855ca246922bd039adfb63a7d9894fa7ac",
+        "size": 41422
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_engine.py",
+        "sha256": "51ac76c356a2c4d2ae60d913b4f76f6a5fc78401aadc975609ded0173be18537",
+        "size": 89395
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_isolation.py",
+        "sha256": "cc59b6408f97d89fb9c9959a9942da4bff8081bd50948060b2ca59a04db86368",
+        "size": 104466
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_models.py",
+        "sha256": "6d172395dc91d0c05dba4357eabf3f95797f0c4738e9fca64c9835a89bb450f1",
+        "size": 1955
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_prompts.py",
+        "sha256": "5572095cfe1ad700c6d815ec1ecb227304db58b970292392fb7e012f87c942e7",
+        "size": 4960
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_review.py",
+        "sha256": "8e2287b0a307d698a05c1336ac2d1abcc8f1459efbdb3922387d08084f6001d0",
+        "size": 842
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_live_shadow_sources.py",
+        "sha256": "5d2d71f98adb7ec42be436568813e6a83b96dbf3e4289169e0339c0088ffd192",
+        "size": 3103
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_offline_evaluation_package.py",
+        "sha256": "a5f002cb4e9022d794a18c68173aaef7f0f696dbbf2b62857af77644e1a7d984",
+        "size": 118951
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_pa5c4_transactional_core.py",
+        "sha256": "e3daa9e2f94d408346869cd0f66e479e8cb70381cdf21a8bc90d64c096fc42e1",
+        "size": 25275
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_auditor_cli.py",
+        "sha256": "cbde977a0af45493862b15951ac2e020a49c474c898d2d537642064630e2a9c7",
+        "size": 4968
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_auditor_execution.py",
+        "sha256": "93569167ef44b01b1376fc992e18bf4396e330a8f11270e2933ddd81c4c4f80a",
+        "size": 51999
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_auditor_models.py",
+        "sha256": "4c5ccd036e3f9fc5e375aae36bec78151c40fdf59ffa60a11a0a0510151c2b67",
+        "size": 2440
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_auditor_projection.py",
+        "sha256": "016bc07271fdb568b12d01238be2df368d395e096b4752e70bbc88d4529199eb",
+        "size": 7367
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_auditor_prompts.py",
+        "sha256": "efdae4192f73a33bfbc86d12ab8dc444105700e636e174bd28dbaec6f76c77b6",
+        "size": 4512
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_benchmark_blindness.py",
+        "sha256": "7f0515f29a1d8c169b223e5a980ba059af82ca6424c6e878ee378877890ba43e",
+        "size": 37062
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_benchmark_campaign.py",
+        "sha256": "2221cf5451292563baab926eade8e0987c486f6f29e96a4bc7a0ffa2cd81eb22",
+        "size": 33703
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_benchmark_scoring.py",
+        "sha256": "b25611313c9e699d2fb5bccd604e3d16075c20b2a8312ac3cd451c8a75b7f5e9",
+        "size": 29862
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_cli.py",
+        "sha256": "bcad997363682a097c301de1008fa239373b238ee30715f213b98774f8d1d091",
+        "size": 3192
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_compatibility_0_2_0.py",
+        "sha256": "0f10bf5ab1f59f0e43423fc9c225f72314e9cd2e09f6ba06385ce72106afadc7",
+        "size": 12039
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_models.py",
+        "sha256": "5d1a2cdcae336c4a8bac57f2fa1be54b2ad5dffb570face1f118fd7792f79807",
+        "size": 11674
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_oracle_cli.py",
+        "sha256": "365f56a50476e16aef42da27aa3953dc9a1e721f35eed7c8e1b717d95ff02d4a",
+        "size": 2867
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_oracle_execution.py",
+        "sha256": "ac6e9d3893ec37cdf857eb47ac89fead6a3c41bd079ba5a6c92e84386c6386e9",
+        "size": 36513
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_routing.py",
+        "sha256": "f7eb1f4d7a745979f8132da29e9124c59ceb56409451fd9476200cbc5a926570",
+        "size": 10797
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_physics_workflow.py",
+        "sha256": "84b528bbe7ee0c6614cdcc5f40cf1491a5548f8eb43b9ee702615c52d31ab2b3",
+        "size": 39818
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_prelaunch_authority.py",
+        "sha256": "7ef9bd7684cb93221db6808ff4d03e6f977f3a34a0a5820967cc86ac416cc1d2",
+        "size": 16175
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_qualified_campaign.py",
+        "sha256": "f79ca5514e206fc7273ddf6e5cbb48695c39a5a8755cb7b2c5ea7d580dd44f67",
+        "size": 6261
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_redaction.py",
+        "sha256": "2bcb05e8d0e078304c1cd215130d11a4327777ee0263f7322b8fe16150ab9dbf",
+        "size": 6111
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_replay_campaign.py",
+        "sha256": "8d71543a5545229b087e59a68eb0f733c5ed43a170685269e77fc6a6dc5a77e2",
+        "size": 92763
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_safe_git.py",
+        "sha256": "8624c4310f9160ecca48e1f96d164f163b8ba34f65eb5272036c14723a5659de",
+        "size": 10427
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_cli.py",
+        "sha256": "349b84a4899503471464fb573cb7356d1af48f1655ba5b60884ea333f50e5a3d",
+        "size": 18793
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_confidentiality.py",
+        "sha256": "8df7e009c9636f7d0a296a35a340f2f1ed48c5e66bbb04083295b71072b210e6",
+        "size": 13643
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_engine.py",
+        "sha256": "b5f0acba95767a812395b428b2b7976dc9d2eec927d574e68a017930d4ebc9d2",
+        "size": 47235
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_models.py",
+        "sha256": "65d76a6b918fcb1e7c20b8f91ec372b85df862dcefb41cfde1dd917e6da51889",
+        "size": 8851
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_prompts.py",
+        "sha256": "cfbc2d6f6d0369b30f491805ca98d86ad5c58c44b27980a8209e74ff04c4105a",
+        "size": 5213
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_review.py",
+        "sha256": "8f449553391bf6409d9c8bcf96ac2a70a10e0e0ef7628350e368974c01117e6b",
+        "size": 13600
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_shadow_sources.py",
+        "sha256": "5ae1c70d06c69e090659bd1c2f7f158d20be5b8031aecca3e22dde77232d7837",
+        "size": 19110
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_structured_outputs.py",
+        "sha256": "a58ab39fe55a3981446843b1bc7763bca8cf7fdf982c762759aa4b9f7c330ef5",
+        "size": 6276
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_test_runner.py",
+        "sha256": "934b9f20f571c7f2d76a02ec66bda628d86536213942dcb97d2a618a01587a8e",
+        "size": 4842
+      },
+      {
+        "git_state": "untracked",
+        "path": "tests/test_ux_acceptance.py",
+        "sha256": "c2c8a2bb079c4e29307ccc6652391f6a43a3fba54ff0c18c6862600a5a34c19e",
+        "size": 4942
+      },
+      {
+        "git_state": "modified",
+        "path": "tests/test_windows_launcher.py",
+        "sha256": "6740096402e363ba45a62108e3e8d5d5ee7f469c717be585571d17313f28126a",
+        "size": 12980
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_cli.py",
+        "sha256": "e3fba2499ed7f785c7f11ea3d48339b245a368421312ba1bced223de5950224e",
+        "size": 3832
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_engine.py",
+        "sha256": "e1fb16592f0597f89443fe285d6b1a67ac5fe651be9269fb37f13c4ea14dd8ca",
+        "size": 18937
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_input_symlinks.py",
+        "sha256": "7755999da64fca12da16a96fe65be29ed445c862d6d760f56e48847e978ba5a2",
+        "size": 11766
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_models.py",
+        "sha256": "de0c1f66bb86ed46446377a5974ab02ae68629c555daf6cd03dc0ca853ac9846",
+        "size": 7809
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_prompts.py",
+        "sha256": "db7e4855bd9c5acfda375e949d3756aee8a153f1f24e7aea5029daf93273929e",
+        "size": 3697
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_recovery_integrity.py",
+        "sha256": "7ea7e1ec61ec409b94622b1dbe8d772843e6d5ffe44de2fd0a9183a4828ece0c",
+        "size": 52097
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/test_workflow_recovery_ux.py",
+        "sha256": "882af24c8e303c4d9d0f32d19fcdd67cd325dcbd10e7666e2efaf7449e696eb5",
+        "size": 40573
+      },
+      {
+        "git_state": "tracked",
+        "path": "tests/workflow_helpers.py",
+        "sha256": "b1783dd757f7034d2fd648e9386b99213631c8470429897d0c68f53595865ce1",
+        "size": 5599
+      }
+    ],
+    "generated_evidence_excluded": [],
+    "sha256": "05e5a3520e0c70f929da6cff3cf45f7ac270410b9ed29fe1546d73904019e72f"
+  },
+  "completion": {
+    "campaign_public_id": "campaign-e2a739eec9bcbccc87adbc42",
+    "completion_state_sha256": "009df56173cd95261a7589b0e5f2ddf4913e1aa9ded14df8a12b8a6748ee35a5",
+    "completion_verified": true,
+    "final_report_opened": true
+  },
+  "evidence_sha256": "6897d0c4a0d830e49995a9b745f9631182426a3b866e97d97cf5ea597285c385",
+  "evidence_type": "UXAcceptanceEvidenceV1",
+  "executable_identities": [
+    {
+      "path": "Research Supervisor.vbs",
+      "role": "launcher",
+      "sha256": "16fcb9ad8cd68ab183c8e35abd8db9b0c98ed7a00d959a60d0a72d9abb6a2070"
+    },
+    {
+      "path": "launch-research-supervisor.ps1",
+      "role": "launcher_script",
+      "sha256": "2f2aade24fcce8f06d2aa42a47e24cae1830629f88fb6ee1e7b2a99b60ab55fe"
+    },
+    {
+      "path": "scripts/custodian-bootstrap.sh",
+      "role": "bootstrap",
+      "sha256": "a7df15ede545d460b85942835990d114c9f19edc58566ccd1f4756d82694c45e"
+    },
+    {
+      "path": "src/research_automation_supervisor/custodian_server.py",
+      "role": "ui_backend",
+      "sha256": "67168de2268cfc5add1c221eeb3a12840126a2e13ef2a075bc2cdb2559e11d6a"
+    },
+    {
+      "path": "src/research_automation_supervisor/core_authority_service.py",
+      "role": "core_seam",
+      "sha256": "57a45d3fafa1f334e4725775c59a912ef30212050fd6d0c97a144c9438fc6147"
+    },
+    {
+      "path": "tests/pa5c4_acceptance_backend.py",
+      "role": "ui_backend",
+      "sha256": "51846b7cad696333344d1bb7bb152846b8f5dc858ef85480c833da5be2780bcf"
+    }
+  ],
+  "exported_bundle_sha256": "49ab9c40cd520dec9f3ced97781c9963e4340fb92cb37ad68876edd696afaa74",
+  "failure_dialog_screenshot_sha256": "b254e8e69e623e468cb116d9bc70310e5ff95a726ea6ad2c897c58a78d45444a",
+  "failure_dialog_title": "Research Supervisor needs attention",
+  "head": "084cf62011b9da0793b441e29d0e5977e7d47584",
+  "human_action": {
+    "request_sha256": "5ec6c8f3533fb6793d33bd1c09f66de2742fd236ea8c56e81f5285afea4956be",
+    "response_sha256": "f2f27f4eda24547c0efa011db23f64162af8513c70ac43c6ed7b0c478afb7c53",
+    "response_type": "contract_decision",
+    "safe_evidence_opened": true,
+    "submitted_through_ui": true
+  },
+  "launcher_invocations": [
+    {
+      "backend_reused": false,
+      "exit_code": 0,
+      "launcher": "Research Supervisor.vbs",
+      "observed_at": "2026-08-18T08:05:30.386770+00:00",
+      "readiness_instance": "c8e3f12a67964a2eb4cc456fa5b429801a4005854285497b9f988a0daa23fea3",
+      "sequence": 1,
+      "windows_execution_path": true
+    },
+    {
+      "backend_reused": true,
+      "exit_code": 0,
+      "launcher": "Research Supervisor.vbs",
+      "observed_at": "2026-08-18T08:05:32.167632+00:00",
+      "readiness_instance": "dac83764716a463899f8b0d3c60af126c6ed44d1a11b45a0ba148ef49ce0ed4c",
+      "sequence": 2,
+      "windows_execution_path": true
+    },
+    {
+      "backend_reused": false,
+      "exit_code": 0,
+      "launcher": "Research Supervisor.vbs",
+      "observed_at": "2026-08-18T08:05:37.815844+00:00",
+      "readiness_instance": "9a454cf955c444899836d501ca8dbbec9916ccfa7f5c42838eff9288c944b170",
+      "sequence": 3,
+      "windows_execution_path": true
+    },
+    {
+      "backend_reused": true,
+      "exit_code": 0,
+      "launcher": "Research Supervisor.vbs",
+      "observed_at": "2026-08-18T08:05:40.169666+00:00",
+      "readiness_instance": "d95897c56c4c4b48a0a22aa6e80d3e4e3f318c277c9645ed90aff9401c3305d8",
+      "sequence": 4,
+      "windows_execution_path": true
+    },
+    {
+      "backend_reused": true,
+      "exit_code": 0,
+      "launcher": "Research Supervisor.vbs",
+      "observed_at": "2026-08-18T08:05:52.616554+00:00",
+      "readiness_instance": "9fa8dfbfb8f044d19650f1364ceb1e69a9239e42cd7640d5909f21e674f785f6",
+      "sequence": 5,
+      "windows_execution_path": true
+    }
+  ],
+  "notification": {
+    "durable_notification_sha256": "c24bbc01b5aa38960c048a07d975c8a2e5946bc6f61600ae22f72cf43baef729",
+    "mechanism": "browser-notification-and-visible-status",
+    "permission": "granted",
+    "screenshot_sha256": "ea718eb033a00ea1b521725160d6b754cb319cad0a25f3aba5bad05f4f6fd620",
+    "title": "Campaign completed",
+    "visible_text": "Campaign completed \u2014 PA-5C4-U real operator campaign \u2014 Verified durable completion and result evidence are available"
+  },
+  "qualified": true,
+  "schema_version": 1,
+  "screenshot_hashes": {
+    "browser_and_backend_restarted": "6a7bdb2fbf0423eaa4aa909a2a009c0ac9af19810638d83cf15c7d1248c27383",
+    "campaign_bundle_exported": "171cdad0aa261e329bc7e36aeab454495e29c1148c8e39c0efc4e6401a759fbd",
+    "completion_notification_and_results": "ea718eb033a00ea1b521725160d6b754cb319cad0a25f3aba5bad05f4f6fd620",
+    "default_browser_opened": "e87a6648f6bdcceadf28f5be1585a782d98c8e304a2e90ae4c807d6ffec565da",
+    "environment_blocked": "6805d59121c94bbfec6059c3b94336e17028402f5f2bab76d887cafaa5e2fb1b",
+    "human_action_inbox": "c4804ef05ac1cd68996036654b6678caaaf8448740f581ac0d8a8f210d7572ab",
+    "human_readable_preview": "9f4de651c95b9e3d9e014735b9f1b5032be10d1ab2faeb854a2171892c9e5677",
+    "recoverable_interruption": "571115315b19986ec35a5234f36f2a69b9da145c91dc4f94041ed9c3b87db860",
+    "safe_human_action_evidence": "04f11b24262c87415998203ece58651dccf4a0db9f48444c405e28ea0e8436be",
+    "scientific_report_opened": "a4a0bd07e8374b93d25c2a236877659db612c8ded90e5459cd24b2d814f5f4fa",
+    "wsl_backend_failure_dialog": "b254e8e69e623e468cb116d9bc70310e5ff95a726ea6ad2c897c58a78d45444a"
+  },
+  "stage": "PA-5C4-U",
+  "transcript": [
+    {
+      "action": "Double-click Research Supervisor.vbs using Windows Explorer semantics",
+      "observed_at": "2026-08-18T08:05:31.670124+00:00",
+      "screenshot_sha256": "e87a6648f6bdcceadf28f5be1585a782d98c8e304a2e90ae4c807d6ffec565da",
+      "sequence": 1,
+      "visible_result": "The Windows default browser displayed Research Supervisor (Research Supervisor - Google Chrome)."
+    },
+    {
+      "action": "Enable browser notifications",
+      "observed_at": "2026-08-18T08:05:34.745043+00:00",
+      "screenshot_sha256": null,
+      "sequence": 2,
+      "visible_result": "The visible browser status confirmed that notifications are enabled."
+    },
+    {
+      "action": "Complete New Campaign and choose Preview",
+      "observed_at": "2026-08-18T08:05:36.416581+00:00",
+      "screenshot_sha256": "9f4de651c95b9e3d9e014735b9f1b5032be10d1ab2faeb854a2171892c9e5677",
+      "sequence": 3,
+      "visible_result": "The browser showed a plain-language repository, contract, plan, task, and environment preview."
+    },
+    {
+      "action": "Choose Start",
+      "observed_at": "2026-08-18T08:05:36.904336+00:00",
+      "screenshot_sha256": "6805d59121c94bbfec6059c3b94336e17028402f5f2bab76d887cafaa5e2fb1b",
+      "sequence": 4,
+      "visible_result": "Start froze the inputs and displayed a plain-language environment action card before execution."
+    },
+    {
+      "action": "Terminate and relaunch the Custodian backend",
+      "observed_at": "2026-08-18T08:05:37.974723+00:00",
+      "screenshot_sha256": null,
+      "sequence": 5,
+      "visible_result": "The launcher started a new Custodian process and preserved the frozen campaign."
+    },
+    {
+      "action": "Terminate the Windows browser process",
+      "observed_at": "2026-08-18T08:05:39.672208+00:00",
+      "screenshot_sha256": null,
+      "sequence": 6,
+      "visible_result": "Every acceptance-profile browser process exited; no page or tab substitution was used."
+    },
+    {
+      "action": "Relaunch Research Supervisor after browser termination",
+      "observed_at": "2026-08-18T08:05:41.896760+00:00",
+      "screenshot_sha256": "6a7bdb2fbf0423eaa4aa909a2a009c0ac9af19810638d83cf15c7d1248c27383",
+      "sequence": 7,
+      "visible_result": "A new real browser process reopened the durable blocked campaign without a run ID or shell command."
+    },
+    {
+      "action": "Choose Continue after environment recovery",
+      "observed_at": "2026-08-18T08:05:43.611119+00:00",
+      "screenshot_sha256": "571115315b19986ec35a5234f36f2a69b9da145c91dc4f94041ed9c3b87db860",
+      "sequence": 8,
+      "visible_result": "The browser explained the recoverable interruption and offered safe Resume through Continue."
+    },
+    {
+      "action": "Resume through the browser UI",
+      "observed_at": "2026-08-18T08:05:46.435067+00:00",
+      "screenshot_sha256": "c4804ef05ac1cd68996036654b6678caaaf8448740f581ac0d8a8f210d7572ab",
+      "sequence": 9,
+      "visible_result": "The Human Action Inbox explained what happened, what was needed, and what would happen next."
+    },
+    {
+      "action": "Open relevant safe evidence",
+      "observed_at": "2026-08-18T08:05:46.848047+00:00",
+      "screenshot_sha256": "04f11b24262c87415998203ece58651dccf4a0db9f48444c405e28ea0e8436be",
+      "sequence": 10,
+      "visible_result": "The browser displayed independent evidence that the frozen authority remained intact."
+    },
+    {
+      "action": "Submit approval, choice, free-text note, and file through the UI",
+      "observed_at": "2026-08-18T08:05:51.171476+00:00",
+      "screenshot_sha256": "ea718eb033a00ea1b521725160d6b754cb319cad0a25f3aba5bad05f4f6fd620",
+      "sequence": 11,
+      "visible_result": "The browser displayed a Campaign completed notification and verified result counts, stage, commit, reports, and summary."
+    },
+    {
+      "action": "Open Scientific Report",
+      "observed_at": "2026-08-18T08:05:51.567917+00:00",
+      "screenshot_sha256": "a4a0bd07e8374b93d25c2a236877659db612c8ded90e5459cd24b2d814f5f4fa",
+      "sequence": 12,
+      "visible_result": "The final report opened in the real browser and showed verified durable completion."
+    },
+    {
+      "action": "Choose Export Campaign Bundle",
+      "observed_at": "2026-08-18T08:05:52.078941+00:00",
+      "screenshot_sha256": "171cdad0aa261e329bc7e36aeab454495e29c1148c8e39c0efc4e6401a759fbd",
+      "sequence": 13,
+      "visible_result": "The UI visibly confirmed the downloadable ZIP result bundle."
+    },
+    {
+      "action": "Double-click launcher with WSL unavailable",
+      "observed_at": "2026-08-18T08:05:54.093120+00:00",
+      "screenshot_sha256": "b254e8e69e623e468cb116d9bc70310e5ff95a726ea6ad2c897c58a78d45444a",
+      "sequence": 14,
+      "visible_result": "Windows displayed the real 'Research Supervisor needs attention' dialog and kept campaign state unchanged."
+    }
+  ],
+  "windows_version": "Microsoft Windows NT 10.0.26200.0",
+  "wsl_version": "WSL \u7248\u672c: 2.7.10.0\n\u5185\u6838\u7248\u672c: 6.18.33.2-2\nWSLg \u7248\u672c: 1.0.73.2\nMSRDC \u7248\u672c: 1.2.6676\nDirect3D \u7248\u672c: 1.611.1-81528511\nDXCore \u7248\u672c: 10.0.26100.1-240331-1435.ge-release\nWindows: 10.0.26200.9168"
+}

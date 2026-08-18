@@ -67,8 +67,7 @@ try {
     $Bootstrap = "$LinuxProjectRoot/scripts/custodian-bootstrap.sh"
     $Result = @(& $WslExecutable --exec /bin/sh $Bootstrap $LinuxProjectRoot $Mode $ReadinessInstance $LinuxDataRoot $LinuxScenario $Port 2>&1)
     if ($LASTEXITCODE -ne 0) {
-        $Detail = ($Result -join "`n")
-        Show-SetupMessage "Research Supervisor needs attention" "The WSL backend could not start safely. Try Research Supervisor again or ask your administrator for help. No scientific campaign state changed.`n`nTechnical detail: $Detail"
+        Show-SetupMessage "Research Supervisor needs attention" "What happened?`r`nResearch Supervisor could not start WSL.`r`n`r`nWhat do you need from me?`r`nChoose OK, make sure WSL is working, then double-click Research Supervisor again.`r`n`r`nWhat happens next?`r`nYour campaign remains safe. If it still does not open, ask your administrator for help.`r`nNo scientific campaign state changed."
         exit $LASTEXITCODE
     }
     $Ready = $Result | Where-Object { $_ -like "RAS_LAUNCH_READY|*" } | Select-Object -Last 1
@@ -115,6 +114,6 @@ try {
         Start-Process $Url
     }
 } catch {
-    Show-SetupMessage "Research Supervisor needs attention" "The local application could not be launched through WSL. No scientific campaign state changed.`n`nTechnical detail: $($_.Exception.Message)"
+    Show-SetupMessage "Research Supervisor needs attention" "What happened?`r`nResearch Supervisor could not start WSL.`r`n`r`nWhat do you need from me?`r`nChoose OK, make sure WSL is working, then double-click Research Supervisor again.`r`n`r`nWhat happens next?`r`nYour campaign remains safe. If it still does not open, ask your administrator for help.`r`nNo scientific campaign state changed."
     exit 2
 }

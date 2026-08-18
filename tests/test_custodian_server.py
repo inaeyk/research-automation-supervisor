@@ -94,6 +94,17 @@ def test_zero_shell_http_acceptance_journey_and_progressive_disclosure(tmp_path:
         assert "proof_sha256" not in page
         assert "Content-Security-Policy" in headers
         assert 'role="status" aria-live="polite"' in page
+        assert 'id="browserNotice"' in page
+        assert "What happened?" in page
+        assert "What do you need from me?" in page
+        assert "What happens after I answer?" in page
+        assert "Reports and evidence" in page
+        assert "Final commit" in page
+        assert "Human Action Inbox" in page
+        assert "Repository state" in page
+        assert "Repository version: <code>" in page
+        assert "Campaign bundle ready" in page
+        assert "link.download=data.file_name" in page
         assert 'class="campaign-card"' in page
         assert "invalidatePreview" in page
         assert "currentRequest.response_type==='free_text'" in page

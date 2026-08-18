@@ -122,6 +122,8 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
         return get_start_intent(self.core_root, launch_intent_id)
 
     def list_operator_campaigns(self) -> tuple[CampaignLaunchSummaryV1, ...]:
+        if not self.core_root.exists():
+            return ()
         return list_operator_campaigns(self.core_root)
 
     def verify_start_intent(
@@ -174,6 +176,7 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
                 "bundle_sha256": bundle.bundle_sha256,
                 "launch_intent_sha256": material.launch_intent_sha256,
                 "prepared_workspace": bundle.repository.prepared_workspace,
+                "final_commit": bundle.repository.baseline_commit,
             },
         )
         return os.getpid()
@@ -203,7 +206,7 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
                 allowed_options=(
                     HumanActionOptionV1(
                         option_id="continue_existing",
-                        label="Continue frozen authority",
+                        label="Approve and continue frozen authority",
                         consequence="No scientific input changes.",
                     ).model_dump(mode="json"),
                     HumanActionOptionV1(
@@ -299,10 +302,19 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
                     "active_request_sha256": state["request_sha256"],
                 }
             )
-        report = SafeEvidenceLinkV1(
-            token=self._token(str(state["launch_intent_sha256"]), "report"),
-            label="Final report",
-            description="Verified final operator report.",
+        links = tuple(
+            SafeEvidenceLinkV1(
+                token=self._token(str(state["launch_intent_sha256"]), kind),
+                label=label,
+                description=description,
+            ).model_dump(mode="json")
+            for kind, label, description in (
+                ("scientific-report", "Scientific Report", "Verified final scientific report."),
+                ("worker-reports", "Worker Reports", "Worker execution reports."),
+                ("auditor-reports", "Auditor Reports", "Independent Auditor reports."),
+                ("changed-files", "Changed Files / Diff", "Verified repository changes."),
+                ("provenance", "Provenance", "Frozen inputs and qualified execution lineage."),
+            )
         )
         return OperatorCampaignProjectionV1.model_validate(
             {
@@ -314,13 +326,14 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
                 "result": CampaignResultSummaryV1(
                     outcome="Completed with verified durable evidence",
                     final_stage="Qualified completion",
+                    final_commit=str(state["final_commit"]),
                     worker_run_count=1,
                     auditor_run_count=1,
                     repair_count=0,
                     human_decision_count=1,
                     executive_summary="The real launcher/browser acceptance campaign completed.",
                 ).model_dump(mode="json"),
-                "result_links": (report.model_dump(mode="json"),),
+                "result_links": links,
                 "completion_verified": True,
             }
         )
@@ -338,11 +351,19 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
         intent = str(state["launch_intent_sha256"])
         if token == self._token(intent, "evidence"):
             return "text/plain; charset=utf-8", b"Independent evidence: frozen authority intact.\n"
-        if token == self._token(intent, "report") and state["phase"] == "completed":
-            return (
-                "text/markdown; charset=utf-8",
-                b"# Final report\n\nVerified durable qualification completion.\n",
-            )
+        completed_artifacts = {
+            "scientific-report": (
+                b"# Scientific Report\n\nVerified durable qualification completion.\n"
+            ),
+            "worker-reports": b"# Worker Reports\n\nOne deterministic Worker seam completed.\n",
+            "auditor-reports": b"# Auditor Reports\n\nIndependent acceptance evidence passed.\n",
+            "changed-files": b"# Changed Files / Diff\n\nNo repository changes were required.\n",
+            "provenance": b"# Provenance\n\nFrozen launch authority and durable state verified.\n",
+        }
+        if state["phase"] == "completed":
+            for kind, content in completed_artifacts.items():
+                if token == self._token(intent, kind):
+                    return "text/markdown; charset=utf-8", content
         raise RuntimeError("qualification artifact is not allowlisted")
 
     def export(
@@ -358,7 +379,13 @@ class DeterministicCampaignRunner(SubprocessQualifiedRunner):
             raise RuntimeError("qualification campaign is not complete")
         destination.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(destination, "x") as archive:
-            archive.writestr("final-report.md", "# Final report\n\nVerified completion.\n")
+            archive.writestr(
+                "scientific-report.md", "# Scientific Report\n\nVerified completion.\n"
+            )
+            archive.writestr("worker-reports.md", "# Worker Reports\n\nWorker seam complete.\n")
+            archive.writestr("auditor-reports.md", "# Auditor Reports\n\nAudit seam complete.\n")
+            archive.writestr("changed-files.diff", "No repository changes.\n")
+            archive.writestr("provenance.md", "# Provenance\n\nFrozen authority verified.\n")
         return destination
 
     def repository(

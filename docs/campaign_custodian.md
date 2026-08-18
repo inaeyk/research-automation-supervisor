@@ -1,6 +1,7 @@
-# Campaign Custodian and zero-shell UX (PA-5C4)
+# Campaign Custodian and real zero-shell UX (PA-5C4-U)
 
-PA-5C4 adds a local, low-privilege Campaign Custodian around the qualified Supervisor.
+PA-5C4 adds a local, low-privilege Campaign Custodian around the qualified Supervisor;
+PA-5C4-U qualifies its real Windows/WSL/browser operator journey.
 It changes the operator experience, not scientific authority. A person can create,
 start, supervise, resume, and inspect a campaign without a terminal, virtual
 environment, Git branch operation, run identity, configuration file, or direct Codex
@@ -57,6 +58,11 @@ The default path is:
 9. After verified durable completion, open the Scientific Report, Worker Reports,
    Auditor Reports, changed-file evidence, or provenance; open the prepared repository;
    or export the verified campaign bundle.
+
+At every blocked or human-action pause, the default card answers **What happened?**,
+**What do you need from me?**, and **What happens after I answer?**. Technical codes,
+run identities, hashes, and proof internals remain under **Technical details** or in
+the qualified evidence rather than the normal path.
 
 No user step contains a shell command or YAML/JSON editing.
 
@@ -302,7 +308,7 @@ CSRF/loopback browser isolation, static Custodian authority imports, unsafe reco
 cards, duplicate Start, browser/Custodian restart, authentication setup, result export,
 and refusal to synthesize completed status from an unverified state file.
 
-`tests/real_windows_browser_acceptance.py` starts Windows Script Host on the actual
+The inherited `tests/real_windows_browser_acceptance.py` starts Windows Script Host on the actual
 `Research Supervisor.vbs`, which starts the real WSL backend and Windows Chrome. The
 test attaches Playwright to that Windows browser and performs no operator backend API
 calls. It starts with no run ID, terminal, activated environment, distro name, branch,
@@ -312,3 +318,25 @@ completion status, report access, and export. It also stops and restarts the bac
 restarts the browser page, reuses an already-running backend, and exercises the Windows
 plain-language WSL failure path. The machine-readable result is
 `docs/validation/pa5c4-real-browser-evidence.json`.
+
+PA-5C4-U adds `tests/real_windows_operator_ux_acceptance.py`. It first invokes the VBS
+launcher without a browser override and observes the application in the actual Windows
+default browser. It then uses a separate real Windows Chrome profile only to make
+independent observations through the visible UI. The journey terminates the top-level
+Chrome process and proves it absent before relaunching a disjoint PID; terminates and
+restarts the Custodian PID; revalidates the frozen Core intent and input objects; uses
+Continue for safe Start/Resume; inspects Human Action evidence; submits a choice,
+free-text note, and file; observes the visible completion notification; opens the
+Scientific Report; and exports the campaign ZIP. A separate VBS invocation uses a
+missing WSL executable, observes the real Windows message-box title, captures it, and
+dismisses it. No operator action calls a backend API.
+
+The strict `UXAcceptanceEvidenceV1` record contains the branch/base HEAD, a sorted
+path/content manifest of the complete candidate that was actually run (including
+uncommitted source files), executable identities, Windows/WSL/browser versions,
+chronological interactions and launcher receipts, browser/backend lifecycle evidence,
+Human Action request/response identities, durable completion and notification
+identities, screenshot hashes, and the exported ZIP hash. Its own canonical SHA-256 is
+validated on load. The candidate evidence is
+`docs/validation/pa5c4u-real-operator-evidence.json`; screenshots are in
+`docs/validation/pa5c4u-real-operator/`.
