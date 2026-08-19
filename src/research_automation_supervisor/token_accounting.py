@@ -38,14 +38,32 @@ Sha256Tuple = Annotated[tuple[Sha256, ...], BeforeValidator(_tuple_from_json)]
 
 
 class CodexTurnUsageV1(BaseModel):
-    """The documented ``turn.completed.usage`` object, without inference."""
+    """Required runtime counters plus validated additive counter extensions."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(extra="allow", frozen=True, strict=True)
 
     input_tokens: Annotated[int, Field(ge=0)]
     cached_input_tokens: Annotated[int, Field(ge=0)]
+    # Retain the Codex 0.147 counter at the event boundary. It is intentionally
+    # not promoted into the stable V1 receipt totals, where doing so would
+    # change receipt identities and invite double-counting.
+    cache_write_input_tokens: Annotated[int, Field(ge=0)] | None = None
     output_tokens: Annotated[int, Field(ge=0)]
     reasoning_output_tokens: Annotated[int, Field(ge=0)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_additive_counters(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        for name, counter in value.items():
+            if name in cls.model_fields:
+                continue
+            if isinstance(counter, bool) or not isinstance(counter, int) or counter < 0:
+                raise ValueError(
+                    f"additive usage counter {name!r} must be a nonnegative integer"
+                )
+        return value
 
     @model_validator(mode="after")
     def validate_cached_subset(self) -> CodexTurnUsageV1:

@@ -78,15 +78,34 @@ def _receipt(
     )
 
 
-def test_documented_turn_completed_usage_schema_is_strict() -> None:
-    usage = CodexTurnUsageV1.model_validate(_usage(100, 40, 20, 7))
+def test_turn_completed_usage_requires_core_and_accepts_additive_counters() -> None:
+    usage = CodexTurnUsageV1.model_validate(
+        {
+            **_usage(100, 40, 20, 7),
+            "cache_write_input_tokens": 9,
+            "future_nonnegative_counter": 3,
+        }
+    )
 
     assert usage.input_tokens == 100
     assert usage.cached_input_tokens == 40
+    assert usage.cache_write_input_tokens == 9
     assert usage.output_tokens == 20
     assert usage.reasoning_output_tokens == 7
+    assert usage.model_extra == {"future_nonnegative_counter": 3}
+
+    missing_required = _usage(1, 0, 1, 0)
+    del missing_required["reasoning_output_tokens"]
     with pytest.raises(ValidationError):
-        CodexTurnUsageV1.model_validate({**_usage(1, 0, 1, 0), "extra": 1})
+        CodexTurnUsageV1.model_validate(missing_required)
+    with pytest.raises(ValidationError):
+        CodexTurnUsageV1.model_validate({**_usage(1, 0, 1, 0), "input_tokens": -1})
+    with pytest.raises(ValidationError):
+        CodexTurnUsageV1.model_validate({**_usage(1, 0, 1, 0), "output_tokens": 1.0})
+    with pytest.raises(ValidationError):
+        CodexTurnUsageV1.model_validate(
+            {**_usage(1, 0, 1, 0), "future_nonnegative_counter": -1}
+        )
     with pytest.raises(ValidationError):
         CodexTurnUsageV1.model_validate(_usage(5, 6, 1, 0))
 
@@ -98,8 +117,14 @@ def test_multiple_completed_turns_preserve_cached_and_reasoning_submetrics(
     _write_events(
         path,
         _event("thread.started", thread_id="thread-1"),
-        _event("turn.completed", usage=_usage(100, 80, 30, 11)),
-        _event("turn.completed", usage=_usage(50, 10, 20, 9)),
+        _event(
+            "turn.completed",
+            usage={**_usage(100, 80, 30, 11), "cache_write_input_tokens": 5},
+        ),
+        _event(
+            "turn.completed",
+            usage={**_usage(50, 10, 20, 9), "future_nonnegative_counter": 4},
+        ),
     )
 
     receipt = receipt_from_jsonl(

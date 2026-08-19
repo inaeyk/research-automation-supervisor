@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import research_automation_supervisor.semantic_replay as semantic_replay
 from research_automation_supervisor.semantic_decomposition import (
     AgentHandoffV1,
     ArtifactReferenceV1,
@@ -23,6 +24,7 @@ from research_automation_supervisor.semantic_decomposition import (
     fresh_session_launch,
     measure_agent_handoff,
     validation_reuse_decision,
+    write_agent_handoff,
     write_semantic_task_plan,
 )
 from research_automation_supervisor.semantic_replay import (
@@ -30,11 +32,13 @@ from research_automation_supervisor.semantic_replay import (
     ReplayCommandV1,
     _completed_subtask_prefix,
     _verified_completed_task,
+    execute_replay,
     load_control,
     prepare_replay,
     render_subtask_prompt,
     repository_identity,
 )
+from research_automation_supervisor.token_accounting import load_verified_receipt
 
 AUTHORITY_HASH = "a" * 64
 
@@ -176,6 +180,12 @@ def test_fresh_session_default_and_qualified_continuation_exception() -> None:
 def test_handoff_schema_hash_references_transcript_ban_and_size_limits() -> None:
     handoff = _handoff()
     assert handoff.authority_references[0].sha256 == AUTHORITY_HASH
+    bytes_only = measure_agent_handoff(handoff)
+    assert bytes_only.counting_method == "utf8_bytes_only"
+    assert bytes_only.exact_token_count is None
+    assert bytes_only.token_upper_bound is None
+    assert bytes_only.target_met is None
+    assert bytes_only.soft_max_met is None
     assert measure_agent_handoff(handoff, token_counter=lambda _: 1_000).target_met
     with pytest.raises(ValidationError):
         _handoff(transcript_included=True)
@@ -191,6 +201,26 @@ def test_handoff_schema_hash_references_transcript_ban_and_size_limits() -> None
         }
     )
     assert not measure_agent_handoff(justified, token_counter=lambda _: 2_001).soft_max_met
+
+
+def test_handoff_without_exact_tokenizer_enforces_deterministic_byte_limits() -> None:
+    above_byte_soft_max = _handoff(remaining_work=["x" * 5_000])
+    with pytest.raises(ValueError, match="4096-byte soft maximum"):
+        measure_agent_handoff(above_byte_soft_max)
+
+    justified = above_byte_soft_max.model_copy(
+        update={
+            "oversize_justification": "The required durable recovery facts exceed 4096 bytes."
+        }
+    )
+    size = measure_agent_handoff(justified)
+    assert size.byte_count > size.soft_max_bytes
+    assert size.exact_token_count is None
+    assert size.counting_method == "utf8_bytes_only"
+
+    above_absolute_max = justified.model_copy(update={"remaining_work": ("x" * 9_000,)})
+    with pytest.raises(ValueError, match="absolute 8192-byte upper bound"):
+        measure_agent_handoff(above_absolute_max)
 
 
 def test_worker_audit_and_audit_repair_boundaries_transfer_only_durable_state() -> None:
@@ -532,3 +562,253 @@ def test_completed_global_task_is_qualified_for_exactly_once_recovery(
             workspace=workspace,
             expected_model="gpt-5.6-sol",
         )
+
+
+@pytest.mark.parametrize("handoff_already_exists", [False, True])
+def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handoff_already_exists: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=workspace, check=True)
+    authority_path = workspace / "authority.md"
+    authority_path.write_text("frozen workload\n", encoding="utf-8")
+    subprocess.run(("git", "add", "authority.md"), cwd=workspace, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Semantic Test",
+            "-c",
+            "user.email=semantic@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "authority",
+        ),
+        cwd=workspace,
+        check=True,
+    )
+    commit = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    digest = hashlib.sha256(authority_path.read_bytes()).hexdigest()
+    authority = _authority(digest=digest)
+    worker = _subtask(1).model_copy(update={"authority_references": (authority,)})
+    auditor = _subtask(
+        2,
+        role="coding_auditor",
+        boundary="implementation_to_audit",
+        objective="Independently audit the implemented candidate and evidence.",
+    ).model_copy(
+        update={
+            "authority_references": (authority,),
+            "required_predecessor_artifacts": (
+                PredecessorArtifactRequirementV1(
+                    path="handoffs/task-1.json",
+                    kind="handoff",
+                    produced_by_subtask_id="task-1",
+                ),
+            ),
+        }
+    )
+    plan = SemanticTaskPlanV1(
+        plan_id="recovery-plan",
+        stage_id="completed runtime recovery",
+        substantial_stage=True,
+        authority_references=(authority,),
+        subtasks=(worker, auditor),
+    )
+    control = ControlledReplayV1(
+        control_id="synthetic-recovery",
+        implementation_authority_commit=commit,
+        replay_start_commit=commit,
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        workload_authority=authority,
+        global_target_writer_subtask_ids=(worker.subtask_id,),
+        plan=plan,
+    )
+    control_path = tmp_path / "control.json"
+    control_path.write_text(json.dumps(control.model_dump(mode="json")), encoding="utf-8")
+    artifact_root = tmp_path / "artifacts"
+    global_target = tmp_path / "global-target"
+    ledger_root = tmp_path / "task-ledgers"
+    codex_task = tmp_path / "fake-codex-task"
+    monkeypatch.setattr(semantic_replay, "DEFAULT_LEDGER_ROOT", ledger_root)
+    preparation = prepare_replay(
+        control_path=control_path,
+        authority_root=workspace,
+        workspace=workspace,
+        artifact_root=artifact_root,
+        global_target=global_target,
+        codex_task=codex_task,
+    )
+    worker_command = preparation.commands[0]
+    initial_identity = repository_identity(workspace, commit)
+    prompt = render_subtask_prompt(
+        worker,
+        predecessor_artifacts=(),
+        authority_root=workspace,
+        expected_repository=initial_identity,
+        global_target=global_target,
+    )
+    prompt_path = Path(worker_command.prompt_path)
+    prompt_path.parent.mkdir(parents=True)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    launch_path = Path(worker_command.launch_path)
+    launch_path.parent.mkdir(parents=True)
+    launch_path.write_text(
+        json.dumps(fresh_session_launch(worker).model_dump(mode="json")), encoding="utf-8"
+    )
+
+    final_draft = {
+        "schema_version": 1,
+        "completed_objective": "Implemented the bounded component.",
+        "changed_paths": ["src/component.py"],
+        "changed_interfaces": ["component.run"],
+        "valid_evidence_receipts": [],
+        "decisions_and_invariants": ["Exactly-once state remains authoritative."],
+        "unresolved_findings": [],
+        "remaining_work": ["Audit the candidate independently."],
+        "next_subtask_requirements": ["Inspect the candidate diff and this handoff."],
+        "do_not_rediscover_or_retest": [
+            "Do not rerun the unchanged deterministic unit test."
+        ],
+        "oversize_justification": None,
+    }
+    task_root = ledger_root / worker_command.task_id
+    turns = task_root / "turns"
+    turns.mkdir(parents=True)
+    event_log = turns / "000001.events.jsonl"
+    event_log.write_text(
+        json.dumps({"type": "thread.started", "thread_id": "thread-task-1"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 80,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 11,
+                    "future_nonnegative_counter": 4,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (turns / "000001.final-message.md").write_text(
+        json.dumps(final_draft), encoding="utf-8"
+    )
+    (turns / "000001.prompt.sha256").write_text(
+        hashlib.sha256(prompt_path.read_bytes()).hexdigest() + "\n", encoding="ascii"
+    )
+    (task_root / "task.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "task_id": worker_command.task_id,
+                "working_directory": str(workspace.resolve()),
+                "model": "gpt-5.6-sol",
+                "codex_cli_version": "codex-cli 0.147.0",
+                "initial_options": list(worker_command.argv[5:]),
+                "turn_count": 1,
+                "usage_complete": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    authoritative_receipt = task_root / "TaskUsageReceipt.json"
+    authoritative_receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "receipt_type": "TaskUsageReceipt",
+                "task_id": worker_command.task_id,
+                "thread_id": "thread-task-1",
+                "model": "gpt-5.6-sol",
+                "codex_cli_version": "codex-cli 0.147.0",
+                "input_tokens": 100,
+                "cached_input_tokens": 80,
+                "output_tokens": 30,
+                "reasoning_output_tokens": 11,
+                "combined_tokens": 130,
+                "turn_count": 1,
+                "complete": True,
+                "incomplete_reasons": [],
+                "source_jsonl": [
+                    {
+                        "path": str(event_log.resolve()),
+                        "sha256": hashlib.sha256(event_log.read_bytes()).hexdigest(),
+                        "completed_turn_count": 1,
+                    }
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    receipt_before = authoritative_receipt.read_bytes()
+
+    if handoff_already_exists:
+        write_agent_handoff(
+            _handoff(
+                handoff_id="task-1-handoff",
+                repository_identity=initial_identity.model_dump(mode="json"),
+                authority_references=[authority.model_dump(mode="json")],
+            ),
+            Path(worker_command.handoff_path),
+        )
+
+    assert not (artifact_root / "usage" / "task-1.json").exists()
+    assert not (artifact_root / "context" / "task-1.json").exists()
+    assert not (artifact_root / "telemetry" / "task-1.json").exists()
+
+    real_run = subprocess.run
+    launched_task_ids: list[str] = []
+
+    class NextSubtaskEligible(RuntimeError):
+        pass
+
+    def intercept_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = args[0]
+        if isinstance(argv, tuple) and argv and argv[0] == str(codex_task.resolve()):
+            launched_task_ids.append(argv[2])
+            raise NextSubtaskEligible
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(semantic_replay.subprocess, "run", intercept_run)
+    with pytest.raises(NextSubtaskEligible):
+        execute_replay(
+            control_path=control_path,
+            authority_root=workspace,
+            workspace=workspace,
+            artifact_root=artifact_root,
+            global_target=global_target,
+            codex_task=codex_task,
+        )
+
+    assert launched_task_ids == [preparation.commands[1].task_id]
+    assert json.loads((task_root / "task.json").read_text(encoding="utf-8"))["turn_count"] == 1
+    assert authoritative_receipt.read_bytes() == receipt_before
+    recovered_usage = load_verified_receipt(
+        artifact_root / "usage" / "task-1.json", event_log=event_log
+    )
+    assert recovered_usage.complete
+    assert recovered_usage.combined_tokens == 130
+    recovered_telemetry = SemanticSubtaskTelemetryV1.model_validate_json(
+        (artifact_root / "telemetry" / "task-1.json").read_bytes()
+    )
+    assert recovered_telemetry.combined_tokens == 130
+    assert _completed_subtask_prefix(plan, artifact_root) == ("task-1",)
+    assert Path(preparation.commands[1].prompt_path).is_file()
+    assert Path(preparation.commands[1].launch_path).is_file()
