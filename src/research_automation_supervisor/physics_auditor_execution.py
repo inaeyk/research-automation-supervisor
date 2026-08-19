@@ -130,6 +130,10 @@ from research_automation_supervisor.physics_routing import (
     PhysicsRoutingDecisionV1,
     derive_physics_audit_decision,
 )
+from research_automation_supervisor.token_accounting import (
+    CodexUsageBindingV1,
+    load_verified_receipt,
+)
 from research_automation_supervisor.workflow_integrity import (
     CodexMetadata,
     NormalizedCodexRequest,
@@ -300,6 +304,10 @@ def run_physics_auditor(
     codex_invoker: PhysicsAuditorCodexInvoker | None = None,
     blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
     checkpoint: Checkpoint = lambda _name: None,
+    usage_campaign_id: str | None = None,
+    usage_task_id: str | None = None,
+    usage_ledger_root: Path | None = None,
+    usage_ledger_path: Path | None = None,
 ) -> PhysicsAuditorActionResultV1:
     """Create and execute one fresh read-only standalone Physics Auditor action."""
     if blindness_authority is not None and codex_invoker is not None:
@@ -337,6 +345,10 @@ def run_physics_auditor(
             codex_invoker=codex_invoker or _invoke_qualified_codex,
             blindness_authority=blindness_authority,
             checkpoint=checkpoint,
+            usage_campaign_id=usage_campaign_id,
+            usage_task_id=usage_task_id,
+            usage_ledger_root=usage_ledger_root,
+            usage_ledger_path=usage_ledger_path,
         )
 
 
@@ -354,6 +366,10 @@ def resume_physics_auditor(
     codex_invoker: PhysicsAuditorCodexInvoker | None = None,
     blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
     checkpoint: Checkpoint = lambda _name: None,
+    usage_campaign_id: str | None = None,
+    usage_task_id: str | None = None,
+    usage_ledger_root: Path | None = None,
+    usage_ledger_path: Path | None = None,
 ) -> PhysicsAuditorActionResultV1:
     """Recover without resuming a session or blindly repeating a possible launch."""
     if blindness_authority is not None and codex_invoker is not None:
@@ -407,6 +423,10 @@ def resume_physics_auditor(
             codex_invoker=codex_invoker or _invoke_qualified_codex,
             blindness_authority=blindness_authority,
             checkpoint=checkpoint,
+            usage_campaign_id=usage_campaign_id,
+            usage_task_id=usage_task_id,
+            usage_ledger_root=usage_ledger_root,
+            usage_ledger_path=usage_ledger_path,
         )
 
 
@@ -609,6 +629,10 @@ def _continue_action(
     codex_invoker: PhysicsAuditorCodexInvoker,
     blindness_authority: BlindBenchmarkLaunchAuthority | None,
     checkpoint: Checkpoint,
+    usage_campaign_id: str | None,
+    usage_task_id: str | None,
+    usage_ledger_root: Path | None,
+    usage_ledger_path: Path | None,
 ) -> PhysicsAuditorActionResultV1:
     if current.phase == "action_accepted":
         try:
@@ -687,7 +711,14 @@ def _continue_action(
                 checkpoint=checkpoint,
             )
         executable = _select_codex_executable(prepared.config)
-        codex_prepared = _prepared_codex_request(output, prepared)
+        codex_prepared = _prepared_codex_request(
+            output,
+            prepared,
+            usage_campaign_id=usage_campaign_id,
+            usage_task_id=usage_task_id,
+            usage_ledger_root=usage_ledger_root,
+            usage_ledger_path=usage_ledger_path,
+        )
         current = _append_record(
             output,
             request=prepared.request,
@@ -1208,7 +1239,15 @@ def _proof(
     )
 
 
-def _prepared_codex_request(output: Path, prepared: _PreparedAction) -> PreparedCodexRequest:
+def _prepared_codex_request(
+    output: Path,
+    prepared: _PreparedAction,
+    *,
+    usage_campaign_id: str | None = None,
+    usage_task_id: str | None = None,
+    usage_ledger_root: Path | None = None,
+    usage_ledger_path: Path | None = None,
+) -> PreparedCodexRequest:
     prompt_path = output / CONTROL_DIRECTORY / PROMPT_FILE
     request = CodexRunRequest(
         schema_version=1,
@@ -1228,6 +1267,15 @@ def _prepared_codex_request(output: Path, prepared: _PreparedAction) -> Prepared
         prompt_bytes=prepared.prompt.content,
         prompt_sha256=prepared.prompt.rendered_sha256,
         policy=ROLE_POLICIES["auditor"],
+        usage_binding=CodexUsageBindingV1(
+            campaign_id=usage_campaign_id or f"physics-{prepared.request.task_id}",
+            task_id=usage_task_id or prepared.request.task_id,
+            action_id=prepared.request.action_id,
+            role="physics_auditor",
+            repair_or_retry=prepared.request.attempt_number > 1,
+        ),
+        usage_ledger_root=usage_ledger_root or output,
+        usage_ledger_path=usage_ledger_path or (output / "task-token-ledger.json"),
     )
 
 
@@ -1418,6 +1466,22 @@ def _verify_codex_run(
     completion = _load_pretty_model(
         directory / "stage2-completion.json", Stage2CompletionManifest, "Codex completion manifest"
     )
+    usage_path = directory / "usage-receipt.json"
+    events_path = directory / "events.jsonl"
+    try:
+        usage_receipt = load_verified_receipt(usage_path, event_log=events_path)
+    except ValueError as exc:
+        raise PhysicsAuditorIntegrityError("Codex usage receipt is invalid") from exc
+    if (
+        metadata.usage_receipt_path != str(usage_path)
+        or metadata.usage_receipt_sha256 != hashlib.sha256(usage_path.read_bytes()).hexdigest()
+        or metadata.usage_receipt_id != usage_receipt.receipt_id
+        or metadata.usage_complete != usage_receipt.complete
+        or usage_receipt.action_id != prepared.request.run_id
+        or usage_receipt.role != "physics_auditor"
+        or usage_receipt.model != prepared.request.model
+    ):
+        raise PhysicsAuditorIntegrityError("Codex usage receipt contradicts the action")
     if persisted_result != result:
         raise PhysicsAuditorIntegrityError("Codex result was substituted")
     verify_projected_auditor_bubblewrap_command(
@@ -1645,6 +1709,8 @@ def _verify_persisted_provider(
             "final-message.md",
             "metadata.json",
             "result.json",
+            "usage-receipt.json",
+            "context-economy-receipt.json",
         )
     }
     if (

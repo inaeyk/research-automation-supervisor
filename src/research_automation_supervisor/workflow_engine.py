@@ -64,6 +64,7 @@ from research_automation_supervisor.test_runner import (
     run_test_attempt,
     skipped_test_result,
 )
+from research_automation_supervisor.token_accounting import CodexUsageBindingV1
 from research_automation_supervisor.workflow_integrity import (
     CodexActionRecord,
     JournalEntry,
@@ -448,6 +449,10 @@ class WorkflowServices:
     utc_now: Callable[[], datetime] = lambda: datetime.now(UTC)
     prompt_source: WorkflowPromptSource | None = None
     require_canonical_thread_ids: bool = False
+    usage_campaign_id: str | None = None
+    usage_task_id: str | None = None
+    usage_ledger_root: Path | None = None
+    usage_ledger_path: Path | None = None
 
 
 DEFAULT_WORKFLOW_SERVICES = WorkflowServices()
@@ -2008,6 +2013,26 @@ def _prepared_codex_request(
         prompt_bytes=prompt.content,
         prompt_sha256=prompt.rendered_sha256,
         policy=ROLE_POLICIES[typed_role],
+        usage_binding=CodexUsageBindingV1(
+            campaign_id=(
+                context.services.usage_campaign_id
+                or context.prepared.specification.substage_id
+            ),
+            task_id=(
+                context.services.usage_task_id
+                or context.prepared.specification.substage_id
+            ),
+            action_id=action_id,
+            role="worker" if role == "worker" else "coding_auditor",
+            repair_or_retry=context.state.repair_round > 0,
+        ),
+        usage_ledger_root=(
+            context.services.usage_ledger_root or context.run_directory
+        ),
+        usage_ledger_path=(
+            context.services.usage_ledger_path
+            or (context.run_directory / "task-token-ledger.json")
+        ),
     )
 
 

@@ -34,9 +34,22 @@ from research_automation_supervisor.codex_models import (
     Role,
     RunStatus,
 )
+from research_automation_supervisor.context_economy import (
+    CONTEXT_ECONOMY_PROFILES,
+    BrevityProfile,
+    ContextEconomyOverrideV1,
+    ContextEconomyReceiptV1,
+    context_economy_receipt_from_events,
+    durable_context_config_item,
+    supervisor_developer_instructions,
+)
 from research_automation_supervisor.errors import WorkflowStateError
 from research_automation_supervisor.redaction import is_sensitive_name
 from research_automation_supervisor.test_runner import TestAttemptResult
+from research_automation_supervisor.token_accounting import (
+    CodexUsageReceiptV1,
+    load_verified_receipt,
+)
 from research_automation_supervisor.workflow_models import (
     AuditorModelResult,
     PendingAction,
@@ -60,6 +73,8 @@ STAGE1_CORE_ARTIFACT_NAMES = frozenset(
         "final-message.md",
         "metadata.json",
         "result.json",
+        "usage-receipt.json",
+        "context-economy-receipt.json",
     }
 )
 STAGE2_STAGE1_ARTIFACT_NAMES = STAGE1_CORE_ARTIFACT_NAMES | {
@@ -89,6 +104,8 @@ class NormalizedCodexRequest(BaseModel):
     prompt_path: str
     model: ModelName
     reasoning_effort: ReasoningEffort
+    brevity_profile: BrevityProfile
+    context_economy_override: ContextEconomyOverrideV1 | None
     timeout_seconds: Annotated[int, Field(ge=30, le=14_400)]
     policy: NormalizedRolePolicy
     skip_git_repo_check: bool = False
@@ -152,6 +169,12 @@ class CodexMetadata(BaseModel):
     events_sha256: Sha256
     stderr_sha256: Sha256
     final_message_sha256: Sha256
+    usage_receipt_path: str
+    usage_receipt_sha256: Sha256
+    usage_receipt_id: Sha256
+    usage_complete: bool
+    context_economy_receipt_path: str
+    context_economy_receipt_sha256: Sha256
     auditor_scratch_path: str | None = None
     sandbox_disposition: Literal[
         "workspace-read-only-action-scratch-write"
@@ -454,6 +477,50 @@ def verify_codex_artifacts(
 
     events_path = artifact_directory / "events.jsonl"
     events_bytes = _read_exact_bytes(events_path)
+    usage_receipt_path = artifact_directory / "usage-receipt.json"
+    try:
+        usage_receipt: CodexUsageReceiptV1 = load_verified_receipt(
+            usage_receipt_path,
+            event_log=events_path,
+        )
+    except ValueError as exc:
+        raise WorkflowStateError("Codex usage receipt is invalid") from exc
+    expected_usage_role = "worker" if pending.kind == "worker" else "coding_auditor"
+    if (
+        metadata.usage_receipt_path != str(usage_receipt_path)
+        or metadata.usage_receipt_sha256 != sha256_regular_file(usage_receipt_path)
+        or metadata.usage_receipt_id != usage_receipt.receipt_id
+        or metadata.usage_complete != usage_receipt.complete
+        or usage_receipt.action_id != pending.action_id
+        or usage_receipt.role != expected_usage_role
+        or usage_receipt.model != pending.model
+        or usage_receipt.event_log_sha256 != hashlib.sha256(events_bytes).hexdigest()
+    ):
+        raise WorkflowStateError("Codex usage receipt contradicts its action intent")
+    context_receipt_path = artifact_directory / "context-economy-receipt.json"
+    context_receipt = _model_from_json(
+        context_receipt_path,
+        ContextEconomyReceiptV1,
+        "context economy receipt",
+    )
+    expected_context_receipt = context_economy_receipt_from_events(
+        events_path,
+        prompt_bytes=metadata.prompt_byte_count,
+        profile=request.brevity_profile,
+        usage_receipt=usage_receipt,
+        overrides=(
+            ()
+            if request.context_economy_override is None
+            else (request.context_economy_override,)
+        ),
+    )
+    if (
+        metadata.context_economy_receipt_path != str(context_receipt_path)
+        or metadata.context_economy_receipt_sha256
+        != sha256_regular_file(context_receipt_path)
+        or context_receipt != expected_context_receipt
+    ):
+        raise WorkflowStateError("context economy receipt contradicts durable evidence")
     events, thread_ids, first_thread_id, first_session_id = _parse_events(events_bytes)
     if len(events) != metadata.valid_event_count:
         raise WorkflowStateError("Codex event count contradicts metadata")
@@ -481,7 +548,7 @@ def verify_codex_artifacts(
         raise WorkflowStateError("Codex result and metadata disagree about the final message")
 
     _verify_codex_process_result(metadata, adapter_result)
-    _verify_codex_command(pending, metadata)
+    _verify_codex_command(pending, request, metadata)
     _verify_time_agreement(
         metadata.started_at,
         metadata.ended_at,
@@ -809,7 +876,11 @@ def _verify_codex_process_result(
         raise WorkflowStateError("Codex process status and normalized result contradict")
 
 
-def _verify_codex_command(pending: PendingAction, metadata: CodexMetadata) -> None:
+def _verify_codex_command(
+    pending: PendingAction,
+    request: NormalizedCodexRequest,
+    metadata: CodexMetadata,
+) -> None:
     executable = metadata.codex_executable
     common_configuration = [
         "-c",
@@ -821,6 +892,32 @@ def _verify_codex_command(pending: PendingAction, metadata: CodexMetadata) -> No
         "-c",
         "features.skill_mcp_dependency_install=false",
     ]
+    profile = CONTEXT_ECONOMY_PROFILES[request.brevity_profile]
+    override = request.context_economy_override
+    compact_limit = (
+        override.model_auto_compact_token_limit
+        if override is not None
+        and override.model_auto_compact_token_limit is not None
+        else profile.model_auto_compact_token_limit
+    )
+    output_limit = (
+        override.tool_output_token_limit
+        if override is not None and override.tool_output_token_limit is not None
+        else profile.tool_output_token_limit
+    )
+    if compact_limit is not None:
+        common_configuration.extend(
+            ("-c", f"model_auto_compact_token_limit={compact_limit}")
+        )
+    if output_limit is not None:
+        common_configuration.extend(("-c", f"tool_output_token_limit={output_limit}"))
+    instructions = supervisor_developer_instructions(
+        request.brevity_profile,
+        override,
+    )
+    common_configuration.extend(
+        ("-c", f"developer_instructions={json.dumps(instructions)}")
+    )
     if pending.resume_thread_id is None:
         expected = [
             executable,
@@ -878,6 +975,7 @@ def _verify_codex_command(pending: PendingAction, metadata: CodexMetadata) -> No
     expected.extend(
         ["--output-schema", cast(str, pending.output_schema_path), "<PROMPT_FROM_STDIN>"]
     )
+    expected = [durable_context_config_item(item) for item in expected]
     if metadata.command != tuple(expected):
         raise WorkflowStateError("Codex command does not preserve the exact frozen policy")
     if "--last" in metadata.command or "--all" in metadata.command:

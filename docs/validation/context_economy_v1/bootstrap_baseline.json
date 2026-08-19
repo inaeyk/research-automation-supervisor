@@ -1,0 +1,14 @@
+{
+  "input_tokens": 25502447,
+  "cached_input_tokens": 25181952,
+  "uncached_input_tokens": 320495,
+  "output_tokens": 55927,
+  "reasoning_output_tokens": 18179,
+  "combined_tokens": 25558374,
+  "inference_samples": 157,
+  "command_executions": 118,
+  "command_event_chars": 2234679,
+  "median_input_per_inference": 182939,
+  "max_input_per_inference": 218845,
+  "compactions": 0
+}

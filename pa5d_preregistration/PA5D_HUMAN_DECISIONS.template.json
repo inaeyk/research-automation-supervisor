@@ -1,0 +1,154 @@
+{
+  "decided_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+  "decision_sha256": "COMPUTED_ONLY_AFTER_ALL_DECISIONS_ARE_EXPLICIT",
+  "execution_policy_decision": "approve_one_shot_calibration_execution_policy_v1",
+  "explicit_no_pa5b_derivation_attestation": true,
+  "metric_and_gl_scoring_decision": "approve_metric_and_gl_scoring_policy_v1",
+  "model_configuration_decision": "approve_exact_qualified_pa3_configuration",
+  "review_draft_sha256": "89057f629ef8ba808e69628dc83b09ccb8cadf5a3e85ffde018d33d83c7d46a1",
+  "reviewer_identity": "REPLACE_WITH_HUMAN_IDENTITY",
+  "schema_version": 1,
+  "selected_schedule_id": "SELECT_EXACT_SCHEDULE_ID",
+  "threshold_decisions": [
+    {
+      "decision": "approve_proposed",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_critical_defect_recognition_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_defect_category_recognition_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_false_pass_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_clean_pass_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_false_critical_finding_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_repair_routing_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_human_escalation_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_gl_expected_pass_route_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_insufficient_evidence_routing_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_malformed_report_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_infrastructure_failure_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_severity_correctness_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_required_category_recognition_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_acceptable_alternative_recognition_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_forbidden_category_violation_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_forbidden_route_violation_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_evidence_validity_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_route_consistency_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_finding_category_consistency_rate"
+    },
+    {
+      "decision": "approve_proposed_OR_replace",
+      "rationale": "REQUIRED_HUMAN_RATIONALE",
+      "replacement_operator": null,
+      "replacement_value": null,
+      "threshold_id": "performance_repeat_consistency_rate"
+    }
+  ]
+}

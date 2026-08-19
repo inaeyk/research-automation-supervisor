@@ -1,0 +1,17 @@
+{
+  "cached_input_tokens": 4273152,
+  "combined_tokens": 4656714,
+  "command_event_chars": 902694,
+  "command_executions": 172,
+  "compactions": 10,
+  "events_sha256": "d2a53850d9f4e5f072f5dbb1a2375e1dcf7a7ba07065e934514e6c5d1ddff247",
+  "inference_samples": 117,
+  "input_tokens": 4610706,
+  "max_input_per_inference": 64100,
+  "median_input_per_inference": 39543,
+  "output_tokens": 46008,
+  "reasoning_output_tokens": 12362,
+  "rollout": "/tmp/codex-token-replay-home/sessions/2026/08/19/rollout-2026-08-19T21-35-14-01a01a3b-b1c9-7561-9e09-ac55c910336d.jsonl",
+  "thread_id": "01a01a3b-b1c9-7561-9e09-ac55c910336d",
+  "uncached_input_tokens": 337554
+}

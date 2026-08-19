@@ -81,6 +81,10 @@ from research_automation_supervisor.shadow_sources import (
     decision_points_artifact,
     load_shadow_specification,
 )
+from research_automation_supervisor.token_accounting import (
+    CodexUsageBindingV1,
+    load_verified_receipt,
+)
 from research_automation_supervisor.workflow_integrity import (
     STAGE1_CORE_ARTIFACT_NAMES,
     STAGE2_STAGE1_ARTIFACT_NAMES,
@@ -1133,7 +1137,7 @@ def _prepared_supervisor_request(
             context.prepared.specification.supervisor_timeout_seconds
         ),
     )
-    del decision
+    action_id = f"supervisor-{decision.point.decision_id}"
     return PreparedCodexRequest(
         request_path=context.prepared.specification_path,
         request=request,
@@ -1142,6 +1146,13 @@ def _prepared_supervisor_request(
         prompt_bytes=rendered.content,
         prompt_sha256=rendered.manifest.rendered_blind_input_sha256,
         policy=ROLE_POLICIES["supervisor"],
+        usage_binding=CodexUsageBindingV1(
+            campaign_id=context.state.calibration_id,
+            task_id=decision.point.decision_id,
+            action_id=action_id,
+            role="supervisor",
+            repair_or_retry=context.state.supervisor_session_id is not None,
+        ),
     )
 
 
@@ -1445,6 +1456,25 @@ def _verify_supervisor_artifacts(
             "supervisor prompt hash artifact changed"
         )
     events_bytes = _read_exact_bytes(directory / "events.jsonl")
+    usage_path = directory / "usage-receipt.json"
+    try:
+        usage_receipt = load_verified_receipt(
+            usage_path,
+            event_log=directory / "events.jsonl",
+        )
+    except ValueError as exc:
+        raise ShadowStateError("supervisor usage receipt is invalid") from exc
+    if (
+        metadata.usage_receipt_path != str(usage_path)
+        or metadata.usage_receipt_sha256 != sha256_regular_file(usage_path)
+        or metadata.usage_receipt_id != usage_receipt.receipt_id
+        or metadata.usage_complete != usage_receipt.complete
+        or usage_receipt.action_id != pending.action_id
+        or usage_receipt.role != "supervisor"
+        or usage_receipt.model != pending.model
+        or usage_receipt.event_log_sha256 != hashlib.sha256(events_bytes).hexdigest()
+    ):
+        raise ShadowStateError("supervisor usage receipt contradicts its intent")
     try:
         events, session_ids, first_thread, first_session = _parse_events(
             events_bytes

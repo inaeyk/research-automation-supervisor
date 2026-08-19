@@ -46,6 +46,8 @@ ARTIFACT_NAMES = {
     "final-message.md",
     "metadata.json",
     "result.json",
+    "usage-receipt.json",
+    "context-economy-receipt.json",
 }
 
 
@@ -449,6 +451,17 @@ def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path
         stdout_lines=[
             '{"type": "thread.started", "thread_id": "thread-123", "z": 2, "a": 1}',
             '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 120,
+                        "cached_input_tokens": 80,
+                        "output_tokens": 30,
+                        "reasoning_output_tokens": 12,
+                    },
+                }
+            ),
         ],
         stderr="diagnostic\n",
         final="Final response.\n",
@@ -471,8 +484,16 @@ def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path
     assert metadata["codex_version"] == "0.200.0"
     assert metadata["thread_id"] == "thread-123"
     assert metadata["artifact_directory"] == result.artifact_directory
-    assert metadata["valid_event_count"] == 2
+    assert metadata["valid_event_count"] == 3
     assert metadata["malformed_event_count"] == 0
+    usage = json.loads((directory / "usage-receipt.json").read_text())
+    assert metadata["usage_complete"] is True
+    assert metadata["usage_receipt_id"] == usage["receipt_id"]
+    assert usage["input_tokens"] == 120
+    assert usage["cached_input_tokens"] == 80
+    assert usage["output_tokens"] == 30
+    assert usage["reasoning_output_tokens"] == 12
+    assert usage["combined_tokens"] == 150
     assert metadata["command"][:4] == [
         str(FAKE_CODEX),
         "--ask-for-approval",

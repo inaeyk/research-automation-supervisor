@@ -17,7 +17,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from packaging.version import Version
 
@@ -28,6 +28,12 @@ from research_automation_supervisor.codex_models import (
     PreparedCodexRequest,
     RunStatus,
     load_codex_request,
+)
+from research_automation_supervisor.context_economy import (
+    CONTEXT_ECONOMY_PROFILES,
+    context_economy_receipt_from_events,
+    durable_context_config_item,
+    supervisor_developer_instructions,
 )
 from research_automation_supervisor.doctor import MINIMUM_CODEX, _parse_codex_version
 from research_automation_supervisor.errors import (
@@ -44,6 +50,14 @@ from research_automation_supervisor.redaction import (
 from research_automation_supervisor.structured_outputs import (
     ProductionSchemaError,
     validate_production_schema,
+)
+from research_automation_supervisor.token_accounting import (
+    CodexUsageBindingV1,
+    aggregate_task_receipts,
+    load_verified_receipt,
+    receipt_from_jsonl,
+    write_ledger,
+    write_receipt,
 )
 
 STDOUT_LIMIT_BYTES = 100 * 1024 * 1024
@@ -110,6 +124,63 @@ class AdapterLimits:
 
 
 DEFAULT_LIMITS = AdapterLimits()
+
+
+def _default_usage_binding(
+    prepared: PreparedCodexRequest,
+    *,
+    resume_thread_id: str | None,
+) -> CodexUsageBindingV1:
+    """Bind standalone adapter calls without guessing any external campaign identity."""
+    workspace_identity = hashlib.sha256(str(prepared.workspace).encode("utf-8")).hexdigest()[:24]
+    role = {
+        "worker": "worker",
+        "auditor": "coding_auditor",
+        "supervisor": "supervisor",
+    }[prepared.request.role]
+    return CodexUsageBindingV1(
+        campaign_id=f"standalone-{workspace_identity}",
+        task_id=prepared.request.run_id,
+        action_id=prepared.request.run_id,
+        role=cast(Any, role),
+        repair_or_retry=resume_thread_id is not None,
+    )
+
+
+def _refresh_usage_ledger(
+    prepared: PreparedCodexRequest,
+    runs_dir: Path,
+    binding: CodexUsageBindingV1,
+) -> None:
+    """Rebuild a deduplicated ledger from verified receipts, including recovery reuse."""
+    if prepared.usage_ledger_root is None and prepared.usage_ledger_path is None:
+        return
+    root = prepared.usage_ledger_root or runs_dir
+    destination = prepared.usage_ledger_path or (runs_dir / "task-token-ledger.json")
+    receipts = []
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name
+            for name in directories
+            if not (Path(current) / name).is_symlink()
+        )
+        if "usage-receipt.json" not in files:
+            continue
+        receipt_path = Path(current) / "usage-receipt.json"
+        event_log = Path(current) / "events.jsonl"
+        receipts.append(load_verified_receipt(receipt_path, event_log=event_log))
+    ledger = aggregate_task_receipts(
+        receipts,
+        campaign_id=binding.campaign_id,
+        task_id=binding.task_id,
+    )
+    write_ledger(destination, ledger)
+    campaign_ledger = aggregate_task_receipts(
+        receipts,
+        campaign_id=binding.campaign_id,
+        task_id="*",
+    )
+    write_ledger(destination.parent / "campaign-token-ledger.json", campaign_ledger)
 
 
 @dataclass
@@ -525,6 +596,38 @@ def run_prepared_codex(
         redaction_values,
     )
 
+    usage_binding = prepared.usage_binding or _default_usage_binding(
+        prepared,
+        resume_thread_id=resume_thread_id,
+    )
+    usage_receipt = receipt_from_jsonl(
+        event_path,
+        binding=usage_binding,
+        model=prepared.request.model,
+        codex_cli_version=codex_version,
+        known_malformed_event_count=len(event_processor.malformed_hashes),
+    )
+    usage_receipt_path = artifact_directory / "usage-receipt.json"
+    write_receipt(usage_receipt_path, usage_receipt)
+    context_receipt = context_economy_receipt_from_events(
+        event_path,
+        prompt_bytes=len(prepared.prompt_bytes),
+        profile=prepared.request.brevity_profile,
+        usage_receipt=usage_receipt,
+        overrides=(
+            (prepared.request.context_economy_override,)
+            if prepared.request.context_economy_override is not None
+            else ()
+        ),
+    )
+    context_receipt_path = artifact_directory / "context-economy-receipt.json"
+    _atomic_write_json(context_receipt_path, context_receipt.model_dump(mode="json"))
+    _refresh_usage_ledger(
+        prepared,
+        resolved_runs_dir,
+        usage_binding,
+    )
+
     metadata = _build_metadata(
         prepared=prepared,
         artifact_directory=artifact_directory,
@@ -547,6 +650,10 @@ def run_prepared_codex(
         ),
         durable_command_replacements=durable_command_replacements or {},
         auditor_scratch=auditor_scratch,
+        usage_receipt_path=usage_receipt_path,
+        usage_receipt_id=usage_receipt.receipt_id,
+        usage_complete=usage_receipt.complete,
+        context_receipt_path=context_receipt_path,
     )
     _atomic_write_json(
         artifact_directory / "metadata.json",
@@ -697,6 +804,7 @@ def build_codex_command(
         raise CodexRequestError(
             "resume requires one exact persistent worker or supervisor thread ID"
         )
+    context_config = _context_economy_config(prepared)
     if resume_thread_id is None:
         command = [
             executable,
@@ -717,6 +825,7 @@ def build_codex_command(
             "sandbox_workspace_write.network_access=false",
             "-c",
             "features.skill_mcp_dependency_install=false",
+            *context_config,
             "--sandbox",
             prepared.policy.sandbox,
             "--ignore-user-config",
@@ -755,6 +864,7 @@ def build_codex_command(
             "sandbox_workspace_write.network_access=false",
             "-c",
             "features.skill_mcp_dependency_install=false",
+            *context_config,
             "--ignore-user-config",
             "--ignore-rules",
             "--strict-config",
@@ -763,6 +873,31 @@ def build_codex_command(
         command.extend(("--output-schema", str(output_schema)))
     command.append("-")
     return command
+
+
+def _context_economy_config(prepared: PreparedCodexRequest) -> list[str]:
+    """Render only documented Codex configuration; never fake a context window."""
+    request = prepared.request
+    profile = CONTEXT_ECONOMY_PROFILES[request.brevity_profile]
+    override = request.context_economy_override
+    compact_limit = (
+        override.model_auto_compact_token_limit
+        if override is not None and override.model_auto_compact_token_limit is not None
+        else profile.model_auto_compact_token_limit
+    )
+    output_limit = (
+        override.tool_output_token_limit
+        if override is not None and override.tool_output_token_limit is not None
+        else profile.tool_output_token_limit
+    )
+    values: list[str] = []
+    if compact_limit is not None:
+        values.extend(("-c", f"model_auto_compact_token_limit={compact_limit}"))
+    if output_limit is not None:
+        values.extend(("-c", f"tool_output_token_limit={output_limit}"))
+    instructions = supervisor_developer_instructions(request.brevity_profile, override)
+    values.extend(("-c", f"developer_instructions={json.dumps(instructions)}"))
+    return values
 
 
 def probe_codex_version(
@@ -1327,6 +1462,10 @@ def _build_metadata(
     confidentiality_violation_detected: bool,
     durable_command_replacements: Mapping[str, str],
     auditor_scratch: Path | None,
+    usage_receipt_path: Path,
+    usage_receipt_id: str,
+    usage_complete: bool,
+    context_receipt_path: Path,
 ) -> dict[str, object]:
     terminating_signal = (
         -observation.exit_code
@@ -1340,6 +1479,7 @@ def _build_metadata(
         durable_command_replacements.get(item, item)
         for item in recorded_command
     ]
+    recorded_command = [durable_context_config_item(item) for item in recorded_command]
     metadata: dict[str, object] = {
         "schema_version": 1,
         "package_version": __version__,
@@ -1402,6 +1542,14 @@ def _build_metadata(
         "final_message_sha256": hashlib.sha256(
             (artifact_directory / "final-message.md").read_bytes()
         ).hexdigest(),
+        "usage_receipt_path": str(usage_receipt_path),
+        "usage_receipt_sha256": hashlib.sha256(usage_receipt_path.read_bytes()).hexdigest(),
+        "usage_receipt_id": usage_receipt_id,
+        "usage_complete": usage_complete,
+        "context_economy_receipt_path": str(context_receipt_path),
+        "context_economy_receipt_sha256": hashlib.sha256(
+            context_receipt_path.read_bytes()
+        ).hexdigest(),
     }
     if confidentiality_violation_detected:
         metadata["confidentiality_violation_detected"] = True
@@ -1426,6 +1574,8 @@ def _write_stage2_completion_manifest(
         "final-message.md",
         "metadata.json",
         "result.json",
+        "usage-receipt.json",
+        "context-economy-receipt.json",
     )
     artifact_hashes = {
         str(artifact_directory / name): hashlib.sha256(

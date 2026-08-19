@@ -123,6 +123,7 @@ from research_automation_supervisor.shadow_sources import (
     DecisionReconstruction,
     reconstruct_decision_points,
 )
+from research_automation_supervisor.token_accounting import CodexUsageBindingV1
 from research_automation_supervisor.workflow_engine import (
     _validate_journal_semantics,
     _verify_journal_hash_mapping,
@@ -2175,7 +2176,7 @@ def _prepared_supervisor_request(
     envelope: LiveDecisionEnvelope,
     rendered: RenderedLiveBlindPrompt,
 ) -> PreparedCodexRequest:
-    del envelope
+    action_id = f"supervisor-{envelope.decision_id}"
     request = CodexRunRequest(
         schema_version=1,
         run_id="stage1-run",
@@ -2194,6 +2195,13 @@ def _prepared_supervisor_request(
         prompt_bytes=rendered.content,
         prompt_sha256=rendered.manifest.rendered_blind_input_sha256,
         policy=ROLE_POLICIES["supervisor"],
+        usage_binding=CodexUsageBindingV1(
+            campaign_id=context.state.live_shadow_id,
+            task_id=envelope.decision_id,
+            action_id=action_id,
+            role="supervisor",
+            repair_or_retry=context.state.supervisor_session_id is not None,
+        ),
     )
 
 

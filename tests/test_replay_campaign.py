@@ -34,6 +34,10 @@ from research_automation_supervisor.replay_campaign_prompts import (
 from research_automation_supervisor.replay_campaign_sources import (
     load_replay_campaign_specification,
 )
+from research_automation_supervisor.token_accounting import (
+    receipt_from_jsonl,
+    write_receipt,
+)
 from research_automation_supervisor.workflow_engine import WorkflowServices
 from tests.workflow_helpers import (
     auditor_result,
@@ -72,8 +76,45 @@ class FakeSupervisor:
         assert isinstance(runs_dir, Path)
         artifact = runs_dir / prepared.request.run_id
         artifact.mkdir(parents=True)
+        events_path = artifact / "events.jsonl"
+        events_path.write_text(
+            json.dumps({"type": "thread.started", "thread_id": SUPERVISOR_UUID})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 1,
+                        "reasoning_output_tokens": 0,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert prepared.usage_binding is not None
+        receipt = receipt_from_jsonl(
+            events_path,
+            binding=prepared.usage_binding,
+            model=prepared.request.model,
+            codex_cli_version="scripted-test-v1",
+        )
+        receipt_path = artifact / "usage-receipt.json"
+        write_receipt(receipt_path, receipt)
         (artifact / "metadata.json").write_text(
-            json.dumps({"thread_started_ids": [SUPERVISOR_UUID]}),
+            json.dumps(
+                {
+                    "thread_started_ids": [SUPERVISOR_UUID],
+                    "usage_receipt_path": str(receipt_path),
+                    "usage_receipt_sha256": hashlib.sha256(
+                        receipt_path.read_bytes()
+                    ).hexdigest(),
+                    "usage_receipt_id": receipt.receipt_id,
+                    "usage_complete": receipt.complete,
+                }
+            ),
             encoding="utf-8",
         )
         (artifact / "final-message.md").write_text(
@@ -88,7 +129,7 @@ class FakeSupervisor:
             ended_at="2026-01-01T00:00:01.000000Z",
             duration_seconds=1.0,
             artifact_directory=str(artifact),
-            event_count=1,
+            event_count=2,
             malformed_event_count=0,
             final_message_present=True,
             permission_evidence=False,

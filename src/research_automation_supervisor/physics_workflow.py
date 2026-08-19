@@ -1326,19 +1326,38 @@ def _handle_physics_auditor(context: _PhysicsContext) -> None:
         "action_id": action_id,
         "attempt_number": round_id + 1,
     }
+    model_common = {
+        **common,
+        "usage_campaign_id": (
+            context.software_services.usage_campaign_id
+            or context.state.substage_id
+        ),
+        "usage_task_id": (
+            context.software_services.usage_task_id
+            or context.state.substage_id
+        ),
+        "usage_ledger_root": (
+            context.software_services.usage_ledger_root
+            or context.run_directory
+        ),
+        "usage_ledger_path": (
+            context.software_services.usage_ledger_path
+            or (context.run_directory / "task-token-ledger.json")
+        ),
+    }
     try:
         if recovered_completion:
             result = context.physics_services.auditor_verifier(**common)
         elif output.exists():
             result = context.physics_services.auditor_resumer(
-                **common,
+                **model_common,
                 environ=context.software_services.environ,
                 codex_invoker=context.physics_services.physics_auditor_codex_invoker,
                 checkpoint=_action_checkpoint(context, "physics_auditor"),
             )
         else:
             result = context.physics_services.auditor_runner(
-                **common,
+                **model_common,
                 environ=context.software_services.environ,
                 codex_invoker=context.physics_services.physics_auditor_codex_invoker,
                 checkpoint=_action_checkpoint(context, "physics_auditor"),

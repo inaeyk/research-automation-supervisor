@@ -11,13 +11,18 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from research_automation_supervisor.context_economy import (
+    BrevityProfile,
+    ContextEconomyOverrideV1,
+)
 from research_automation_supervisor.contract import (
     _format_validation_error,
     _UniqueKeySafeLoader,
 )
 from research_automation_supervisor.errors import CodexDependencyError, CodexRequestError
+from research_automation_supervisor.token_accounting import CodexUsageBindingV1
 
 MAX_PROMPT_BYTES = 1024 * 1024
 MIN_CODEX_TIMEOUT_SECONDS = 30
@@ -60,9 +65,17 @@ class CodexRunRequest(BaseModel):
     prompt_path: RequiredString
     model: ModelName
     reasoning_effort: ReasoningEffort
+    brevity_profile: BrevityProfile = "B4"
+    context_economy_override: ContextEconomyOverrideV1 | None = None
     timeout_seconds: Annotated[
         int, Field(ge=MIN_CODEX_TIMEOUT_SECONDS, le=MAX_CODEX_TIMEOUT_SECONDS)
     ]
+
+    @model_validator(mode="after")
+    def require_b0_justification(self) -> CodexRunRequest:
+        if self.brevity_profile == "B0" and self.context_economy_override is None:
+            raise ValueError("B0 requires a durable context-economy justification")
+        return self
 
 
 class RolePolicy(BaseModel):
@@ -122,6 +135,9 @@ class PreparedCodexRequest:
     prompt_bytes: bytes
     prompt_sha256: str
     policy: RolePolicy
+    usage_binding: CodexUsageBindingV1 | None = None
+    usage_ledger_root: Path | None = None
+    usage_ledger_path: Path | None = None
 
     def normalized_dict(self) -> dict[str, object]:
         """Return resolved paths and the fixed policy without prompt contents."""
@@ -133,6 +149,12 @@ class PreparedCodexRequest:
             "prompt_path": str(self.prompt_path),
             "model": self.request.model,
             "reasoning_effort": self.request.reasoning_effort,
+            "brevity_profile": self.request.brevity_profile,
+            "context_economy_override": (
+                self.request.context_economy_override.model_dump(mode="json")
+                if self.request.context_economy_override is not None
+                else None
+            ),
             "timeout_seconds": self.request.timeout_seconds,
             "policy": self.policy.model_dump(mode="json"),
         }

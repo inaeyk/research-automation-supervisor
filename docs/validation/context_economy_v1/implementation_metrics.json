@@ -1,0 +1,46 @@
+{
+  "agent_loop": {
+    "compaction_events": 10,
+    "inference_samples": 97,
+    "max_input_per_inference": 63561,
+    "median_input_per_inference": 44235,
+    "min_input_per_inference": 0
+  },
+  "events": {
+    "item.completed": 97,
+    "item.started": 83,
+    "item.updated": 2,
+    "thread.started": 1,
+    "turn.completed": 1,
+    "turn.started": 1
+  },
+  "events_sha256": "11ff86451e5ace492be63ce197577f9c2b719a6c265a06d9d171e55aa21d054c",
+  "item_types": {
+    "agent_message": {
+      "count": 14,
+      "text_chars": 9019
+    },
+    "command_execution": {
+      "count": 134,
+      "text_chars": 1116944
+    },
+    "file_change": {
+      "count": 30,
+      "text_chars": 7272
+    },
+    "todo_list": {
+      "count": 4,
+      "text_chars": 1671
+    }
+  },
+  "rollout_path": "/home/inaeyk/.codex/sessions/2026/08/19/rollout-2026-08-19T05-26-01-01a016c4-5695-77d3-87cd-ef4f27992b6d.jsonl",
+  "thread_id": "01a016c4-5695-77d3-87cd-ef4f27992b6d",
+  "usage": {
+    "cached_input_tokens": 3593216,
+    "combined_tokens": 3955161,
+    "input_tokens": 3912997,
+    "output_tokens": 42164,
+    "reasoning_output_tokens": 9995,
+    "uncached_input_tokens": 319781
+  }
+}

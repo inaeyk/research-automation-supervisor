@@ -1,0 +1,145 @@
+{
+  "$defs": {
+    "ThresholdHumanDecisionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "approve_proposed",
+            "replace"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "replacement_operator": {
+          "anyOf": [
+            {
+              "enum": [
+                "==",
+                "<=",
+                ">="
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replacement Operator"
+        },
+        "replacement_value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replacement Value"
+        },
+        "threshold_id": {
+          "title": "Threshold Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threshold_id",
+        "decision",
+        "rationale"
+      ],
+      "title": "ThresholdHumanDecisionV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "decided_at": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+      "title": "Decided At",
+      "type": "string"
+    },
+    "decision_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Decision Sha256",
+      "type": "string"
+    },
+    "execution_policy_decision": {
+      "const": "approve_one_shot_calibration_execution_policy_v1",
+      "title": "Execution Policy Decision",
+      "type": "string"
+    },
+    "explicit_no_pa5b_derivation_attestation": {
+      "const": true,
+      "title": "Explicit No Pa5B Derivation Attestation",
+      "type": "boolean"
+    },
+    "metric_and_gl_scoring_decision": {
+      "const": "approve_metric_and_gl_scoring_policy_v1",
+      "title": "Metric And Gl Scoring Decision",
+      "type": "string"
+    },
+    "model_configuration_decision": {
+      "const": "approve_exact_qualified_pa3_configuration",
+      "title": "Model Configuration Decision",
+      "type": "string"
+    },
+    "review_draft_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Review Draft Sha256",
+      "type": "string"
+    },
+    "reviewer_identity": {
+      "maxLength": 240,
+      "minLength": 1,
+      "title": "Reviewer Identity",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "selected_schedule_id": {
+      "enum": [
+        "schedule_maximum_variant_coverage_v1",
+        "schedule_balanced_single_repeat_v1"
+      ],
+      "title": "Selected Schedule Id",
+      "type": "string"
+    },
+    "threshold_decisions": {
+      "items": {
+        "$ref": "#/$defs/ThresholdHumanDecisionV1"
+      },
+      "title": "Threshold Decisions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "review_draft_sha256",
+    "reviewer_identity",
+    "decided_at",
+    "selected_schedule_id",
+    "model_configuration_decision",
+    "execution_policy_decision",
+    "metric_and_gl_scoring_decision",
+    "threshold_decisions",
+    "explicit_no_pa5b_derivation_attestation",
+    "decision_sha256"
+  ],
+  "title": "PA5DHumanDecisionsV1",
+  "type": "object"
+}

@@ -64,6 +64,7 @@ from research_automation_supervisor.replay_campaign_models import (
 )
 from research_automation_supervisor.replay_campaign_prompts import (
     build_supervisor_request,
+    load_already_sent_authority_ledger,
 )
 from research_automation_supervisor.replay_campaign_sources import (
     PreparedReplayCampaign,
@@ -73,6 +74,10 @@ from research_automation_supervisor.replay_campaign_sources import (
 )
 from research_automation_supervisor.shadow_engine import _ShadowLock, _write_bytes
 from research_automation_supervisor.shadow_models import canonical_supervisor_uuid
+from research_automation_supervisor.token_accounting import (
+    CodexUsageBindingV1,
+    load_verified_receipt,
+)
 from research_automation_supervisor.workflow_engine import (
     WorkflowPromptDecision,
     WorkflowPromptRequest,
@@ -1238,13 +1243,18 @@ class _CampaignPromptSource:
                     {str(action_path): sha256_regular_file(action_path)},
                 )
             return _workflow_decision(action, self.human_note)
+        action_id = "supervisor-" + hashlib.sha256(key.encode()).hexdigest()[:16]
+        authority_ledger = load_already_sent_authority_ledger(
+            self.context.run_directory / "decisions",
+            exclude_action_id=action_id,
+        )
         rendered = build_supervisor_request(
             self.context.prepared,
             self.task,
             request,
+            already_sent_authority=authority_ledger,
         )
         output_schema = rendered.output_schema
-        action_id = "supervisor-" + hashlib.sha256(key.encode()).hexdigest()[:16]
         decision_directory = self.context.run_directory / "decisions" / action_id
         schema_path = decision_directory / "output-schema.json"
         prompt_path = decision_directory / "supervisor-prompt.md"
@@ -1258,6 +1268,8 @@ class _CampaignPromptSource:
             "prompt_sha256": rendered.sha256,
             "prompt_byte_count": rendered.byte_count,
             "visible_evidence": rendered.visible_evidence,
+            "already_sent_authority_ledger": rendered.already_sent_authority_ledger,
+            "repeated_material_block_count": rendered.repeated_material_block_count,
         }
         newly_prepared = not decision_directory.exists()
         if newly_prepared:
@@ -1326,6 +1338,7 @@ class _CampaignPromptSource:
                 "supervisor action intent has no provable completion",
                 failure_category="supervisor_completion_unproven",
             )
+        _verify_supervisor_usage_receipt(result, prepared)
         if result.status != "succeeded":
             raise WorkflowPromptSourceError(
                 f"supervisor transport failed safely: {result.status}",
@@ -1425,6 +1438,9 @@ def _prepared_supervisor_request(
     prompt: bytes,
 ) -> PreparedCodexRequest:
     specification = context.prepared.specification
+    task_id = context.prepared.tasks[
+        context.state.current_task_index
+    ].specification.task_id
     request = CodexRunRequest(
         schema_version=1,
         run_id=action_id,
@@ -1443,6 +1459,15 @@ def _prepared_supervisor_request(
         prompt_bytes=prompt,
         prompt_sha256=hashlib.sha256(prompt).hexdigest(),
         policy=ROLE_POLICIES["supervisor"],
+        usage_binding=CodexUsageBindingV1(
+            campaign_id=context.state.campaign_id,
+            task_id=task_id,
+            action_id=action_id,
+            role="supervisor",
+            repair_or_retry=context.state.supervisor_session_id is not None,
+        ),
+        usage_ledger_root=context.run_directory,
+        usage_ledger_path=context.run_directory / "token-ledgers" / f"{task_id}.json",
     )
 
 
@@ -1508,6 +1533,45 @@ def _exact_supervisor_session(
     if resume_id is not None and value != resume_id:
         raise WorkflowPromptSourceError("supervisor resume changed the exact session UUID")
     return value
+
+
+def _verify_supervisor_usage_receipt(
+    result: CodexRunResult,
+    prepared: PreparedCodexRequest,
+) -> None:
+    """Bind recovery to the already sealed receipt instead of recounting events."""
+    directory = Path(result.artifact_directory)
+    events_path = directory / "events.jsonl"
+    receipt_path = directory / "usage-receipt.json"
+    metadata = _read_json(directory / "metadata.json")
+    try:
+        receipt = load_verified_receipt(receipt_path, event_log=events_path)
+    except (OSError, ValueError) as exc:
+        raise WorkflowPromptSourceError(
+            "durable supervisor usage receipt is invalid",
+            failure_category="durable_supervisor_usage_invalid",
+        ) from exc
+    binding = prepared.usage_binding
+    if binding is None:
+        raise WorkflowPromptSourceError(
+            "supervisor usage binding is absent",
+            failure_category="durable_supervisor_usage_invalid",
+        )
+    if (
+        metadata.get("usage_receipt_path") != str(receipt_path)
+        or metadata.get("usage_receipt_sha256") != sha256_regular_file(receipt_path)
+        or metadata.get("usage_receipt_id") != receipt.receipt_id
+        or metadata.get("usage_complete") != receipt.complete
+        or receipt.campaign_id != binding.campaign_id
+        or receipt.task_id != binding.task_id
+        or receipt.action_id != binding.action_id
+        or receipt.role != binding.role
+        or receipt.model != prepared.request.model
+    ):
+        raise WorkflowPromptSourceError(
+            "durable supervisor usage receipt contradicts its action",
+            failure_category="durable_supervisor_usage_invalid",
+        )
 
 
 def _parse_supervisor_action(
@@ -1715,6 +1779,14 @@ def _workflow_services(
         prompt_source=source,
         token_factory=lambda: token,
         require_canonical_thread_ids=True,
+        usage_campaign_id=context.state.campaign_id,
+        usage_task_id=source.task.specification.task_id,
+        usage_ledger_root=context.run_directory,
+        usage_ledger_path=(
+            context.run_directory
+            / "token-ledgers"
+            / f"{source.task.specification.task_id}.json"
+        ),
     )
 
 

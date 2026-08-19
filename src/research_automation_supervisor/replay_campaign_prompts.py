@@ -29,6 +29,65 @@ class RenderedSupervisorRequest:
     byte_count: int
     output_schema: dict[str, object]
     visible_evidence: dict[str, object]
+    already_sent_authority_ledger: dict[str, str]
+    repeated_material_block_count: int
+
+
+def material_prompt_delta(
+    authority_blocks: dict[str, object],
+    already_sent_authority: dict[str, str],
+) -> tuple[dict[str, object], list[dict[str, str]], dict[str, str], int]:
+    """Partition canonical authority into changed bodies and stable path/hash references."""
+    ledger = dict(already_sent_authority)
+    delta_blocks: dict[str, object] = {}
+    refs: list[dict[str, str]] = []
+    repeated = 0
+    for path, value in authority_blocks.items():
+        rendered_value = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(rendered_value.encode("utf-8")).hexdigest()
+        refs.append({"path": path, "sha256": digest})
+        if already_sent_authority.get(path) == digest:
+            repeated += 1
+        else:
+            delta_blocks[path] = value
+        ledger[path] = digest
+    return delta_blocks, refs, dict(sorted(ledger.items())), repeated
+
+
+def load_already_sent_authority_ledger(
+    decisions_root: Path,
+    *,
+    exclude_action_id: str,
+) -> dict[str, str]:
+    """Recover the exact sent-block ledger without depending on session memory."""
+    ledger: dict[str, str] = {}
+    if not decisions_root.is_dir():
+        return ledger
+    for request_path in sorted(decisions_root.glob("*/request.json")):
+        if request_path.parent.name == exclude_action_id:
+            continue
+        try:
+            value = json.loads(request_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        candidate = value.get("already_sent_authority_ledger") if isinstance(value, dict) else None
+        if not isinstance(candidate, dict):
+            continue
+        for path, digest in candidate.items():
+            if (
+                isinstance(path, str)
+                and isinstance(digest, str)
+                and len(digest) == 64
+                and all(character in "0123456789abcdef" for character in digest)
+            ):
+                ledger[path] = digest
+    return ledger
 
 
 def build_supervisor_action_schema(
@@ -114,6 +173,8 @@ def build_supervisor_request(
     campaign: PreparedReplayCampaign,
     task: PreparedReplayTask,
     request: WorkflowPromptRequest,
+    *,
+    already_sent_authority: dict[str, str] | None = None,
 ) -> RenderedSupervisorRequest:
     """Build one supervisor turn from visible authority and Stage 2 evidence."""
     output_schema = build_supervisor_action_schema(task)
@@ -148,30 +209,56 @@ def build_supervisor_request(
         },
     }
     evidence = _portable_supervisor_evidence(evidence, campaign, request)
-    policy = campaign.supervisor_policy.content.decode("utf-8")
+    authority_blocks: dict[str, object] = {
+        "supervisor-policy": campaign.supervisor_policy.content.decode("utf-8"),
+        f"task:{task.specification.task_id}:contract": evidence["contract"],
+        f"task:{task.specification.task_id}:authority": evidence["task_authority"],
+    }
+    contexts = evidence["project_context"]
+    assert isinstance(contexts, list)
+    for index, context in enumerate(contexts):
+        assert isinstance(context, dict)
+        authority_blocks[f"task:{task.specification.task_id}:context:{index}"] = context
+    stage2_evidence = evidence["stage2_evidence"]
+    assert isinstance(stage2_evidence, dict)
+    for name, value in stage2_evidence.items():
+        if value is not None:
+            authority_blocks[f"task:{task.specification.task_id}:evidence:{name}"] = value
+    delta_blocks, refs, ledger, repeated = material_prompt_delta(
+        authority_blocks,
+        already_sent_authority or {},
+    )
+    dynamic_delta = {
+        "campaign": evidence["campaign"],
+        "requested_action": evidence["requested_action"],
+        "persistent_sessions": evidence["persistent_sessions"],
+        "repair_round": evidence["repair_round"],
+        "repair_trigger": evidence["repair_trigger"],
+        "stage2_evidence": "see authority refs and new_or_changed_authority",
+        "new_or_changed_authority": delta_blocks,
+    }
     content = (
-        "You are the one persistent visible-campaign supervisor.\n"
-        "The manifest and Stage 2 engine are authoritative and immutable. "
-        "Do not request contract, scope, permission, acceptance-test, or convention changes.\n"
-        f"Return action {request.action!r}, unless judgment is genuinely required, in which "
-        "case return 'human_pause'. Prompt actions contain only an advisory task body; "
-        "the Stage 2 engine supplies the complete authoritative worker or auditor wrapper. "
-        "Terminal actions must use an empty prompt.\n"
-        "In referenced_paths, include only concrete paths permitted by the output schema; "
-        "omit contextual files outside frozen allowed/protected path authority.\n\n"
-        "[BEGIN SUPERVISOR POLICY]\n"
-        + policy
-        + "\n[END SUPERVISOR POLICY]\n"
-        "[BEGIN VISIBLE CAMPAIGN EVIDENCE]\n"
+        "Goal\n"
+        f"Return {request.action!r}; use human_pause only when judgment is genuinely required.\n\n"
+        "Delta\n"
         + json.dumps(
-            evidence,
+            dynamic_delta,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
             sort_keys=True,
         )
-        + "\n[END VISIBLE CAMPAIGN EVIDENCE]\n"
-        "Return only one JSON object satisfying the engine-owned output schema.\n"
+        + "\n\nAuthority refs\n"
+        + json.dumps(refs, separators=(",", ":"), sort_keys=True)
+        + "\nUnchanged hashes were already sent in this persistent session and are not repeated. "
+        "The manifest and Stage 2 engine remain immutable authority.\n\n"
+        "Validation\nReturn one JSON object satisfying the engine-owned schema. Referenced paths "
+        "must "
+        "be concrete schema-permitted paths. Prompt bodies are advisory; Stage 2 supplies the "
+        "complete authoritative wrapper.\n\n"
+        "Stop\nTerminal actions use an empty prompt. At a task boundary or budget exhaustion, stop "
+        "with a compact durable handoff; qualified recovery retains its original session "
+        "identity.\n"
     ).encode("utf-8")
     return RenderedSupervisorRequest(
         content=content,
@@ -179,6 +266,8 @@ def build_supervisor_request(
         byte_count=len(content),
         output_schema=output_schema,
         visible_evidence=evidence,
+        already_sent_authority_ledger=ledger,
+        repeated_material_block_count=repeated,
     )
 
 

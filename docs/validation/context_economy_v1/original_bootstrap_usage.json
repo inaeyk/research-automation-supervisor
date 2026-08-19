@@ -1,0 +1,12 @@
+{
+  "cached_input_tokens": 25181952,
+  "combined_tokens": 25558374,
+  "events_sha256": "75dd744c77de80a155cabfcc4ac71cba9304b53560b4ed946d61db17e33dc279",
+  "input_tokens": 25502447,
+  "output_tokens": 55927,
+  "reasoning_output_tokens": 18179,
+  "schema_version": 1,
+  "source": "codex exec --json / turn.completed.usage",
+  "thread_id": "01a0167e-87b1-7523-8a7a-5fd99159db76",
+  "turn_count": 1
+}
