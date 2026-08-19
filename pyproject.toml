@@ -52,6 +52,7 @@ run-direct-historical-replay = "research_automation_supervisor.direct_historical
 evaluate-historical-replay = "research_automation_supervisor.offline_replay_evaluator:main"
 prepare-historical-replay-evaluation-package = "research_automation_supervisor.offline_evaluation_package:main"
 report-historical-replay-evaluation-commands = "research_automation_supervisor.offline_evaluation_package:command_report_main"
+research-semantic-replay = "research_automation_supervisor.semantic_replay:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/research_automation_supervisor"]

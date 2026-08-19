@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "control_id": "token-accounting-bootstrap-semantic-replay-v1",
+  "implementation_authority_commit": "4c1df104a861d638275e573b996b6d7a29b1297f",
+  "replay_start_commit": "aeaef976c5990245c3d72f0b0cf41bc76fd8d415",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "high",
+  "global_target_writer_subtask_ids": [
+    "01-runtime-wrapper",
+    "04-qualification"
+  ],
+  "workload_authority": {
+    "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+    "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+  },
+  "plan": {
+    "schema_version": 1,
+    "plan_id": "token-accounting-bootstrap-semantic-v1",
+    "stage_id": "controlled replay of the original token-accounting bootstrap workload",
+    "substantial_stage": true,
+    "decomposition_policy": "smallest_material_context_reduction",
+    "authority_references": [
+      {
+        "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+        "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+      }
+    ],
+    "subtasks": [
+      {
+        "schema_version": 1,
+        "subtask_id": "01-runtime-wrapper",
+        "sequence": 1,
+        "role": "worker",
+        "boundary": "independent_component",
+        "coherence_key": "global-codex-runtime-accounting-wrapper",
+        "objective": "Implement the persistent global Codex runtime usage wrapper and its authoritative durable task receipts.",
+        "scope": [
+          "Global wrapper behavior, exact JSON-event aggregation, durable per-task state, and footer emission required by the frozen workload.",
+          "Do not implement repository-local RAS schema or workflow integration in this subtask."
+        ],
+        "authority_references": [
+          {
+            "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+            "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+          }
+        ],
+        "required_predecessor_artifacts": [],
+        "deliverables": [
+          "A global codex-task entry point with run, resume, show, and total behavior.",
+          "Exact durable task and turn receipt files with fail-closed completeness semantics.",
+          "Deterministic wrapper validation evidence referenced by the handoff."
+        ],
+        "completion_conditions": [
+          "Every emitted token field is sourced from exact turn.completed.usage events without estimation or double counting.",
+          "Run/resume identity and machine footer behavior satisfy the frozen authority.",
+          "The handoff identifies the installed wrapper and all still-valid evidence."
+        ],
+        "validation_requirements": [
+          "Run deterministic synthetic-event and wrapper lifecycle tests once after the final wrapper change.",
+          "Record exact test command, inputs, and evidence path in the handoff."
+        ],
+        "stop_conditions": [
+          "Stop if the global wrapper location cannot be changed safely or exact JSON event usage is unavailable.",
+          "Stop before repository-local integration or any PA-5D scientific work."
+        ]
+      },
+      {
+        "schema_version": 1,
+        "subtask_id": "02-ras-accounting",
+        "sequence": 2,
+        "role": "worker",
+        "boundary": "independent_component",
+        "coherence_key": "ras-token-schema-and-aggregation",
+        "objective": "Implement strict repository-local token usage schemas, parsing, persistence, and campaign aggregation for RAS.",
+        "scope": [
+          "Pydantic receipt models, JSONL parsing, exact aggregation, persistence, and deterministic accounting tests.",
+          "Do not change the model launch path or recovery workflow in this subtask."
+        ],
+        "authority_references": [
+          {
+            "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+            "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+          }
+        ],
+        "required_predecessor_artifacts": [
+          {
+            "path": "handoffs/01-runtime-wrapper.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "01-runtime-wrapper"
+          }
+        ],
+        "deliverables": [
+          "Strict Codex usage and campaign aggregate schemas.",
+          "Exact event-log parser and atomic receipt writer.",
+          "Deterministic aggregation and malformed-input tests."
+        ],
+        "completion_conditions": [
+          "Combined tokens equal input plus output and cached input is retained only as a submetric.",
+          "Missing or malformed turn usage fails closed and duplicate receipts cannot inflate totals.",
+          "The subtask is independently testable without workflow launch integration."
+        ],
+        "validation_requirements": [
+          "Run the focused accounting test module once after its relevant sources stabilize.",
+          "Reuse wrapper evidence only if its recorded validity inputs remain unchanged."
+        ],
+        "stop_conditions": [
+          "Stop if a required counter would need reconstruction from prose or transcripts.",
+          "Stop before model-launch or PA-5D changes."
+        ]
+      },
+      {
+        "schema_version": 1,
+        "subtask_id": "03-launch-integration",
+        "sequence": 3,
+        "role": "worker",
+        "boundary": "investigation_to_implementation",
+        "coherence_key": "model-launch-accounting-integration",
+        "objective": "Integrate authoritative usage capture into the existing RAS model-launch path without weakening workflow semantics.",
+        "scope": [
+          "Codex command construction, adapter execution, result binding, and receipt attachment across supported model roles.",
+          "Preserve existing recovery, sandbox, timeout, and exactly-once rules."
+        ],
+        "authority_references": [
+          {
+            "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+            "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+          }
+        ],
+        "required_predecessor_artifacts": [
+          {
+            "path": "handoffs/01-runtime-wrapper.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "01-runtime-wrapper"
+          },
+          {
+            "path": "handoffs/02-ras-accounting.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "02-ras-accounting"
+          }
+        ],
+        "deliverables": [
+          "Model launch commands that request machine-readable JSON events and durable final output.",
+          "Role/action-bound receipts attached to successful launch results.",
+          "Focused adapter and launch integration evidence."
+        ],
+        "completion_conditions": [
+          "All intended Worker, Auditor, and Supervisor launches produce authoritative receipts.",
+          "A completed launch without valid final usage fails closed.",
+          "Existing launch authority and qualified recovery identity remain intact."
+        ],
+        "validation_requirements": [
+          "Run focused adapter and command-construction tests once after integration changes.",
+          "Reference unchanged predecessor PASS receipts instead of rerunning them."
+        ],
+        "stop_conditions": [
+          "Stop if integration would parse human prose or raw transcripts for token counts.",
+          "Stop if recovery identity or exactly-once safety cannot be preserved."
+        ]
+      },
+      {
+        "schema_version": 1,
+        "subtask_id": "04-qualification",
+        "sequence": 4,
+        "role": "worker",
+        "boundary": "implementation_to_qualification",
+        "coherence_key": "recovery-deduplication-qualification-docs",
+        "objective": "Qualify recovery, deduplication, aggregation, and documentation for the functionally complete bootstrap implementation.",
+        "scope": [
+          "Workflow recovery and deduplication tests, campaign totals, operator documentation, Ruff, and strict mypy.",
+          "Do not regenerate or launch PA-5D scientific sessions."
+        ],
+        "authority_references": [
+          {
+            "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+            "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+          }
+        ],
+        "required_predecessor_artifacts": [
+          {
+            "path": "handoffs/03-launch-integration.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "03-launch-integration"
+          }
+        ],
+        "deliverables": [
+          "Recovery and duplicate-counting regression evidence.",
+          "Updated operator documentation for global and repository-local receipts.",
+          "One coherent qualification receipt set covering focused tests, regressions, Ruff, and strict mypy."
+        ],
+        "completion_conditions": [
+          "Interrupted or resumed work cannot double count a completed turn.",
+          "Role and repair totals are exact and incomplete accounting is explicit.",
+          "Focused tests, relevant regressions, Ruff, and strict mypy pass on the final candidate."
+        ],
+        "validation_requirements": [
+          "Batch relevant recovery and integration regressions once after source changes stabilize.",
+          "Run Ruff and strict mypy once and preserve bounded durable output."
+        ],
+        "stop_conditions": [
+          "Stop on any incomplete authoritative receipt, deduplication ambiguity, or recovery regression.",
+          "Stop before PA-5D authority changes or scientific execution."
+        ]
+      },
+      {
+        "schema_version": 1,
+        "subtask_id": "05-coding-audit",
+        "sequence": 5,
+        "role": "coding_auditor",
+        "boundary": "implementation_to_audit",
+        "coherence_key": "independent-bootstrap-coding-audit",
+        "objective": "Independently audit the completed bootstrap candidate against the frozen authority, evidence, and recovery constraints.",
+        "scope": [
+          "Read-only review of the full candidate diff, compact Worker handoffs, valid receipts, and explicit bootstrap authority.",
+          "No implementation changes, transcript transfer, or unrelated scientific review."
+        ],
+        "authority_references": [
+          {
+            "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
+            "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
+          }
+        ],
+        "required_predecessor_artifacts": [
+          {
+            "path": "handoffs/01-runtime-wrapper.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "01-runtime-wrapper"
+          },
+          {
+            "path": "handoffs/02-ras-accounting.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "02-ras-accounting"
+          },
+          {
+            "path": "handoffs/03-launch-integration.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "03-launch-integration"
+          },
+          {
+            "path": "handoffs/04-qualification.json",
+            "kind": "handoff",
+            "produced_by_subtask_id": "04-qualification"
+          }
+        ],
+        "deliverables": [
+          "A compact audit handoff containing only evidenced findings and disposition.",
+          "Explicit confirmation or rejection of token exactness, recovery, deduplication, and authority compliance."
+        ],
+        "completion_conditions": [
+          "Every material frozen-authority requirement is traced to candidate code or durable evidence.",
+          "Any finding names the affected authority, path, and reproducible evidence.",
+          "The audit starts fresh and receives no Worker conversation or reasoning history."
+        ],
+        "validation_requirements": [
+          "Inspect the candidate diff and all four predecessor handoffs.",
+          "Reuse valid PASS receipts; rerun only validation whose inputs are uncertain or invalidated."
+        ],
+        "stop_conditions": [
+          "Stop with an unresolved finding if evidence is absent, stale, or ambiguous.",
+          "Stop without repair; any repair must receive a concise audit handoff in a separately authorized subtask."
+        ]
+      }
+    ]
+  }
+}
