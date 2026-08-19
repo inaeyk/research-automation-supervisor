@@ -65,6 +65,9 @@ ValidationReuseReason = Literal[
 DEFAULT_HANDOFF_TARGET_TOKENS = 1_000
 DEFAULT_HANDOFF_SOFT_MAX_TOKENS = 2_000
 ABSOLUTE_HANDOFF_TOKEN_UPPER_BOUND = 8_000
+DEFAULT_HANDOFF_TARGET_BYTES = 3_072
+DEFAULT_HANDOFF_SOFT_MAX_BYTES = 4_096
+ABSOLUTE_HANDOFF_BYTE_UPPER_BOUND = 8_192
 
 
 def _freeze_sequence(value: object) -> object:
@@ -335,18 +338,28 @@ class AgentHandoffV1(BaseModel):
 
 
 class HandoffSizeV1(BaseModel):
-    """Measured handoff size; token values are exact only when a counter was supplied."""
+    """Measured handoff size without fabricating token counts."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     byte_count: Annotated[int, Field(ge=0)]
     exact_token_count: Annotated[int, Field(ge=0)] | None
-    token_upper_bound: Annotated[int, Field(ge=0)]
+
+    # Token telemetry is meaningful only when an exact counter was supplied.
+    token_upper_bound: Annotated[int, Field(ge=0)] | None
     target_tokens: Literal[1000] = 1_000
     soft_max_tokens: Literal[2000] = 2_000
-    target_met: bool
-    soft_max_met: bool
-    counting_method: Literal["exact_counter", "utf8_byte_upper_bound"]
+    target_met: bool | None
+    soft_max_met: bool | None
+
+    # Deterministic enforcement when no exact tokenizer is available.
+    target_bytes: Literal[3072] = 3_072
+    soft_max_bytes: Literal[4096] = 4_096
+    absolute_max_bytes: Literal[8192] = 8_192
+    byte_target_met: bool
+    byte_soft_max_met: bool
+
+    counting_method: Literal["exact_counter", "utf8_bytes_only"]
 
 
 def measure_agent_handoff(
@@ -354,26 +367,58 @@ def measure_agent_handoff(
     *,
     token_counter: Callable[[str], int] | None = None,
 ) -> HandoffSizeV1:
-    """Enforce the target/soft maximum without fabricating an exact token count."""
+    """Enforce compact handoffs without pretending UTF-8 bytes are token counts."""
+
     raw = _canonical_json(handoff.model_dump(mode="json"))
     text = raw.decode("utf-8")
+    byte_count = len(raw)
+
     exact = token_counter(text) if token_counter is not None else None
     if exact is not None and exact < 0:
         raise ValueError("token counter returned a negative size")
-    # A byte-level tokenizer cannot produce more tokens than UTF-8 input bytes.  This is an
-    # upper bound, not an estimated runtime counter, and remains safe when no tokenizer exists.
-    upper_bound = exact if exact is not None else len(raw)
-    if upper_bound > DEFAULT_HANDOFF_SOFT_MAX_TOKENS and handoff.oversize_justification is None:
-        raise ValueError("handoff above the 2000-token soft maximum requires justification")
-    if upper_bound > ABSOLUTE_HANDOFF_TOKEN_UPPER_BOUND:
-        raise ValueError("handoff exceeds the absolute 8000-token upper bound")
+
+    # Bytes are always known exactly. They provide the deterministic fallback
+    # policy when no authoritative/model-compatible tokenizer is available.
+    if byte_count > ABSOLUTE_HANDOFF_BYTE_UPPER_BOUND:
+        raise ValueError("handoff exceeds the absolute 8192-byte upper bound")
+    if (
+        byte_count > DEFAULT_HANDOFF_SOFT_MAX_BYTES
+        and handoff.oversize_justification is None
+    ):
+        raise ValueError(
+            "handoff above the 4096-byte soft maximum requires justification"
+        )
+
+    # If an exact compatible tokenizer is available, enforce the token policy
+    # independently as well.
+    if exact is not None:
+        if exact > ABSOLUTE_HANDOFF_TOKEN_UPPER_BOUND:
+            raise ValueError("handoff exceeds the absolute 8000-token upper bound")
+        if (
+            exact > DEFAULT_HANDOFF_SOFT_MAX_TOKENS
+            and handoff.oversize_justification is None
+        ):
+            raise ValueError(
+                "handoff above the 2000-token soft maximum requires justification"
+            )
+
     return HandoffSizeV1(
-        byte_count=len(raw),
+        byte_count=byte_count,
         exact_token_count=exact,
-        token_upper_bound=upper_bound,
-        target_met=upper_bound <= DEFAULT_HANDOFF_TARGET_TOKENS,
-        soft_max_met=upper_bound <= DEFAULT_HANDOFF_SOFT_MAX_TOKENS,
-        counting_method="exact_counter" if exact is not None else "utf8_byte_upper_bound",
+        token_upper_bound=exact,
+        target_met=(
+            exact <= DEFAULT_HANDOFF_TARGET_TOKENS
+            if exact is not None
+            else None
+        ),
+        soft_max_met=(
+            exact <= DEFAULT_HANDOFF_SOFT_MAX_TOKENS
+            if exact is not None
+            else None
+        ),
+        byte_target_met=byte_count <= DEFAULT_HANDOFF_TARGET_BYTES,
+        byte_soft_max_met=byte_count <= DEFAULT_HANDOFF_SOFT_MAX_BYTES,
+        counting_method="exact_counter" if exact is not None else "utf8_bytes_only",
     )
 
 
