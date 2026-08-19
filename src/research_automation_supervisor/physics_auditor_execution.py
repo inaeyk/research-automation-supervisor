@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -1387,6 +1388,10 @@ def _invoke_qualified_codex(
             ),
             version_probe=lambda _executable, _environment, _workspace: None,
             process_started=process_started,
+            usage_task_id=_physics_usage_task_id(action_root),
+            usage_role="physics_auditor",
+            usage_action_kind=_physics_usage_action_kind(prepared.request.run_id),
+            usage_ledger_root=_physics_usage_ledger_root(action_root),
         )
         return _verify_codex_run(
             prepared=prepared,
@@ -1398,6 +1403,29 @@ def _invoke_qualified_codex(
         )
     finally:
         reset_runtime_home_contents(runtime_home)
+
+
+def _physics_usage_task_id(action_root: Path) -> str:
+    """Read the already-durable action request binding for accounting only."""
+    try:
+        value = json.loads(
+            (action_root / CONTROL_DIRECTORY / REQUEST_FILE).read_bytes()
+        )
+        task_id = value.get("task_id") if isinstance(value, dict) else None
+    except (OSError, json.JSONDecodeError):
+        task_id = None
+    return task_id if isinstance(task_id, str) and task_id else action_root.name
+
+
+def _physics_usage_action_kind(action_id: str) -> Literal["initial", "repair_retry"]:
+    match = re.search(r"-r(\d+)$", action_id)
+    return "repair_retry" if match is not None and int(match.group(1)) > 0 else "initial"
+
+
+def _physics_usage_ledger_root(action_root: Path) -> Path:
+    if action_root.parent.name == "audits" and action_root.parent.parent.name == "physics":
+        return action_root.parent.parent.parent
+    return action_root
 
 
 def _verify_codex_run(

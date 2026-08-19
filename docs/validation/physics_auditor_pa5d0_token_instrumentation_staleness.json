@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "declared_on": "2026-08-19",
+  "status": "stale_for_execution_authority",
+  "authority_granted": false,
+  "finalized": false,
+  "benchmark_or_gl_sessions_launched": false,
+  "reason": "Codex runtime and model-launch token instrumentation changed after the PA-5D0 draft artifacts were hashed.",
+  "historical_draft": {
+    "git_commit": "aeaef976c5990245c3d72f0b0cf41bc76fd8d415",
+    "artifacts": [
+      {
+        "path": "docs/validation/physics_auditor_pa5d_failure.md",
+        "sha256": "02060b4fc6c190700fad7f72e73473c46f25e5a3ad4d46dfde53921ec8c626a0"
+      },
+      {
+        "path": "docs/validation/physics_auditor_pa5d_failure.json",
+        "sha256": "1facfedf2b95052793df7bf2b727009356d05a4470ce535a5ab18d5e14e22010"
+      }
+    ],
+    "hashes_may_be_reused_for_execution_authority": false
+  },
+  "required_before_pa5d1": [
+    "Qualify the token instrumentation.",
+    "Regenerate PA-5D0 authority artifacts and hashes.",
+    "Review the regenerated authority before any PA-5D1 execution."
+  ],
+  "declaration_is_approval_or_finalization": false
+}

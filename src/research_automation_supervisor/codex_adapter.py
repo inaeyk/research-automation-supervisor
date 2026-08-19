@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -28,6 +29,13 @@ from research_automation_supervisor.codex_models import (
     PreparedCodexRequest,
     RunStatus,
     load_codex_request,
+)
+from research_automation_supervisor.codex_usage import (
+    UsageActionKind,
+    UsageRole,
+    parse_codex_usage_jsonl,
+    persist_usage_receipt,
+    update_task_token_ledger,
 )
 from research_automation_supervisor.doctor import MINIMUM_CODEX, _parse_codex_version
 from research_automation_supervisor.errors import (
@@ -310,6 +318,10 @@ def run_prepared_codex(
     process_launch_verifier: ProcessLaunchVerifier | None = None,
     process_started: ProcessStarted | None = None,
     process_finished: ProcessFinished | None = None,
+    usage_task_id: str | None = None,
+    usage_role: UsageRole | None = None,
+    usage_action_kind: UsageActionKind | None = None,
+    usage_ledger_root: Path | None = None,
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
@@ -525,6 +537,20 @@ def run_prepared_codex(
         redaction_values,
     )
 
+    _persist_authoritative_usage(
+        prepared=prepared,
+        resolved_runs_dir=resolved_runs_dir,
+        artifact_directory=artifact_directory,
+        event_path=event_path,
+        codex_version=codex_version,
+        resume_thread_id=resume_thread_id,
+        malformed_event_count=len(event_processor.malformed_hashes),
+        usage_task_id=usage_task_id,
+        usage_role=usage_role,
+        usage_action_kind=usage_action_kind,
+        usage_ledger_root=usage_ledger_root,
+    )
+
     metadata = _build_metadata(
         prepared=prepared,
         artifact_directory=artifact_directory,
@@ -564,6 +590,111 @@ def run_prepared_codex(
             resolved_output_schema,
         )
     return result
+
+
+def _persist_authoritative_usage(
+    *,
+    prepared: PreparedCodexRequest,
+    resolved_runs_dir: Path,
+    artifact_directory: Path,
+    event_path: Path,
+    codex_version: str | None,
+    resume_thread_id: str | None,
+    malformed_event_count: int,
+    usage_task_id: str | None,
+    usage_role: UsageRole | None,
+    usage_action_kind: UsageActionKind | None,
+    usage_ledger_root: Path | None,
+) -> None:
+    """Bind exact runtime counters to an action without entering scientific proofs."""
+    inferred_root, inferred_task, inferred_role, inferred_action_kind = (
+        _infer_usage_context(
+            resolved_runs_dir,
+            prepared.request.run_id,
+            prepared.request.role,
+            resume_thread_id,
+        )
+    )
+    ledger_root = (usage_ledger_root or inferred_root).resolve(strict=False)
+    task_id = usage_task_id or inferred_task
+    role = usage_role or inferred_role
+    action_kind = usage_action_kind or inferred_action_kind
+    try:
+        receipt = parse_codex_usage_jsonl(
+            event_path,
+            campaign_task_id=task_id,
+            role=role,
+            action_kind=action_kind,
+            action_id=prepared.request.run_id,
+            model=prepared.request.model,
+            codex_cli_version=codex_version,
+            resumed_thread_id=resume_thread_id,
+            disposition="ras_redacted",
+            external_malformed_event_count=malformed_event_count,
+        )
+        receipt_directory = ledger_root / "token-usage-receipts"
+        receipt_path = receipt_directory / f"{artifact_directory.name}.json"
+        if receipt_path.is_file():
+            existing = receipt_path.read_bytes()
+            expected = receipt.model_dump_json(exclude_none=False)
+            if json.loads(existing) != json.loads(expected):
+                raise CodexRequestError(
+                    "recovered action usage receipt contradicts runtime authority"
+                )
+        else:
+            persist_usage_receipt(receipt_path, receipt)
+        update_task_token_ledger(ledger_root / "task-token-ledger.json", receipt)
+    except CodexRequestError:
+        raise
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CodexRequestError(
+            "authoritative Codex usage accounting could not be persisted"
+        ) from exc
+
+
+def _infer_usage_context(
+    runs_dir: Path,
+    action_id: str,
+    request_role: str,
+    resume_thread_id: str | None,
+) -> tuple[Path, str, UsageRole, UsageActionKind]:
+    """Infer stable campaign/task placement for every existing adapter call path."""
+    root = runs_dir
+    if (
+        runs_dir.name == "codex"
+        and runs_dir.parent.name in {"worker", "audits", "supervisor"}
+    ) or runs_dir.parent.name == "proposals":
+        root = runs_dir.parent.parent
+    elif request_role == "auditor":
+        root = runs_dir.parent
+
+    role: UsageRole
+    if request_role == "worker":
+        role = "worker"
+    elif request_role == "auditor":
+        role = "coding_auditor"
+    else:
+        role = "other_model_session"
+    round_match = re.search(r"-r(\d+)$", action_id)
+    is_later_round = round_match is not None and int(round_match.group(1)) > 0
+    action_kind: UsageActionKind = (
+        "repair_retry" if resume_thread_id is not None or is_later_round else "initial"
+    )
+    return root, _durable_usage_scope_id(root, action_id), role, action_kind
+
+
+def _durable_usage_scope_id(root: Path, fallback: str) -> str:
+    """Prefer the campaign/task identifier already committed in durable state."""
+    try:
+        value = json.loads((root / "state.json").read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        value = None
+    if isinstance(value, dict):
+        for key in ("task_id", "substage_id", "campaign_id", "live_shadow_id"):
+            identifier = value.get(key)
+            if isinstance(identifier, str) and identifier:
+                return identifier
+    return root.name or fallback
 
 
 def build_subprocess_environment(

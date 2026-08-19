@@ -30,6 +30,7 @@ from research_automation_supervisor.codex_models import (
     RunStatus,
     load_codex_request,
 )
+from research_automation_supervisor.codex_usage import TaskTokenLedgerV1
 from research_automation_supervisor.errors import (
     CodexConfidentialityError,
     CodexDependencyError,
@@ -130,6 +131,57 @@ def run_fake(
         limits=limits or AdapterLimits(),
         monotonic=monotonic,
     )
+
+
+def test_adapter_persists_authoritative_action_receipt_and_task_ledger(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_request(tmp_path, "worker")
+    ledger_root = prepared.request_path.parent / "runs"
+    ledger_root.mkdir()
+    (ledger_root / "state.json").write_text(
+        json.dumps({"substage_id": "task-from-durable-state"}), encoding="ascii"
+    )
+    configure(
+        prepared,
+        stdout_lines=[
+            '{"type":"thread.started","thread_id":"thread-usage"}',
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 17,
+                        "cached_input_tokens": 6,
+                        "output_tokens": 5,
+                        "reasoning_output_tokens": 3,
+                    },
+                }
+            ),
+        ],
+        final="completed",
+    )
+
+    result = run_fake(prepared)
+
+    receipt = json.loads(
+        (ledger_root / "token-usage-receipts" / "worker-run.json").read_bytes()
+    )
+    ledger = TaskTokenLedgerV1.model_validate_json(
+        (ledger_root / "task-token-ledger.json").read_bytes(), strict=True
+    )
+    assert result.status == "succeeded"
+    assert receipt["complete"] is True
+    assert receipt["campaign_task_id"] == "task-from-durable-state"
+    assert ledger.task_id == "task-from-durable-state"
+    assert receipt["codex_thread_id"] == "thread-usage"
+    assert receipt["event_log_sha256"] == hashlib.sha256(
+        (Path(result.artifact_directory) / "events.jsonl").read_bytes()
+    ).hexdigest()
+    assert ledger.worker.input_tokens == 17
+    assert ledger.worker.cached_input_tokens == 6
+    assert ledger.worker.output_tokens == 5
+    assert ledger.worker.reasoning_output_tokens == 3
+    assert ledger.worker.combined_tokens == 22
 
 
 @pytest.mark.parametrize(
