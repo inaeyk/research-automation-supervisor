@@ -17,7 +17,6 @@ printf '%s\n' 'Reply exactly OK3. Do not use tools.' >"$smoke_root/turn-3.md"
   --model gpt-5.6-sol \
   -c model_reasoning_effort=high \
   --sandbox workspace-write \
-  --ask-for-approval never \
   -c model_auto_compact_token_limit=64000 \
   -c tool_output_token_limit=2048 \
   --add-dir "$smoke_root"
