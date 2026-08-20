@@ -408,6 +408,15 @@ def cumulative_usage_from_jsonl(event_log: Path) -> tuple[str, CodexTurnUsageV1]
     return next(iter(thread_ids)), usages[-1]
 
 
+def cumulative_usage_delta(
+    current: CodexTurnUsageV1,
+    *,
+    baseline: CodexTurnUsageV1 | None,
+) -> CodexTurnUsageV1:
+    """Return one exact delta from authoritative cumulative runtime counters."""
+    return _cumulative_deltas((current,), prior=baseline)[0]
+
+
 def _parse_event_usage(
     event_log: Path,
 ) -> tuple[
