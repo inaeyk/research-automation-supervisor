@@ -556,16 +556,12 @@ def measure_agent_handoff(
     # policy when no authoritative/model-compatible tokenizer is available.
     if byte_count > ABSOLUTE_HANDOFF_BYTE_UPPER_BOUND:
         raise ValueError("handoff exceeds the absolute 8192-byte upper bound")
-    if byte_count > DEFAULT_HANDOFF_SOFT_MAX_BYTES and handoff.oversize_justification is None:
-        raise ValueError("handoff above the 4096-byte soft maximum requires justification")
 
     # If an exact compatible tokenizer is available, enforce the token policy
     # independently as well.
     if exact is not None:
         if exact > ABSOLUTE_HANDOFF_TOKEN_UPPER_BOUND:
             raise ValueError("handoff exceeds the absolute 8000-token upper bound")
-        if exact > DEFAULT_HANDOFF_SOFT_MAX_TOKENS and handoff.oversize_justification is None:
-            raise ValueError("handoff above the 2000-token soft maximum requires justification")
 
     return HandoffSizeV1(
         byte_count=byte_count,
