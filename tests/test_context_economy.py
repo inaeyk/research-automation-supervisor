@@ -186,11 +186,11 @@ def test_context_receipt_uses_deterministic_fake_events(tmp_path: Path) -> None:
         profile="B4",
         usage_receipt=usage,
     )
-    assert receipt.input_tokens == 400
-    assert receipt.cached_input_tokens == 330
-    assert receipt.uncached_input_tokens == 70
-    assert receipt.output_tokens == 30
-    assert receipt.combined_tokens == 430
+    assert receipt.input_tokens == 300
+    assert receipt.cached_input_tokens == 250
+    assert receipt.uncached_input_tokens == 50
+    assert receipt.output_tokens == 20
+    assert receipt.combined_tokens == 320
     assert receipt.inference_token_sample_count is None
     assert receipt.tool_call_count == 1
     assert receipt.model_visible_tool_output_chars == 5

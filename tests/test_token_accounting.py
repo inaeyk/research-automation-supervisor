@@ -103,28 +103,24 @@ def test_turn_completed_usage_requires_core_and_accepts_additive_counters() -> N
     with pytest.raises(ValidationError):
         CodexTurnUsageV1.model_validate({**_usage(1, 0, 1, 0), "output_tokens": 1.0})
     with pytest.raises(ValidationError):
-        CodexTurnUsageV1.model_validate(
-            {**_usage(1, 0, 1, 0), "future_nonnegative_counter": -1}
-        )
+        CodexTurnUsageV1.model_validate({**_usage(1, 0, 1, 0), "future_nonnegative_counter": -1})
     with pytest.raises(ValidationError):
         CodexTurnUsageV1.model_validate(_usage(5, 6, 1, 0))
 
 
-def test_multiple_completed_turns_preserve_cached_and_reasoning_submetrics(
+def test_cumulative_snapshots_use_exact_deltas_and_final_thread_total(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "events.jsonl"
+    snapshots = (
+        {**_usage(100, 80, 10, 2), "cache_write_input_tokens": 1},
+        {**_usage(250, 210, 20, 5), "cache_write_input_tokens": 3},
+        {**_usage(400, 350, 30, 9), "cache_write_input_tokens": 6},
+    )
     _write_events(
         path,
         _event("thread.started", thread_id="thread-1"),
-        _event(
-            "turn.completed",
-            usage={**_usage(100, 80, 30, 11), "cache_write_input_tokens": 5},
-        ),
-        _event(
-            "turn.completed",
-            usage={**_usage(50, 10, 20, 9), "future_nonnegative_counter": 4},
-        ),
+        *(_event("turn.completed", usage=snapshot) for snapshot in snapshots),
     )
 
     receipt = receipt_from_jsonl(
@@ -135,12 +131,61 @@ def test_multiple_completed_turns_preserve_cached_and_reasoning_submetrics(
     )
 
     assert receipt.complete is True
-    assert receipt.completed_turn_count == 2
-    assert receipt.input_tokens == 150
-    assert receipt.cached_input_tokens == 90
-    assert receipt.output_tokens == 50
-    assert receipt.reasoning_output_tokens == 20
-    assert receipt.combined_tokens == 200
+    assert receipt.completed_turn_count == 3
+    assert receipt.input_tokens == 400
+    assert receipt.cached_input_tokens == 350
+    assert receipt.cache_write_input_tokens == 6
+    assert receipt.output_tokens == 30
+    assert receipt.reasoning_output_tokens == 9
+    assert receipt.combined_tokens == 430
+
+    prior: CodexTurnUsageV1 | None = None
+    expected = ((100, 80, 10), (150, 130, 10), (150, 140, 10))
+    for index, (snapshot, expected_delta) in enumerate(
+        zip(snapshots, expected, strict=True), start=1
+    ):
+        turn_path = tmp_path / f"turn-{index}.jsonl"
+        _write_events(
+            turn_path,
+            _event("thread.started", thread_id="thread-1"),
+            _event("turn.completed", usage=snapshot),
+        )
+        delta = receipt_from_jsonl(
+            turn_path,
+            binding=_binding(f"worker-r{index:03d}"),
+            model="gpt-5.6",
+            codex_cli_version="codex-cli 0.147.0",
+            prior_cumulative_usage=prior,
+            require_prior_cumulative_usage=index > 1,
+        )
+        assert (
+            delta.input_tokens,
+            delta.cached_input_tokens,
+            delta.output_tokens,
+        ) == expected_delta
+        prior = CodexTurnUsageV1.model_validate(snapshot)
+
+
+def test_cumulative_counter_decrease_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    _write_events(
+        path,
+        _event("thread.started", thread_id="thread-1"),
+        _event("turn.completed", usage=_usage(250, 210, 20, 5)),
+        _event("turn.completed", usage=_usage(249, 211, 21, 6)),
+    )
+
+    receipt = receipt_from_jsonl(
+        path,
+        binding=_binding("worker-r000"),
+        model="gpt-5.6",
+        codex_cli_version="codex-cli 0.147.0",
+    )
+
+    assert receipt.complete is False
+    assert receipt.incomplete_reasons == ("non_monotonic_or_changed_usage_counters",)
+    assert receipt.completed_turn_count == 0
+    assert receipt.combined_tokens == 0
 
 
 @pytest.mark.parametrize(
@@ -246,6 +291,52 @@ def test_recovery_reuses_verified_receipt_without_double_counting(tmp_path: Path
     assert ledger.repairs_retries.combined_tokens == 28
 
 
+def test_recovery_deduplicates_persisted_resumed_turn_deltas(tmp_path: Path) -> None:
+    first_events = tmp_path / "turn-1.jsonl"
+    second_events = tmp_path / "turn-2.jsonl"
+    _write_events(
+        first_events,
+        _event("thread.started", thread_id="thread-1"),
+        _event("turn.completed", usage=_usage(100, 80, 10, 2)),
+    )
+    _write_events(
+        second_events,
+        _event("thread.started", thread_id="thread-1"),
+        _event("turn.completed", usage=_usage(250, 210, 20, 5)),
+    )
+    first = receipt_from_jsonl(
+        first_events,
+        binding=_binding("worker-r001"),
+        model="gpt-5.6",
+        codex_cli_version="codex-cli 0.147.0",
+    )
+    resumed = receipt_from_jsonl(
+        second_events,
+        binding=_binding("worker-r002"),
+        model="gpt-5.6",
+        codex_cli_version="codex-cli 0.147.0",
+        prior_cumulative_usage=CodexTurnUsageV1.model_validate(_usage(100, 80, 10, 2)),
+        require_prior_cumulative_usage=True,
+    )
+    receipt_path = tmp_path / "resumed-receipt.json"
+    write_receipt(receipt_path, resumed)
+    recovered = load_verified_receipt(receipt_path, event_log=second_events)
+
+    ledger = aggregate_task_receipts(
+        [first, resumed, recovered], campaign_id="campaign-1", task_id="task-1"
+    )
+
+    assert resumed.input_tokens == 150
+    assert resumed.cached_input_tokens == 130
+    assert resumed.output_tokens == 10
+    assert ledger.total_input_tokens == 250
+    assert ledger.total_cached_input_tokens == 210
+    assert ledger.total_output_tokens == 20
+    assert ledger.total_combined_tokens == 270
+    assert ledger.total_turn_count == 2
+    assert ledger.total_session_count == 1
+
+
 def test_worker_auditor_and_retry_aggregation_has_exact_final_total(tmp_path: Path) -> None:
     worker = _receipt(tmp_path, "worker-r000", "worker", _usage(100, 60, 20, 8))
     repair = _receipt(
@@ -255,15 +346,9 @@ def test_worker_auditor_and_retry_aggregation_has_exact_final_total(tmp_path: Pa
         _usage(40, 30, 10, 4),
         repair_or_retry=True,
     )
-    coding = _receipt(
-        tmp_path, "auditor-r001", "coding_auditor", _usage(70, 20, 15, 6)
-    )
-    physics = _receipt(
-        tmp_path, "physics-r001", "physics_auditor", _usage(90, 50, 25, 12)
-    )
-    supervisor = _receipt(
-        tmp_path, "supervisor-r001", "supervisor", _usage(30, 0, 5, 2)
-    )
+    coding = _receipt(tmp_path, "auditor-r001", "coding_auditor", _usage(70, 20, 15, 6))
+    physics = _receipt(tmp_path, "physics-r001", "physics_auditor", _usage(90, 50, 25, 12))
+    supervisor = _receipt(tmp_path, "supervisor-r001", "supervisor", _usage(30, 0, 5, 2))
 
     ledger = aggregate_task_receipts(
         [worker, repair, coding, physics, supervisor],
@@ -274,6 +359,7 @@ def test_worker_auditor_and_retry_aggregation_has_exact_final_total(tmp_path: Pa
     assert ledger.worker.model_dump() == {
         "input_tokens": 140,
         "cached_input_tokens": 90,
+        "cache_write_input_tokens": None,
         "output_tokens": 30,
         "reasoning_output_tokens": 12,
         "combined_tokens": 170,
@@ -307,9 +393,7 @@ def test_conflicting_receipts_for_one_action_are_rejected(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ValueError, match="conflicting usage receipts"):
-        aggregate_task_receipts(
-            [first, second], campaign_id="campaign-1", task_id="task-1"
-        )
+        aggregate_task_receipts([first, second], campaign_id="campaign-1", task_id="task-1")
 
 
 def test_campaign_aggregate_includes_distinct_tasks_once(tmp_path: Path) -> None:
@@ -333,9 +417,7 @@ def test_campaign_aggregate_includes_distinct_tasks_once(tmp_path: Path) -> None
         codex_cli_version="codex-cli 0.147.0",
     )
 
-    ledger = aggregate_task_receipts(
-        [first, first, second], campaign_id="campaign-1", task_id="*"
-    )
+    ledger = aggregate_task_receipts([first, first, second], campaign_id="campaign-1", task_id="*")
 
     assert ledger.task_id == "*"
     assert ledger.total_session_count == 2

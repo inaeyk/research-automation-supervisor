@@ -37,6 +37,7 @@ from research_automation_supervisor.semantic_replay import (
     ReplayCommandV1,
     _completed_subtask_prefix,
     _refuse_unqualified_turn_relaunch,
+    _usage_for_epoch_turn,
     _verified_completed_task,
     execute_replay,
     load_control,
@@ -47,6 +48,25 @@ from research_automation_supervisor.semantic_replay import (
 from research_automation_supervisor.token_accounting import load_verified_receipt
 
 AUTHORITY_HASH = "a" * 64
+
+
+def _frozen_task_state(options: list[str], model: str) -> dict[str, object]:
+    core: dict[str, object] = {
+        "schema_version": 1,
+        "codex_exec_options": options,
+        "model": model,
+    }
+    return {
+        "schema_version": 2,
+        "initial_options": options,
+        "model": model,
+        "frozen_execution_policy": {
+            **core,
+            "sha256": hashlib.sha256(
+                json.dumps(core, sort_keys=True, separators=(",", ":")).encode("ascii")
+            ).hexdigest(),
+        },
+    }
 
 
 def _authority(path: str = "authority.md", digest: str = AUTHORITY_HASH) -> AuthorityReferenceV1:
@@ -279,7 +299,7 @@ def test_context_locality_policy_is_deterministic_and_role_changes_force_freshne
             little_relevant_context=False,
             context_health_exceeded=False,
             qualified_recovery_requires_new_identity=False,
-        )
+        ),
     )
     assert continuation.fresh_session is False
     assert continuation.reason == "dependent_interfaces"
@@ -303,7 +323,7 @@ def test_context_locality_policy_is_deterministic_and_role_changes_force_freshne
             little_relevant_context=False,
             context_health_exceeded=False,
             qualified_recovery_requires_new_identity=False,
-        )
+        ),
     )
     assert fresh.fresh_session is True
     assert fresh.reason == "role_change"
@@ -341,9 +361,7 @@ def test_handoff_without_exact_tokenizer_enforces_deterministic_byte_limits() ->
         measure_agent_handoff(above_byte_soft_max)
 
     justified = above_byte_soft_max.model_copy(
-        update={
-            "oversize_justification": "The required durable recovery facts exceed 4096 bytes."
-        }
+        update={"oversize_justification": "The required durable recovery facts exceed 4096 bytes."}
     )
     size = measure_agent_handoff(justified)
     assert size.byte_count > size.soft_max_bytes
@@ -494,9 +512,7 @@ def _telemetry(
             "handoff_size_bytes": 600,
             "handoff_size_tokens": 150,
             "session_fresh": epoch_turn_index == 1,
-            "continuation_reason": (
-                None if epoch_turn_index == 1 else "epoch_continuation"
-            ),
+            "continuation_reason": (None if epoch_turn_index == 1 else "epoch_continuation"),
         }
     )
 
@@ -566,6 +582,102 @@ def test_multi_turn_epoch_aggregates_each_receipt_once_without_fabricated_infere
     )
     with pytest.raises(ValueError, match="reused across fresh session epochs"):
         aggregate_semantic_telemetry((first, reused_fresh_thread))
+
+
+def test_semantic_epoch_aggregate_uses_cumulative_snapshot_deltas(
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "task"
+    turns = task_root / "turns"
+    turns.mkdir(parents=True)
+    snapshots = ((100, 80, 10), (250, 210, 20), (400, 350, 30))
+    commands: list[ReplayCommandV1] = []
+    for index, (input_tokens, cached_tokens, output_tokens) in enumerate(snapshots, start=1):
+        event_log = turns / f"{index:06d}.events.jsonl"
+        event_log.write_text(
+            json.dumps(
+                {
+                    "type": "thread.started",
+                    "thread_id": "thread-shared",
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "cached_input_tokens": cached_tokens,
+                        "output_tokens": output_tokens,
+                        "reasoning_output_tokens": index * 2,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        commands.append(
+            ReplayCommandV1(
+                epoch_id="epoch-shared",
+                epoch_turn_index=index,
+                subtask_id=f"task-{index}",
+                task_id="plan.epoch-shared",
+                mode="run" if index == 1 else "resume",
+                prompt_path=str(tmp_path / f"prompt-{index}.md"),
+                handoff_path=str(tmp_path / f"handoff-{index}.json"),
+                launch_path=str(tmp_path / f"launch-{index}.json"),
+                argv=("codex-task", "resume", "plan.epoch-shared", "prompt.md"),
+            )
+        )
+
+    state = {
+        "thread_id": "thread-shared",
+        "model": "gpt-5.6-sol",
+        "codex_cli_version": "codex-cli 0.147.0",
+    }
+    records: list[SemanticSubtaskTelemetryV1] = []
+    for command in commands:
+        receipt = _usage_for_epoch_turn(
+            event_log=turns / f"{command.epoch_turn_index:06d}.events.jsonl",
+            task_root=task_root,
+            command=command,
+            plan_id="plan",
+            role="worker",
+            repair_or_retry=False,
+            task_state=state,
+        )
+        record = _telemetry(
+            command.subtask_id,
+            "worker",
+            epoch_id=command.epoch_id,
+            epoch_turn_index=command.epoch_turn_index,
+            thread_id="thread-shared",
+        ).model_copy(
+            update={
+                "usage_receipt_id": receipt.receipt_id,
+                "input_tokens": receipt.input_tokens,
+                "cached_input_tokens": receipt.cached_input_tokens,
+                "uncached_input_tokens": (receipt.input_tokens - receipt.cached_input_tokens),
+                "output_tokens": receipt.output_tokens,
+                "reasoning_output_tokens": receipt.reasoning_output_tokens,
+                "combined_tokens": receipt.combined_tokens,
+                "inference_sample_count": None,
+                "median_inference_context_tokens": None,
+                "max_inference_context_tokens": None,
+                "compactions": None,
+            }
+        )
+        records.append(record)
+
+    assert [record.input_tokens for record in records] == [100, 150, 150]
+    assert [record.cached_input_tokens for record in records] == [80, 130, 140]
+    aggregate = aggregate_semantic_telemetry(records)
+    assert aggregate.total_stage.input_tokens == 400
+    assert aggregate.total_stage.cached_input_tokens == 350
+    assert aggregate.total_stage.output_tokens == 30
+    assert aggregate.total_stage.combined_tokens == 430
+    assert aggregate.total_stage.session_count == 1
+    assert aggregate.total_stage.inference_sample_count is None
 
 
 def test_frozen_bootstrap_replay_plan_has_exact_three_epoch_topology() -> None:
@@ -723,9 +835,7 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
         json.dumps(stored_handoff.model_dump(mode="json")), encoding="utf-8"
     )
     (recovery_telemetry / "task-1.json").write_text(
-        json.dumps(
-            _telemetry("task-1", "worker", epoch_id="epoch-1").model_dump(mode="json")
-        ),
+        json.dumps(_telemetry("task-1", "worker", epoch_id="epoch-1").model_dump(mode="json")),
         encoding="utf-8",
     )
     (workspace / "candidate.py").write_text("mutated after handoff\n", encoding="utf-8")
@@ -783,12 +893,10 @@ def test_completed_global_task_is_qualified_for_exactly_once_recovery(
     (task_root / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                **_frozen_task_state(list(argv[5:]), "gpt-5.6-sol"),
                 "task_id": command.task_id,
                 "thread_id": "thread-task-1",
                 "working_directory": str(workspace.resolve()),
-                "model": "gpt-5.6-sol",
-                "initial_options": list(argv[5:]),
                 "turn_count": 1,
                 "usage_complete": True,
             }
@@ -984,9 +1092,7 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
         "unresolved_findings": [],
         "remaining_work": ["Audit the candidate independently."],
         "next_subtask_requirements": ["Inspect the candidate diff and this handoff."],
-        "do_not_rediscover_or_retest": [
-            "Do not rerun the unchanged deterministic unit test."
-        ],
+        "do_not_rediscover_or_retest": ["Do not rerun the unchanged deterministic unit test."],
         "oversize_justification": None,
     }
     task_root = ledger_root / worker_command.task_id
@@ -1012,22 +1118,18 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
         + "\n",
         encoding="utf-8",
     )
-    (turns / "000001.final-message.md").write_text(
-        json.dumps(final_draft), encoding="utf-8"
-    )
+    (turns / "000001.final-message.md").write_text(json.dumps(final_draft), encoding="utf-8")
     (turns / "000001.prompt.sha256").write_text(
         hashlib.sha256(prompt_path.read_bytes()).hexdigest() + "\n", encoding="ascii"
     )
     (task_root / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                **_frozen_task_state(list(worker_command.argv[5:]), "gpt-5.6-sol"),
                 "task_id": worker_command.task_id,
                 "thread_id": "thread-task-1",
                 "working_directory": str(workspace.resolve()),
-                "model": "gpt-5.6-sol",
                 "codex_cli_version": "codex-cli 0.147.0",
-                "initial_options": list(worker_command.argv[5:]),
                 "turn_count": 1,
                 "usage_complete": True,
             }

@@ -216,9 +216,7 @@ def test_read_only_auditor_tempfile_reproducer_uses_only_action_scratch(
     directory = Path(result.artifact_directory)
     metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
     observation = json.loads(
-        (prepared.workspace / ".fake-codex-observation.json").read_text(
-            encoding="utf-8"
-        )
+        (prepared.workspace / ".fake-codex-observation.json").read_text(encoding="utf-8")
     )
     argv = observation["argv"]
     environment = observation["environment"]
@@ -237,10 +235,7 @@ def test_read_only_auditor_tempfile_reproducer_uses_only_action_scratch(
     assert reproducer["compiled_created"] is True
     assert protected.read_text(encoding="utf-8") == "immutable\n"
     assert metadata["auditor_scratch_path"] == str(scratch)
-    assert (
-        metadata["sandbox_disposition"]
-        == "workspace-read-only-action-scratch-write"
-    )
+    assert metadata["sandbox_disposition"] == "workspace-read-only-action-scratch-write"
 
 
 def test_auditor_scratch_is_unique_per_action_and_worker_is_unchanged(
@@ -256,9 +251,7 @@ def test_auditor_scratch_is_unique_per_action_and_worker_is_unchanged(
     ):
         configure(
             prepared,
-            stdout_lines=[
-                json.dumps({"thread_id": thread, "type": "thread.started"})
-            ],
+            stdout_lines=[json.dumps({"thread_id": thread, "type": "thread.started"})],
             final="completed",
         )
 
@@ -275,9 +268,7 @@ def test_auditor_scratch_is_unique_per_action_and_worker_is_unchanged(
         (Path(worker_result.artifact_directory) / "metadata.json").read_text()
     )
 
-    assert first_metadata["auditor_scratch_path"] != second_metadata[
-        "auditor_scratch_path"
-    ]
+    assert first_metadata["auditor_scratch_path"] != second_metadata["auditor_scratch_path"]
     assert Path(first_metadata["auditor_scratch_path"]).is_dir()
     assert Path(second_metadata["auditor_scratch_path"]).is_dir()
     assert "auditor_scratch_path" not in worker_metadata
@@ -298,6 +289,38 @@ def test_build_command_has_no_prompt_and_only_role_owned_policy(tmp_path: Path) 
     ]
     assert "One exact human-written prompt" not in " ".join(command)
     assert command[-2:] == ["--ephemeral", "-"]
+
+
+def test_resume_command_reapplies_execution_policy_before_resume(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_request(tmp_path, "worker")
+    schema = tmp_path / "output-schema.json"
+    schema.write_text("{}\n", encoding="utf-8")
+
+    command = build_codex_command(
+        prepared,
+        "/tools/codex",
+        Path("/tmp/final"),
+        output_schema=schema,
+        resume_thread_id="thread-123",
+    )
+
+    resume_index = command.index("resume")
+    assert command[resume_index + 1 :] == ["thread-123", "-"]
+    for option in (
+        "--model",
+        "model_reasoning_effort=xhigh",
+        "--sandbox",
+        "--cd",
+        "--output-schema",
+    ):
+        assert command.index(option) < resume_index
+    for setting in (
+        "model_auto_compact_token_limit=64000",
+        "tool_output_token_limit=2048",
+    ):
+        assert command.index(setting) < resume_index
 
 
 def test_repository_free_fake_requires_opt_in_skip_git_flag(tmp_path: Path) -> None:
@@ -330,14 +353,10 @@ def test_repository_free_fake_requires_opt_in_skip_git_flag(tmp_path: Path) -> N
         skip_git_repo_check=True,
     )
     metadata = json.loads(
-        (
-            Path(succeeded.artifact_directory) / "metadata.json"
-        ).read_text(encoding="utf-8")
+        (Path(succeeded.artifact_directory) / "metadata.json").read_text(encoding="utf-8")
     )
     normalized = json.loads(
-        (
-            Path(succeeded.artifact_directory) / "request.normalized.json"
-        ).read_text(encoding="utf-8")
+        (Path(succeeded.artifact_directory) / "request.normalized.json").read_text(encoding="utf-8")
     )
     command = metadata["command"]
     exec_index = command.index("exec")
@@ -657,9 +676,7 @@ def test_output_limits_terminate_without_retaining_excess(
 
     assert result.status == "output_limit_exceeded"
     assert metadata["output_limit_stream"] == stream
-    limited_artifact = directory / (
-        "events.jsonl" if stream == "stdout" else "stderr.log"
-    )
+    limited_artifact = directory / ("events.jsonl" if stream == "stdout" else "stderr.log")
     assert limited_artifact.stat().st_size <= 64
 
 
@@ -693,8 +710,7 @@ def test_permission_like_assistant_prose_does_not_trigger_classification(tmp_pat
     configure(
         prepared,
         stdout_lines=[
-            '{"type":"item.completed","item":{"type":"agent_message",'
-            '"text":"permission denied"}}'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"permission denied"}}'
         ],
         final="failed",
         exit_code=1,
@@ -787,9 +803,7 @@ def test_invalid_jsonl_utf8_is_hashed_and_classified_malformed(tmp_path: Path) -
     assert result.event_count == 0
     assert result.malformed_event_count == 1
     assert (directory / "events.jsonl").read_bytes() == b""
-    assert metadata["malformed_event_sha256"] == [
-        hashlib.sha256(malformed_line).hexdigest()
-    ]
+    assert metadata["malformed_event_sha256"] == [hashlib.sha256(malformed_line).hexdigest()]
     assert "\N{REPLACEMENT CHARACTER}" in (directory / "final-message.md").read_text()
 
 
@@ -810,9 +824,7 @@ def test_escaped_lone_surrogate_event_is_ascii_canonicalized(tmp_path: Path) -> 
     assert result.exit_code == 0
     assert result.event_count == 1
     assert result.malformed_event_count == 0
-    assert (directory / "events.jsonl").read_bytes() == (
-        b'{"text":"\\ud800","type":"note"}\n'
-    )
+    assert (directory / "events.jsonl").read_bytes() == (b'{"text":"\\ud800","type":"note"}\n')
     assert metadata["valid_event_count"] == 1
     assert metadata["malformed_event_count"] == 0
     assert persisted == result.to_dict()
@@ -876,21 +888,19 @@ def test_incomplete_stdin_and_broken_pipe_are_normalized(
     )
 
     result = run_fake(prepared)
-    observation = json.loads(
-        (prepared.workspace / ".fake-codex-observation.json").read_text()
-    )
+    observation = json.loads((prepared.workspace / ".fake-codex-observation.json").read_text())
 
     assert base64.b64decode(observation["prompt_base64"]) == b""
     assert result.status == "process_failed"
     assert result.exit_code == 0
-    assert json.loads(
-        (
-            prepared.request_path.parent
-            / "runs"
-            / prepared.request.run_id
-            / "result.json"
-        ).read_text()
-    ) == result.to_dict()
+    assert (
+        json.loads(
+            (
+                prepared.request_path.parent / "runs" / prepared.request.run_id / "result.json"
+            ).read_text()
+        )
+        == result.to_dict()
+    )
 
 
 def test_redaction_and_malformed_hashes_prevent_raw_secret_retention(tmp_path: Path) -> None:
@@ -919,13 +929,9 @@ def test_redaction_and_malformed_hashes_prevent_raw_secret_retention(tmp_path: P
     metadata = json.loads((directory / "metadata.json").read_text())
 
     assert result.status == "malformed_event_stream"
-    assert metadata["malformed_event_sha256"] == [
-        hashlib.sha256(malformed.encode()).hexdigest()
-    ]
+    assert metadata["malformed_event_sha256"] == [hashlib.sha256(malformed.encode()).hexdigest()]
     assert "DEMO_TOKEN" in metadata["removed_environment_variable_names"]
-    observation = json.loads(
-        (prepared.workspace / ".fake-codex-observation.json").read_text()
-    )
+    observation = json.loads((prepared.workspace / ".fake-codex-observation.json").read_text())
     assert "DEMO_TOKEN" not in observation["environment"]
     assert prompt not in (directory / "stderr.log").read_text()
     for artifact in directory.iterdir():
@@ -946,9 +952,7 @@ def test_one_sanitized_result_is_persisted_returned_and_rendered(
     )
 
     result = run_fake(prepared, environ=fake_environment(DEMO_TOKEN=secret))
-    raw_directory = (
-        prepared.request_path.parent / "runs" / prepared.request.run_id
-    ).resolve()
+    raw_directory = (prepared.request_path.parent / "runs" / prepared.request.run_id).resolve()
     persisted = json.loads((raw_directory / "result.json").read_text())
 
     assert result.run_id == prepared.request.run_id
@@ -1339,9 +1343,7 @@ def test_run_codex_cli_human_output_and_expected_input_errors(
         raise CodexRequestError("request rejected")
 
     monkeypatch.setattr("research_automation_supervisor.cli.execute_codex_request", invalid)
-    invalid_invocation = CliRunner().invoke(
-        app, ["run-codex", "request.yaml", "--json"]
-    )
+    invalid_invocation = CliRunner().invoke(app, ["run-codex", "request.yaml", "--json"])
     assert invalid_invocation.exit_code == 2
     assert json.loads(invalid_invocation.stdout)["error_kind"] == "input"
     assert "Traceback" not in invalid_invocation.stdout
@@ -1361,9 +1363,7 @@ def test_validate_codex_request_cli_is_read_only_and_stable(
         lambda path: prepared,
     )
 
-    human = CliRunner().invoke(
-        app, ["validate-codex-request", str(prepared.request_path)]
-    )
+    human = CliRunner().invoke(app, ["validate-codex-request", str(prepared.request_path)])
     invocation = CliRunner().invoke(
         app, ["validate-codex-request", str(prepared.request_path), "--json"]
     )

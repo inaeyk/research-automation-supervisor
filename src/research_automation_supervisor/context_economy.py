@@ -67,40 +67,64 @@ class ContextEconomyProfileV1(BaseModel):
 
 CONTEXT_ECONOMY_PROFILES: Mapping[BrevityProfile, ContextEconomyProfileV1] = {
     "B5": ContextEconomyProfileV1(
-        name="B5", supervisor_prompt_target_tokens=300,
-        model_auto_compact_token_limit=48_000, tool_output_token_limit=1_024,
-        tool_output_visible_char_limit=4_096, tool_call_warning=12,
-        tool_call_strong_warning=18, tool_call_exhaustion=24,
+        name="B5",
+        supervisor_prompt_target_tokens=300,
+        model_auto_compact_token_limit=48_000,
+        tool_output_token_limit=1_024,
+        tool_output_visible_char_limit=4_096,
+        tool_call_warning=12,
+        tool_call_strong_warning=18,
+        tool_call_exhaustion=24,
     ),
     "B4": ContextEconomyProfileV1(
-        name="B4", supervisor_prompt_target_tokens=700,
-        model_auto_compact_token_limit=64_000, tool_output_token_limit=2_048,
-        tool_output_visible_char_limit=8_192, tool_call_warning=20,
-        tool_call_strong_warning=30, tool_call_exhaustion=40,
+        name="B4",
+        supervisor_prompt_target_tokens=700,
+        model_auto_compact_token_limit=64_000,
+        tool_output_token_limit=2_048,
+        tool_output_visible_char_limit=8_192,
+        tool_call_warning=20,
+        tool_call_strong_warning=30,
+        tool_call_exhaustion=40,
     ),
     "B3": ContextEconomyProfileV1(
-        name="B3", supervisor_prompt_target_tokens=1_200,
-        model_auto_compact_token_limit=80_000, tool_output_token_limit=4_096,
-        tool_output_visible_char_limit=16_384, tool_call_warning=30,
-        tool_call_strong_warning=45, tool_call_exhaustion=60,
+        name="B3",
+        supervisor_prompt_target_tokens=1_200,
+        model_auto_compact_token_limit=80_000,
+        tool_output_token_limit=4_096,
+        tool_output_visible_char_limit=16_384,
+        tool_call_warning=30,
+        tool_call_strong_warning=45,
+        tool_call_exhaustion=60,
     ),
     "B2": ContextEconomyProfileV1(
-        name="B2", supervisor_prompt_target_tokens=2_000,
-        model_auto_compact_token_limit=120_000, tool_output_token_limit=8_192,
-        tool_output_visible_char_limit=32_768, tool_call_warning=48,
-        tool_call_strong_warning=72, tool_call_exhaustion=96,
+        name="B2",
+        supervisor_prompt_target_tokens=2_000,
+        model_auto_compact_token_limit=120_000,
+        tool_output_token_limit=8_192,
+        tool_output_visible_char_limit=32_768,
+        tool_call_warning=48,
+        tool_call_strong_warning=72,
+        tool_call_exhaustion=96,
     ),
     "B1": ContextEconomyProfileV1(
-        name="B1", supervisor_prompt_target_tokens=3_500,
-        model_auto_compact_token_limit=160_000, tool_output_token_limit=16_384,
-        tool_output_visible_char_limit=65_536, tool_call_warning=64,
-        tool_call_strong_warning=96, tool_call_exhaustion=128,
+        name="B1",
+        supervisor_prompt_target_tokens=3_500,
+        model_auto_compact_token_limit=160_000,
+        tool_output_token_limit=16_384,
+        tool_output_visible_char_limit=65_536,
+        tool_call_warning=64,
+        tool_call_strong_warning=96,
+        tool_call_exhaustion=128,
     ),
     "B0": ContextEconomyProfileV1(
-        name="B0", supervisor_prompt_target_tokens=None,
-        model_auto_compact_token_limit=None, tool_output_token_limit=None,
-        tool_output_visible_char_limit=None, tool_call_warning=None,
-        tool_call_strong_warning=None, tool_call_exhaustion=None,
+        name="B0",
+        supervisor_prompt_target_tokens=None,
+        model_auto_compact_token_limit=None,
+        tool_output_token_limit=None,
+        tool_output_visible_char_limit=None,
+        tool_call_warning=None,
+        tool_call_strong_warning=None,
+        tool_call_exhaustion=None,
     ),
 }
 
@@ -134,8 +158,11 @@ def tool_cycle_disposition(
     )
     if exhaustion is None:
         return ToolCycleDispositionV1(
-            state="ok", tool_calls=tool_calls, effective_exhaustion=None,
-            permit_new_tool_call=True, next_action="continue",
+            state="ok",
+            tool_calls=tool_calls,
+            effective_exhaustion=None,
+            permit_new_tool_call=True,
+            next_action="continue",
         )
     warning: int | None
     strong: int | None
@@ -148,15 +175,17 @@ def tool_cycle_disposition(
     assert warning is not None and strong is not None
     if tool_calls >= exhaustion:
         return ToolCycleDispositionV1(
-            state="handoff_required", tool_calls=tool_calls,
-            effective_exhaustion=exhaustion, permit_new_tool_call=False,
+            state="handoff_required",
+            tool_calls=tool_calls,
+            effective_exhaustion=exhaustion,
+            permit_new_tool_call=False,
             next_action="compact_handoff_or_stop",
         )
     if tool_calls >= strong:
         state: BudgetState = "strong_warning"
-        next_action: Literal[
-            "continue", "batch_or_finalize", "compact_handoff_or_stop"
-        ] = "batch_or_finalize"
+        next_action: Literal["continue", "batch_or_finalize", "compact_handoff_or_stop"] = (
+            "batch_or_finalize"
+        )
     elif tool_calls >= warning:
         state = "warning"
         next_action = "batch_or_finalize"
@@ -164,8 +193,11 @@ def tool_cycle_disposition(
         state = "ok"
         next_action = "continue"
     return ToolCycleDispositionV1(
-        state=state, tool_calls=tool_calls, effective_exhaustion=exhaustion,
-        permit_new_tool_call=True, next_action=next_action,
+        state=state,
+        tool_calls=tool_calls,
+        effective_exhaustion=exhaustion,
+        permit_new_tool_call=True,
+        next_action=next_action,
     )
 
 
@@ -212,13 +244,22 @@ def preserve_large_tool_output(
         raise
     failed = exit_code not in {None, 0}
     summary = _bounded_output_summary(
-        output, limit=visible_char_limit, exit_code=exit_code, failed=failed,
-        path=str(destination), digest=digest,
+        output,
+        limit=visible_char_limit,
+        exit_code=exit_code,
+        failed=failed,
+        path=str(destination),
+        digest=digest,
     )
     return PreservedToolOutputV1(
-        path=str(destination), sha256=digest, byte_count=len(raw),
-        visible_char_count=len(summary), truncated=len(output) > len(summary),
-        exit_code=exit_code, failed=failed, summary=summary,
+        path=str(destination),
+        sha256=digest,
+        byte_count=len(raw),
+        visible_char_count=len(summary),
+        truncated=len(output) > len(summary),
+        exit_code=exit_code,
+        failed=failed,
+        summary=summary,
     )
 
 
@@ -253,8 +294,7 @@ def _bounded_output_summary(
         line
         for line in output.splitlines()
         if any(
-            word in line.casefold()
-            for word in ("error", "failed", "failure", "traceback", "panic")
+            word in line.casefold() for word in ("error", "failed", "failure", "traceback", "panic")
         )
     ][:20]
     failure_block = "\n".join(failure_lines)
@@ -309,6 +349,7 @@ class ContextEconomyReceiptV1(BaseModel):
     prompt_tokens: Annotated[int, Field(ge=0)] | None
     input_tokens: Annotated[int, Field(ge=0)] | None
     cached_input_tokens: Annotated[int, Field(ge=0)] | None
+    cache_write_input_tokens: Annotated[int, Field(ge=0)] | None = None
     uncached_input_tokens: Annotated[int, Field(ge=0)] | None
     output_tokens: Annotated[int, Field(ge=0)] | None
     reasoning_output_tokens: Annotated[int, Field(ge=0)] | None
@@ -363,13 +404,18 @@ def context_economy_receipt_from_events(
             continue
         event_type = event.get("type")
         item = event.get("item")
-        if event_type == "item.completed" and isinstance(item, dict) and item.get("type") in {
-            "command",
-            "command.execution",
-            "command_execution",
-            "exec",
-            "exec_command",
-        }:
+        if (
+            event_type == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type")
+            in {
+                "command",
+                "command.execution",
+                "command_execution",
+                "exec",
+                "exec_command",
+            }
+        ):
             tool_calls += 1
             visible_chars += sum(
                 len(value)
@@ -396,9 +442,12 @@ def context_economy_receipt_from_events(
                 inference_inputs.append(candidate)
     complete = usage_receipt.complete
     return ContextEconomyReceiptV1(
-        profile=profile, prompt_bytes=prompt_bytes, prompt_tokens=None,
+        profile=profile,
+        prompt_bytes=prompt_bytes,
+        prompt_tokens=None,
         input_tokens=usage_receipt.input_tokens if complete else None,
         cached_input_tokens=usage_receipt.cached_input_tokens if complete else None,
+        cache_write_input_tokens=(usage_receipt.cache_write_input_tokens if complete else None),
         uncached_input_tokens=(
             usage_receipt.input_tokens - usage_receipt.cached_input_tokens if complete else None
         ),
@@ -406,7 +455,8 @@ def context_economy_receipt_from_events(
         reasoning_output_tokens=(usage_receipt.reasoning_output_tokens if complete else None),
         combined_tokens=usage_receipt.combined_tokens if complete else None,
         inference_token_sample_count=len(inference_inputs) if inference_inputs else None,
-        tool_call_count=tool_calls, model_visible_tool_output_chars=visible_chars,
+        tool_call_count=tool_calls,
+        model_visible_tool_output_chars=visible_chars,
         compaction_count=compactions if inference_inputs else None,
         max_inference_input_tokens=max(inference_inputs) if inference_inputs else None,
         median_inference_input_tokens=(

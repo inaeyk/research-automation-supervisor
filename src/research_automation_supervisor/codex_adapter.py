@@ -51,8 +51,10 @@ from research_automation_supervisor.structured_outputs import (
     validate_production_schema,
 )
 from research_automation_supervisor.token_accounting import (
+    CodexTurnUsageV1,
     CodexUsageBindingV1,
     aggregate_task_receipts,
+    cumulative_usage_from_jsonl,
     load_verified_receipt,
     receipt_from_jsonl,
     write_ledger,
@@ -159,9 +161,7 @@ def _refresh_usage_ledger(
     receipts = []
     for current, directories, files in os.walk(root, topdown=True, followlinks=False):
         directories[:] = sorted(
-            name
-            for name in directories
-            if not (Path(current) / name).is_symlink()
+            name for name in directories if not (Path(current) / name).is_symlink()
         )
         if "usage-receipt.json" not in files:
             continue
@@ -180,6 +180,45 @@ def _refresh_usage_ledger(
         task_id="*",
     )
     write_ledger(destination.parent / "campaign-token-ledger.json", campaign_ledger)
+
+
+def _prior_cumulative_usage_for_thread(
+    root: Path,
+    *,
+    current_event_log: Path,
+    thread_id: str,
+) -> CodexTurnUsageV1 | None:
+    """Find the unique componentwise-latest retained snapshot for one thread."""
+    snapshots: list[CodexTurnUsageV1] = []
+    current_resolved = current_event_log.resolve()
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name for name in directories if not (Path(current) / name).is_symlink()
+        )
+        if "events.jsonl" not in files:
+            continue
+        event_log = Path(current) / "events.jsonl"
+        if event_log.resolve() == current_resolved:
+            continue
+        try:
+            candidate_thread, snapshot = cumulative_usage_from_jsonl(event_log)
+        except (OSError, ValueError):
+            continue
+        if candidate_thread == thread_id:
+            snapshots.append(snapshot)
+    if not snapshots:
+        return None
+    latest = snapshots[0]
+    for candidate in snapshots[1:]:
+        latest_values = latest.model_dump(exclude_none=True)
+        candidate_values = candidate.model_dump(exclude_none=True)
+        if latest_values.keys() != candidate_values.keys():
+            return None
+        if all(candidate_values[key] >= latest_values[key] for key in latest_values):
+            latest = candidate
+        elif not all(latest_values[key] >= candidate_values[key] for key in latest_values):
+            return None
+    return latest
 
 
 @dataclass
@@ -250,14 +289,8 @@ class _EventProcessor:
             kind, identifier = _extract_identifier(value)
             started_thread_id = _extract_started_thread_id(value)
         except Exception:
-            malformed_evidence = (
-                b"confidentiality-violation"
-                if rejected
-                else line
-            )
-            self.malformed_hashes.append(
-                hashlib.sha256(malformed_evidence).hexdigest()
-            )
+            malformed_evidence = b"confidentiality-violation" if rejected else line
+            self.malformed_hashes.append(hashlib.sha256(malformed_evidence).hexdigest())
             return
 
         self.event_count += 1
@@ -266,10 +299,7 @@ class _EventProcessor:
         if self.identifier_value is None and identifier is not None:
             self.identifier_kind = kind
             self.identifier_value = identifier
-        if (
-            started_thread_id is not None
-            and started_thread_id not in self.started_thread_ids
-        ):
+        if started_thread_id is not None and started_thread_id not in self.started_thread_ids:
             self.started_thread_ids.append(started_thread_id)
         self.destination.write(rendered.encode("ascii") + b"\n")
         self.destination.flush()
@@ -392,13 +422,9 @@ def run_prepared_codex(
     resolved_output_schema = _validate_output_schema(output_schema, sensitive_values)
     if resume_thread_id is not None:
         if prepared.request.role not in {"worker", "supervisor"}:
-            raise CodexRequestError(
-                "only a persistent worker or supervisor may resume a thread"
-            )
+            raise CodexRequestError("only a persistent worker or supervisor may resume a thread")
         if not resume_thread_id.strip() or resume_thread_id in {"--last", "--all"}:
-            raise CodexRequestError(
-                "an explicit persistent thread ID is required for resume"
-            )
+            raise CodexRequestError("an explicit persistent thread ID is required for resume")
         validate_locator_confidentiality((resume_thread_id,), sensitive_values)
     artifact_directory = _create_artifact_directory(
         resolved_runs_dir,
@@ -426,11 +452,7 @@ def run_prepared_codex(
     )
     rejected_values = tuple(
         sorted(
-            {
-                value.encode("utf-8")
-                for value in rejected_confidential_fragments
-                if value
-            },
+            {value.encode("utf-8") for value in rejected_confidential_fragments if value},
             key=lambda item: (-len(item), item),
         )
     )
@@ -586,9 +608,7 @@ def run_prepared_codex(
             malformed_event_count=len(event_processor.malformed_hashes),
             final_message_present=final_message_present,
             permission_evidence=permission_evidence,
-            confidentiality_violation_detected=(
-                confidentiality_violation_detected
-            ),
+            confidentiality_violation_detected=(confidentiality_violation_detected),
             summary=summary,
             error=error,
         ),
@@ -599,12 +619,23 @@ def run_prepared_codex(
         prepared,
         resume_thread_id=resume_thread_id,
     )
+    prior_cumulative_usage = (
+        _prior_cumulative_usage_for_thread(
+            prepared.usage_ledger_root or resolved_runs_dir,
+            current_event_log=event_path,
+            thread_id=resume_thread_id,
+        )
+        if resume_thread_id is not None
+        else None
+    )
     usage_receipt = receipt_from_jsonl(
         event_path,
         binding=usage_binding,
         model=prepared.request.model,
         codex_cli_version=codex_version,
         known_malformed_event_count=len(event_processor.malformed_hashes),
+        prior_cumulative_usage=prior_cumulative_usage,
+        require_prior_cumulative_usage=resume_thread_id is not None,
     )
     usage_receipt_path = artifact_directory / "usage-receipt.json"
     write_receipt(usage_receipt_path, usage_receipt)
@@ -644,9 +675,7 @@ def run_prepared_codex(
         output_schema=resolved_output_schema,
         resume_thread_id=resume_thread_id,
         limits=limits,
-        confidentiality_violation_detected=(
-            confidentiality_violation_detected
-        ),
+        confidentiality_violation_detected=(confidentiality_violation_detected),
         durable_command_replacements=durable_command_replacements or {},
         auditor_scratch=auditor_scratch,
         usage_receipt_path=usage_receipt_path,
@@ -721,9 +750,7 @@ def validate_request_confidentiality(
     if runs_dir is not None:
         resolved_runs_dir = _resolve_runs_directory(runs_dir)
         artifact_directory = resolved_runs_dir / prepared.request.run_id
-        locators.extend(
-            (str(runs_dir), str(resolved_runs_dir), str(artifact_directory))
-        )
+        locators.extend((str(runs_dir), str(resolved_runs_dir), str(artifact_directory)))
 
     validate_locator_confidentiality(locators, sensitive_values)
     return resolved_runs_dir
@@ -736,9 +763,7 @@ def validate_locator_confidentiality(
     """Reject exact structural strings that cannot be rendered unchanged."""
     rendered_locators = tuple(str(locator) for locator in locators)
     if any(would_redact_text(locator, sensitive_values) for locator in rendered_locators):
-        raise CodexConfidentialityError(
-            "Codex request contains a structural redaction collision"
-        )
+        raise CodexConfidentialityError("Codex request contains a structural redaction collision")
 
 
 def _validate_output_schema(
@@ -767,9 +792,7 @@ def _validate_output_schema(
     try:
         validate_production_schema(parsed)
     except ProductionSchemaError as exc:
-        raise CodexRequestError(
-            f"output schema is not production-compatible: {exc}"
-        ) from exc
+        raise CodexRequestError(f"output schema is not production-compatible: {exc}") from exc
     validate_locator_confidentiality(
         (resolved, hashlib.sha256(content).hexdigest()), sensitive_values
     )
@@ -832,6 +855,7 @@ def build_codex_command(
             "--strict-config",
             "--cd",
             str(prepared.workspace),
+            *(["--output-schema", str(output_schema)] if output_schema is not None else []),
         ]
         if writable_scratch is not None:
             command.extend(("--add-dir", str(writable_scratch)))
@@ -842,14 +866,8 @@ def build_codex_command(
             executable,
             "--ask-for-approval",
             prepared.policy.approval,
-            "--sandbox",
-            prepared.policy.sandbox,
-            "--cd",
-            str(prepared.workspace),
             "exec",
             *(["--skip-git-repo-check"] if skip_git_repo_check else []),
-            "resume",
-            resume_thread_id,
             "--json",
             "--output-last-message",
             str(final_message_path),
@@ -864,12 +882,17 @@ def build_codex_command(
             "-c",
             "features.skill_mcp_dependency_install=false",
             *context_config,
+            "--sandbox",
+            prepared.policy.sandbox,
             "--ignore-user-config",
             "--ignore-rules",
             "--strict-config",
+            "--cd",
+            str(prepared.workspace),
+            *(["--output-schema", str(output_schema)] if output_schema is not None else []),
+            "resume",
+            resume_thread_id,
         ]
-    if output_schema is not None:
-        command.extend(("--output-schema", str(output_schema)))
     command.append("-")
     return command
 
@@ -1041,11 +1064,7 @@ def _run_process(
             if observation.exit_code is not None and not stdout_open and not stderr_open:
                 if termination_started is None and normal_cleanup_started is None:
                     break
-                if (
-                    killed
-                    or normal_cleanup_forced
-                    or not _process_group_exists(process.pid)
-                ):
+                if killed or normal_cleanup_forced or not _process_group_exists(process.pid):
                     break
 
             timeout = limits.io_poll_seconds
@@ -1234,20 +1253,16 @@ def _scan_temporary_action_directory(
                     after = os.fstat(descriptor)
                 finally:
                     os.close(descriptor)
-                if (
-                    len(content) > 4 * 1024 * 1024
-                    or (
-                        before.st_dev,
-                        before.st_ino,
-                        before.st_size,
-                        before.st_mtime_ns,
-                    )
-                    != (
-                        after.st_dev,
-                        after.st_ino,
-                        after.st_size,
-                        after.st_mtime_ns,
-                    )
+                if len(content) > 4 * 1024 * 1024 or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
                 ):
                     return True
                 if _contains_confidential_fragment(
@@ -1355,8 +1370,7 @@ def prepare_auditor_scratch_directory(artifact_directory: Path) -> Path:
             if (
                 not stat.S_ISDIR(inspected.st_mode)
                 or stat.S_ISLNK(inspected.st_mode)
-                or (inspected.st_dev, inspected.st_ino)
-                != (opened.st_dev, opened.st_ino)
+                or (inspected.st_dev, inspected.st_ino) != (opened.st_dev, opened.st_ino)
             ):
                 raise OSError("auditor action directory is not exact")
             with suppress(FileExistsError):
@@ -1460,10 +1474,7 @@ def _build_metadata(
     recorded_command = list(command)
     recorded_command[recorded_command.index("--output-last-message") + 1] = "<FINAL_MESSAGE_TEMP>"
     recorded_command[-1] = "<PROMPT_FROM_STDIN>"
-    recorded_command = [
-        durable_command_replacements.get(item, item)
-        for item in recorded_command
-    ]
+    recorded_command = [durable_command_replacements.get(item, item) for item in recorded_command]
     recorded_command = [durable_context_config_item(item) for item in recorded_command]
     metadata: dict[str, object] = {
         "schema_version": 1,
@@ -1653,9 +1664,7 @@ def _sanitize_result(
         malformed_event_count=result.malformed_event_count,
         final_message_present=result.final_message_present,
         permission_evidence=result.permission_evidence,
-        confidentiality_violation_detected=(
-            result.confidentiality_violation_detected
-        ),
+        confidentiality_violation_detected=(result.confidentiality_violation_detected),
         summary=redact_text(result.summary, sensitive_values),
         error=redact_text(result.error, sensitive_values) if result.error is not None else None,
     )
@@ -1702,8 +1711,7 @@ def _event_has_permission_evidence(event: Mapping[str, Any]) -> bool:
     status = item.get("status")
     exit_code = item.get("exit_code")
     explicitly_failed = (
-        isinstance(status, str)
-        and status.casefold() in _FAILED_COMMAND_STATUSES
+        isinstance(status, str) and status.casefold() in _FAILED_COMMAND_STATUSES
     ) or (isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0)
     return explicitly_failed and _contains_permission_phrase(_failure_field_text(item))
 
@@ -1746,13 +1754,16 @@ def _write_text(path: Path, value: str) -> None:
 
 
 def _atomic_write_json(path: Path, value: object) -> None:
-    rendered = json.dumps(
-        value,
-        ensure_ascii=True,
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    rendered = (
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary_name)
     try:

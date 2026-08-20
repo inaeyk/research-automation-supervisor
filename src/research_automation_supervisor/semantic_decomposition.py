@@ -412,15 +412,11 @@ def choose_session_boundary(
     if current.role == "physics_auditor":
         return SessionBoundaryDecisionV1(fresh_session=True, reason="physics_auditor_security")
     if facts.security_or_blindness_requires_freshness:
-        return SessionBoundaryDecisionV1(
-            fresh_session=True, reason="physics_auditor_security"
-        )
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="physics_auditor_security")
     if facts.context_health_exceeded:
         return SessionBoundaryDecisionV1(fresh_session=True, reason="context_health_limit")
     if facts.qualified_recovery_requires_new_identity:
-        return SessionBoundaryDecisionV1(
-            fresh_session=True, reason="qualified_recovery_identity"
-        )
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="qualified_recovery_identity")
     if facts.subsystem_independent:
         return SessionBoundaryDecisionV1(fresh_session=True, reason="subsystem_independence")
     if facts.little_relevant_context:
@@ -560,41 +556,23 @@ def measure_agent_handoff(
     # policy when no authoritative/model-compatible tokenizer is available.
     if byte_count > ABSOLUTE_HANDOFF_BYTE_UPPER_BOUND:
         raise ValueError("handoff exceeds the absolute 8192-byte upper bound")
-    if (
-        byte_count > DEFAULT_HANDOFF_SOFT_MAX_BYTES
-        and handoff.oversize_justification is None
-    ):
-        raise ValueError(
-            "handoff above the 4096-byte soft maximum requires justification"
-        )
+    if byte_count > DEFAULT_HANDOFF_SOFT_MAX_BYTES and handoff.oversize_justification is None:
+        raise ValueError("handoff above the 4096-byte soft maximum requires justification")
 
     # If an exact compatible tokenizer is available, enforce the token policy
     # independently as well.
     if exact is not None:
         if exact > ABSOLUTE_HANDOFF_TOKEN_UPPER_BOUND:
             raise ValueError("handoff exceeds the absolute 8000-token upper bound")
-        if (
-            exact > DEFAULT_HANDOFF_SOFT_MAX_TOKENS
-            and handoff.oversize_justification is None
-        ):
-            raise ValueError(
-                "handoff above the 2000-token soft maximum requires justification"
-            )
+        if exact > DEFAULT_HANDOFF_SOFT_MAX_TOKENS and handoff.oversize_justification is None:
+            raise ValueError("handoff above the 2000-token soft maximum requires justification")
 
     return HandoffSizeV1(
         byte_count=byte_count,
         exact_token_count=exact,
         token_upper_bound=exact,
-        target_met=(
-            exact <= DEFAULT_HANDOFF_TARGET_TOKENS
-            if exact is not None
-            else None
-        ),
-        soft_max_met=(
-            exact <= DEFAULT_HANDOFF_SOFT_MAX_TOKENS
-            if exact is not None
-            else None
-        ),
+        target_met=(exact <= DEFAULT_HANDOFF_TARGET_TOKENS if exact is not None else None),
+        soft_max_met=(exact <= DEFAULT_HANDOFF_SOFT_MAX_TOKENS if exact is not None else None),
         byte_target_met=byte_count <= DEFAULT_HANDOFF_TARGET_BYTES,
         byte_soft_max_met=byte_count <= DEFAULT_HANDOFF_SOFT_MAX_BYTES,
         counting_method="exact_counter" if exact is not None else "utf8_bytes_only",
@@ -828,6 +806,7 @@ class SemanticSubtaskTelemetryV1(BaseModel):
     accounting_complete: bool
     input_tokens: Annotated[int, Field(ge=0)] | None
     cached_input_tokens: Annotated[int, Field(ge=0)] | None
+    cache_write_input_tokens: Annotated[int, Field(ge=0)] | None = None
     uncached_input_tokens: Annotated[int, Field(ge=0)] | None
     output_tokens: Annotated[int, Field(ge=0)] | None
     reasoning_output_tokens: Annotated[int, Field(ge=0)] | None
@@ -857,6 +836,8 @@ class SemanticSubtaskTelemetryV1(BaseModel):
             raise ValueError("complete accounting requires every authoritative token counter")
         if not self.accounting_complete and any(item is not None for item in counters):
             raise ValueError("incomplete accounting must expose token counters as unavailable")
+        if not self.accounting_complete and self.cache_write_input_tokens is not None:
+            raise ValueError("incomplete accounting must hide cache-write tokens")
         if self.accounting_complete:
             assert self.input_tokens is not None
             assert self.cached_input_tokens is not None
@@ -910,6 +891,7 @@ def semantic_subtask_telemetry(
         accounting_complete=complete,
         input_tokens=usage.input_tokens if complete else None,
         cached_input_tokens=usage.cached_input_tokens if complete else None,
+        cache_write_input_tokens=(usage.cache_write_input_tokens if complete else None),
         uncached_input_tokens=(
             usage.input_tokens - usage.cached_input_tokens if complete else None
         ),
@@ -939,6 +921,7 @@ class TelemetryTotalsV1(BaseModel):
     incomplete_session_count: Annotated[int, Field(ge=0)]
     input_tokens: Annotated[int, Field(ge=0)] | None
     cached_input_tokens: Annotated[int, Field(ge=0)] | None
+    cache_write_input_tokens: Annotated[int, Field(ge=0)] | None = None
     uncached_input_tokens: Annotated[int, Field(ge=0)] | None
     output_tokens: Annotated[int, Field(ge=0)] | None
     reasoning_output_tokens: Annotated[int, Field(ge=0)] | None
@@ -988,6 +971,7 @@ def _telemetry_totals(items: Sequence[SemanticSubtaskTelemetryV1]) -> TelemetryT
         incomplete_session_count=len(incomplete_sessions),
         input_tokens=exact_sum("input_tokens"),
         cached_input_tokens=exact_sum("cached_input_tokens"),
+        cache_write_input_tokens=exact_sum("cache_write_input_tokens"),
         uncached_input_tokens=exact_sum("uncached_input_tokens"),
         output_tokens=exact_sum("output_tokens"),
         reasoning_output_tokens=exact_sum("reasoning_output_tokens"),

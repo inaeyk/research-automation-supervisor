@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Run persistent Codex tasks with authoritative cumulative-usage receipts."""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+from typing import Any
+
+TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+CORE_USAGE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] not in {"run", "resume"}:
+        return _usage()
+    mode = sys.argv[1]
+    if (mode == "run" and len(sys.argv) < 5) or (mode == "resume" and len(sys.argv) != 4):
+        return _usage()
+    task_id = sys.argv[2]
+    if TASK_ID.fullmatch(task_id) is None:
+        return _error("task ID must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+    ledger_root = codex_home / "task-ledgers"
+    task_root = ledger_root / task_id
+    ledger_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    task_root.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(ledger_root, 0o700)
+    os.chmod(task_root, 0o700)
+    lock_path = task_root / ".lock"
+    with lock_path.open("a+b") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _run_locked(mode, task_id, task_root, codex_home)
+
+
+def _run_locked(mode: str, task_id: str, task_root: Path, codex_home: Path) -> int:
+    state_path = task_root / "task.json"
+    if mode == "run":
+        if state_path.exists():
+            return _error(f"task '{task_id}' already exists; use codex-task resume")
+        working_directory = Path(sys.argv[3]).resolve(strict=True)
+        prompt_path = Path(sys.argv[4]).resolve(strict=True)
+        initial_options = sys.argv[5:]
+        if not working_directory.is_dir() or not prompt_path.is_file():
+            return _error("working directory and prompt file must be existing exact paths")
+        option_error = _validate_options(initial_options)
+        if option_error is not None:
+            return _error(option_error)
+        model = _resolve_model(initial_options, codex_home)
+        policy = _freeze_execution_policy(initial_options, model)
+        state: dict[str, Any] = {
+            "schema_version": 2,
+            "task_id": task_id,
+            "working_directory": str(working_directory),
+            "initial_options": initial_options,
+            "frozen_execution_policy": policy,
+            "model": model,
+            "thread_id": None,
+            "codex_cli_version": None,
+        }
+        _atomic_json(state_path, state)
+    else:
+        if not state_path.is_file():
+            return _error(f"task '{task_id}' does not exist")
+        state = _read_object(state_path)
+        state = _verify_or_migrate_state(state, state_path)
+        if state.get("task_id") != task_id:
+            raise ValueError("task state identifies a different task")
+        working_directory = Path(_required_string(state, "working_directory")).resolve(strict=True)
+        prompt_path = Path(sys.argv[3]).resolve(strict=True)
+        if not working_directory.is_dir() or not prompt_path.is_file():
+            return _error("stored working directory and prompt file must be existing exact paths")
+        thread_id = _required_string(state, "thread_id")
+        policy = _verified_execution_policy(state)
+        model = _required_string(state, "model")
+
+    options = _policy_options(policy)
+    codex = os.environ.get("CODEX_TASK_CODEX") or shutil.which("codex")
+    if codex is None:
+        return _error("Codex executable was not found")
+    try:
+        version_result = subprocess.run(
+            [codex, "--version"],
+            cwd=working_directory,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _error(f"Codex version probe failed: {type(exc).__name__}")
+    cli_version = version_result.stdout.strip() if version_result.returncode == 0 else None
+
+    turns = task_root / "turns"
+    turns.mkdir(mode=0o700, exist_ok=True)
+    sequence = _next_sequence(turns)
+    stem = f"{sequence:06d}"
+    events_path = turns / f"{stem}.events.jsonl"
+    final_path = turns / f"{stem}.final-message.md"
+    prompt_copy = turns / f"{stem}.prompt.sha256"
+    prompt_bytes = prompt_path.read_bytes()
+    _atomic_bytes(prompt_copy, (hashlib.sha256(prompt_bytes).hexdigest() + "\n").encode("ascii"))
+
+    # Codex 0.147 accepts shared exec options before the resume subcommand.  In
+    # particular, sandbox and add-dir are rejected or lost when placed after it.
+    command = [codex, "exec", *options, "--json", "--output-last-message", str(final_path)]
+    if mode == "resume":
+        command.extend(("resume", thread_id))
+    command.append("-")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=working_directory,
+            input=prompt_bytes,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            check=False,
+        )
+        raw_events = completed.stdout
+        process_code = completed.returncode
+    except OSError as exc:
+        raw_events = b""
+        process_code = 127
+        print(f"codex-task: Codex launch failed: {type(exc).__name__}", file=sys.stderr)
+    _atomic_bytes(events_path, raw_events)
+    sys.stdout.buffer.write(raw_events)
+    sys.stdout.buffer.flush()
+    if final_path.exists():
+        os.chmod(final_path, 0o600)
+
+    receipt = _build_receipt(task_id, task_root, model, cli_version)
+    receipt_path = task_root / "TaskUsageReceipt.json"
+    _atomic_json(receipt_path, receipt)
+    state["thread_id"] = receipt["thread_id"]
+    state["codex_cli_version"] = cli_version
+    state["model"] = model
+    state["turn_count"] = receipt["turn_count"]
+    state["usage_complete"] = receipt["complete"]
+    _verified_execution_policy(state)
+    _atomic_json(state_path, state)
+
+    footer = _footer(receipt, receipt_path)
+    latest = task_root / "latest-output.md"
+    final_bytes = final_path.read_bytes() if final_path.is_file() else b""
+    separator = b"" if not final_bytes or final_bytes.endswith(b"\n") else b"\n"
+    _atomic_bytes(latest, final_bytes + separator + footer.encode("utf-8"))
+    print(footer, end="")
+    if process_code != 0:
+        return process_code
+    return 0 if receipt["complete"] else 65
+
+
+def _build_receipt(
+    task_id: str,
+    task_root: Path,
+    model: str,
+    cli_version: str | None,
+) -> dict[str, Any]:
+    reasons: set[str] = set()
+    sources: list[dict[str, Any]] = []
+    thread_ids: set[str] = set()
+    previous: dict[str, int] | None = None
+    final_snapshot: dict[str, int] | None = None
+    counter_keys: set[str] | None = None
+    turn_count = 0
+    for path in sorted((task_root / "turns").glob("*.events.jsonl")):
+        data = path.read_bytes()
+        source_reasons: set[str] = set()
+        source_thread_ids: set[str] = set()
+        completed_hashes: set[str] = set()
+        usages: list[dict[str, int]] = []
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line.decode("utf-8"), parse_constant=_reject_constant)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                source_reasons.add("malformed_jsonl")
+                continue
+            if not isinstance(event, dict):
+                source_reasons.add("malformed_jsonl")
+                continue
+            if event.get("type") == "thread.started":
+                value = event.get("thread_id")
+                if isinstance(value, str) and value.strip():
+                    source_thread_ids.add(value.strip())
+                    thread_ids.add(value.strip())
+            if event.get("type") != "turn.completed":
+                continue
+            fingerprint = hashlib.sha256(_canonical(event)).hexdigest()
+            if fingerprint in completed_hashes:
+                source_reasons.add("duplicate_turn_completed_event")
+                continue
+            completed_hashes.add(fingerprint)
+            usage = event.get("usage")
+            if not isinstance(usage, dict) or not set(CORE_USAGE_KEYS).issubset(usage):
+                source_reasons.add("missing_or_invalid_turn_usage")
+                continue
+            if any(type(value) is not int or value < 0 for value in usage.values()):
+                source_reasons.add("missing_or_invalid_turn_usage")
+                continue
+            if usage["cached_input_tokens"] > usage["input_tokens"]:
+                source_reasons.add("invalid_cached_input_tokens")
+                continue
+            usages.append(dict(usage))
+        if not completed_hashes:
+            source_reasons.add("missing_turn_completed_event")
+        if len(usages) != len(completed_hashes):
+            source_reasons.add("missing_or_invalid_turn_usage")
+        if len(source_thread_ids) != 1:
+            source_reasons.add("missing_or_ambiguous_thread_id")
+
+        source_delta: dict[str, int] | None = None
+        source_start = previous
+        if not source_reasons:
+            for usage in usages:
+                keys = set(usage)
+                if counter_keys is None:
+                    counter_keys = keys
+                elif keys != counter_keys:
+                    source_reasons.add("usage_counter_set_changed")
+                    break
+                if previous is not None and any(usage[key] < previous[key] for key in counter_keys):
+                    source_reasons.add("usage_counter_decreased")
+                    break
+                delta = (
+                    usage
+                    if previous is None
+                    else {key: usage[key] - previous[key] for key in counter_keys}
+                )
+                if delta["cached_input_tokens"] > delta["input_tokens"]:
+                    source_reasons.add("invalid_cached_input_delta")
+                    break
+                previous = usage
+                final_snapshot = usage
+                turn_count += 1
+            if not source_reasons and usages:
+                source_delta = (
+                    usages[-1]
+                    if source_start is None
+                    else {key: usages[-1][key] - source_start[key] for key in usages[-1]}
+                )
+        if source_reasons:
+            reasons.update(f"{path.name}:{reason}" for reason in source_reasons)
+        sources.append(
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "thread_id": (
+                    next(iter(source_thread_ids)) if len(source_thread_ids) == 1 else None
+                ),
+                "completed_turn_count": len(usages) if not source_reasons else 0,
+                "cumulative_usage": usages[-1] if usages and not source_reasons else None,
+                "usage_delta": source_delta,
+            }
+        )
+    if len(thread_ids) != 1:
+        reasons.add("missing_or_ambiguous_thread_id")
+    if model == "unresolved":
+        reasons.add("model_unresolved")
+    complete = not reasons and final_snapshot is not None
+    totals = (
+        final_snapshot
+        if complete and final_snapshot is not None
+        else {key: 0 for key in CORE_USAGE_KEYS}
+    )
+    if not complete:
+        turn_count = 0
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "receipt_type": "TaskUsageReceipt",
+        "task_id": task_id,
+        "complete": complete,
+        "incomplete_reasons": sorted(reasons),
+        "codex_cli_version": cli_version,
+        "model": model,
+        "thread_id": next(iter(thread_ids)) if len(thread_ids) == 1 else None,
+        "turn_count": turn_count,
+        **{key: totals[key] for key in CORE_USAGE_KEYS},
+        "combined_tokens": totals["input_tokens"] + totals["output_tokens"],
+        "source_jsonl": sources,
+    }
+    if complete:
+        extra = {key: value for key, value in totals.items() if key not in CORE_USAGE_KEYS}
+        if "cache_write_input_tokens" in extra:
+            receipt["cache_write_input_tokens"] = extra.pop("cache_write_input_tokens")
+        if extra:
+            receipt["additional_usage_counters"] = extra
+    return receipt
+
+
+def _footer(receipt: dict[str, Any], receipt_path: Path) -> str:
+    lines = ["\nMACHINE-GENERATED Token usage\n"]
+    if receipt["complete"]:
+        keys = list(CORE_USAGE_KEYS)
+        if "cache_write_input_tokens" in receipt:
+            keys.append("cache_write_input_tokens")
+        keys.extend(("combined_tokens", "turn_count"))
+        for key in keys:
+            lines.append(f"{key}: {receipt[key]}\n")
+    else:
+        lines.append("status: incomplete\n")
+        lines.append("exact totals: unavailable\n")
+        lines.append("reasons: " + ", ".join(receipt["incomplete_reasons"]) + "\n")
+    lines.append(f"receipt: {receipt_path}\n")
+    return "".join(lines)
+
+
+def _validate_options(options: list[str]) -> str | None:
+    forbidden = {"--json", "-o", "--output-last-message", "-C", "--cd"}
+    if any(
+        option in forbidden or option.startswith("--output-last-message=") for option in options
+    ):
+        return "--json, output-last-message, and working-directory options are wrapper-owned"
+    if "--ephemeral" in options:
+        return "--ephemeral is incompatible with durable task resume"
+    return None
+
+
+def _freeze_execution_policy(options: list[str], model: str) -> dict[str, Any]:
+    frozen = list(options)
+    if not _has_model_option(frozen) and model != "unresolved":
+        frozen.extend(("--model", model))
+    core: dict[str, Any] = {
+        "schema_version": 1,
+        "codex_exec_options": frozen,
+        "model": model,
+    }
+    return {**core, "sha256": hashlib.sha256(_canonical(core)).hexdigest()}
+
+
+def _verified_execution_policy(state: dict[str, Any]) -> dict[str, Any]:
+    initial = state.get("initial_options")
+    if not isinstance(initial, list) or any(not isinstance(item, str) for item in initial):
+        raise ValueError("task state has invalid initial options")
+    option_error = _validate_options(initial)
+    if option_error is not None:
+        raise ValueError(f"task state has invalid initial options: {option_error}")
+    expected = _freeze_execution_policy(initial, _required_string(state, "model"))
+    actual = state.get("frozen_execution_policy")
+    if actual != expected:
+        raise ValueError("frozen execution policy differs from durable task state")
+    return expected
+
+
+def _verify_or_migrate_state(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
+    version = state.get("schema_version")
+    if version == 1:
+        initial = state.get("initial_options")
+        if not isinstance(initial, list) or any(not isinstance(item, str) for item in initial):
+            raise ValueError("legacy task state has invalid initial options")
+        state["frozen_execution_policy"] = _freeze_execution_policy(
+            initial, _required_string(state, "model")
+        )
+        state["schema_version"] = 2
+        _atomic_json(state_path, state)
+    elif version != 2:
+        raise ValueError("task state has an unsupported schema")
+    _verified_execution_policy(state)
+    return state
+
+
+def _policy_options(policy: dict[str, Any]) -> list[str]:
+    options = policy.get("codex_exec_options")
+    if not isinstance(options, list) or any(not isinstance(item, str) for item in options):
+        raise ValueError("frozen execution policy has invalid Codex options")
+    return list(options)
+
+
+def _has_model_option(options: list[str]) -> bool:
+    return any(value in {"-m", "--model"} or value.startswith("--model=") for value in options)
+
+
+def _resolve_model(options: list[str], codex_home: Path) -> str:
+    for index, value in enumerate(options):
+        if value in {"-m", "--model"} and index + 1 < len(options):
+            return options[index + 1]
+        if value.startswith("--model="):
+            return value.split("=", 1)[1]
+    try:
+        with (codex_home / "config.toml").open("rb") as handle:
+            configured = tomllib.load(handle).get("model")
+        return configured if isinstance(configured, str) and configured else "unresolved"
+    except (OSError, tomllib.TOMLDecodeError):
+        return "unresolved"
+
+
+def _next_sequence(turns: Path) -> int:
+    existing = [int(path.name.split(".", 1)[0]) for path in turns.glob("*.events.jsonl")]
+    return max(existing, default=0) + 1
+
+
+def _read_object(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return value
+
+
+def _required_string(value: dict[str, Any], key: str) -> str:
+    item = value.get(key)
+    if not isinstance(item, str) or not item:
+        raise ValueError(f"task state has no valid {key}")
+    return item
+
+
+def _atomic_json(path: Path, value: object) -> None:
+    _atomic_bytes(path, json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n")
+
+
+def _atomic_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("ascii")
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+
+def _usage() -> int:
+    print(
+        "usage:\n"
+        "  codex-task run <task-id> <working-directory> <prompt-file> [Codex options...]\n"
+        "  codex-task resume <task-id> <prompt-file>",
+        file=sys.stderr,
+    )
+    return 64
+
+
+def _error(message: str) -> int:
+    print(f"codex-task: {message}", file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"codex-task: {exc}", file=sys.stderr)
+        raise SystemExit(65) from None

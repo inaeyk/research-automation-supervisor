@@ -52,8 +52,12 @@ from research_automation_supervisor.semantic_decomposition import (
     write_agent_handoff,
 )
 from research_automation_supervisor.token_accounting import (
+    CodexTurnUsageV1,
     CodexUsageBindingV1,
+    CodexUsageReceiptV1,
     UsageRole,
+    cumulative_usage_from_jsonl,
+    load_verified_receipt,
     receipt_from_jsonl,
     write_receipt,
 )
@@ -132,7 +136,8 @@ class ControlledReplayV1(BaseModel):
             if epoch.configuration.reasoning_effort != self.reasoning_effort:
                 raise ValueError("session epoch reasoning differs from frozen replay reasoning")
             expected_sandbox = (
-                "read-only" if epoch.role in {"coding_auditor", "physics_auditor"}
+                "read-only"
+                if epoch.role in {"coding_auditor", "physics_auditor"}
                 else "workspace-write"
             )
             if epoch.configuration.sandbox != expected_sandbox:
@@ -432,9 +437,7 @@ def prepare_replay(
                 "-c",
                 "tool_output_token_limit=2048",
             ]
-            if any(
-                item in control.global_target_writer_subtask_ids for item in epoch.subtask_ids
-            ):
+            if any(item in control.global_target_writer_subtask_ids for item in epoch.subtask_ids):
                 argv.extend(("--add-dir", str(global_target)))
             argv.extend(
                 (
@@ -534,7 +537,7 @@ def execute_replay(
                     epoch=epoch,
                     epoch_turn_index=command.epoch_turn_index,
                 )
-                _, _, completed_state = _verified_completed_task(
+                event_log, _, completed_state = _verified_completed_task(
                     task_root=task_root,
                     command=command,
                     epoch_run_command=first_commands[epoch.epoch_id],
@@ -544,6 +547,22 @@ def execute_replay(
                 )
                 if _required_string(completed_state, "thread_id") != record.codex_thread_id:
                     raise ValueError("completed epoch telemetry has the wrong Codex thread")
+                expected_usage = _usage_for_epoch_turn(
+                    event_log=event_log,
+                    task_root=task_root,
+                    command=command,
+                    plan_id=plan.plan_id,
+                    role=_usage_role(subtask.role),
+                    repair_or_retry=subtask.role == "repair",
+                    task_state=completed_state,
+                )
+                persisted_usage = load_verified_receipt(
+                    artifact_root / "usage" / f"{subtask.subtask_id}.json",
+                    event_log=event_log,
+                )
+                if persisted_usage != expected_usage:
+                    raise ValueError("persisted resumed-turn usage is not its exact delta")
+                _verify_telemetry_usage(record, persisted_usage)
                 telemetry.append(record)
                 continue
         predecessors = _resolve_replay_predecessors(
@@ -566,6 +585,12 @@ def execute_replay(
             if previous.repository_identity != identity:
                 raise ValueError("pre-launch replay tree differs from the predecessor handoff")
         state = _read_task_state(task_root) if task_root.exists() else None
+        if state is not None:
+            _verify_task_execution_policy(
+                state,
+                epoch_run_command=first_commands[epoch.epoch_id],
+                expected_model=control.model,
+            )
         if command.epoch_turn_index == 1:
             launch = fresh_session_launch(subtask, epoch_id=epoch.epoch_id)
         else:
@@ -573,8 +598,7 @@ def execute_replay(
                 raise ValueError("continued epoch has no existing task ledger")
             state_thread_id = _required_string(state, "thread_id")
             if any(
-                record.epoch_id == epoch.epoch_id
-                and record.codex_thread_id != state_thread_id
+                record.epoch_id == epoch.epoch_id and record.codex_thread_id != state_thread_id
                 for record in telemetry
             ):
                 raise ValueError("continued epoch task state changed Codex thread identity")
@@ -628,17 +652,14 @@ def execute_replay(
         handoff = _parse_final_handoff(final_message, subtask, actual_identity)
         handoff_size = _write_or_verify_handoff(handoff, handoff_path)
         usage_role = _usage_role(subtask.role)
-        usage = receipt_from_jsonl(
-            event_log,
-            binding=CodexUsageBindingV1(
-                campaign_id=plan.plan_id,
-                task_id=command.task_id,
-                action_id=subtask.subtask_id,
-                role=usage_role,
-                repair_or_retry=subtask.role == "repair",
-            ),
-            model=_required_string(task_state, "model"),
-            codex_cli_version=_optional_string(task_state.get("codex_cli_version")),
+        usage = _usage_for_epoch_turn(
+            event_log=event_log,
+            task_root=task_root,
+            command=command,
+            plan_id=plan.plan_id,
+            role=usage_role,
+            repair_or_retry=subtask.role == "repair",
+            task_state=task_state,
         )
         if not usage.complete:
             raise ValueError(
@@ -688,9 +709,7 @@ def _resolve_replay_predecessors(
     resolved: list[ArtifactReferenceV1] = []
     resolved_root = artifact_root.resolve(strict=True)
     membership = {
-        subtask_id: epoch
-        for epoch in epoch_plan.epochs
-        for subtask_id in epoch.subtask_ids
+        subtask_id: epoch for epoch in epoch_plan.epochs for subtask_id in epoch.subtask_ids
     }
     current_epoch = membership[subtask.subtask_id]
     terminal_subtasks = {epoch.subtask_ids[-1] for epoch in epoch_plan.epochs}
@@ -874,16 +893,15 @@ def _verified_completed_task(
     state = _read_task_state(task_root)
     if state.get("usage_complete") is not True:
         raise ValueError("global task receipt is incomplete")
-    if state.get("schema_version") != 1:
-        raise ValueError("global task state has an unsupported schema")
+    _verify_task_execution_policy(
+        state,
+        epoch_run_command=epoch_run_command,
+        expected_model=expected_model,
+    )
     if state.get("task_id") != command.task_id:
         raise ValueError("global task state identifies the wrong epoch")
     if state.get("working_directory") != str(workspace.resolve(strict=True)):
         raise ValueError("global task state identifies the wrong replay workspace")
-    if state.get("model") != expected_model:
-        raise ValueError("global task state identifies the wrong model")
-    if state.get("initial_options") != list(epoch_run_command.argv[5:]):
-        raise ValueError("global task state launch options differ from the frozen command")
     state_turn_count = _state_turn_count(state)
     turn_count_matches = (
         state_turn_count >= command.epoch_turn_index
@@ -905,6 +923,90 @@ def _verified_completed_task(
     if prompt_hash.read_text(encoding="ascii").strip() != expected_prompt_hash:
         raise ValueError("global task prompt hash differs from the durable replay prompt")
     return event_log, final_message, state
+
+
+def _usage_for_epoch_turn(
+    *,
+    event_log: Path,
+    task_root: Path,
+    command: ReplayCommandV1,
+    plan_id: str,
+    role: UsageRole,
+    repair_or_retry: bool,
+    task_state: dict[str, Any],
+) -> CodexUsageReceiptV1:
+    prior: CodexTurnUsageV1 | None = None
+    if command.epoch_turn_index > 1:
+        previous = task_root / "turns" / f"{command.epoch_turn_index - 1:06d}.events.jsonl"
+        prior_thread, prior = cumulative_usage_from_jsonl(previous)
+        if prior_thread != _required_string(task_state, "thread_id"):
+            raise ValueError("prior cumulative usage identifies a different Codex thread")
+    return receipt_from_jsonl(
+        event_log,
+        binding=CodexUsageBindingV1(
+            campaign_id=plan_id,
+            task_id=command.task_id,
+            action_id=command.subtask_id,
+            role=role,
+            repair_or_retry=repair_or_retry,
+        ),
+        model=_required_string(task_state, "model"),
+        codex_cli_version=_optional_string(task_state.get("codex_cli_version")),
+        prior_cumulative_usage=prior,
+        require_prior_cumulative_usage=command.epoch_turn_index > 1,
+    )
+
+
+def _verify_telemetry_usage(
+    telemetry: SemanticSubtaskTelemetryV1,
+    usage: CodexUsageReceiptV1,
+) -> None:
+    expected = {
+        "usage_receipt_id": usage.receipt_id,
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
+        "uncached_input_tokens": usage.input_tokens - usage.cached_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+        "combined_tokens": usage.combined_tokens,
+    }
+    if any(getattr(telemetry, key) != value for key, value in expected.items()):
+        raise ValueError("persisted semantic telemetry differs from exact resumed-turn usage")
+
+
+def _verify_task_execution_policy(
+    state: dict[str, Any],
+    *,
+    epoch_run_command: ReplayCommandV1,
+    expected_model: str,
+) -> None:
+    if state.get("schema_version") != 2:
+        raise ValueError("global task state has an unsupported schema")
+    options = list(epoch_run_command.argv[5:])
+    if state.get("model") != expected_model:
+        raise ValueError("global task state identifies the wrong model")
+    if state.get("initial_options") != options:
+        raise ValueError("global task state launch options differ from the frozen command")
+    core = {
+        "schema_version": 1,
+        "codex_exec_options": options,
+        "model": expected_model,
+    }
+    expected_policy = {
+        **core,
+        "sha256": hashlib.sha256(
+            json.dumps(
+                core,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest(),
+    }
+    if state.get("frozen_execution_policy") != expected_policy:
+        raise ValueError("global task state does not retain the frozen execution policy")
 
 
 def _verify_launch_record(path: Path, expected: BaseModel) -> None:
