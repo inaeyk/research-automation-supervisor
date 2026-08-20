@@ -13,6 +13,78 @@
     "path": "docs/validation/context_economy_v1/original_bootstrap_prompt.md",
     "sha256": "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
   },
+  "epoch_plan": {
+    "schema_version": 1,
+    "epoch_plan_id": "token-accounting-bootstrap-epochs-v1",
+    "semantic_plan_id": "token-accounting-bootstrap-semantic-v1",
+    "ordered_subtask_ids": [
+      "01-runtime-wrapper",
+      "02-ras-accounting",
+      "03-launch-integration",
+      "04-qualification",
+      "05-coding-audit"
+    ],
+    "epochs": [
+      {
+        "schema_version": 1,
+        "epoch_id": "epoch-a-runtime-wrapper",
+        "subtask_ids": ["01-runtime-wrapper"],
+        "role": "worker",
+        "fresh_session_at_start": true,
+        "continuation_policy": "single_subtask",
+        "context_economy_profile": "B4",
+        "configuration": {
+          "model": "gpt-5.6-sol",
+          "reasoning_effort": "high",
+          "sandbox": "workspace-write",
+          "model_auto_compact_token_limit": 64000,
+          "tool_output_token_limit": 2048
+        },
+        "rationale": "The global runtime wrapper is independent from repository-local implementation and starts the replay.",
+        "forced_freshness_reason": "initial_epoch"
+      },
+      {
+        "schema_version": 1,
+        "epoch_id": "epoch-b-ras-integration-qualification",
+        "subtask_ids": [
+          "02-ras-accounting",
+          "03-launch-integration",
+          "04-qualification"
+        ],
+        "role": "worker",
+        "fresh_session_at_start": true,
+        "continuation_policy": "continue_same_thread",
+        "context_economy_profile": "B4",
+        "configuration": {
+          "model": "gpt-5.6-sol",
+          "reasoning_effort": "high",
+          "sandbox": "workspace-write",
+          "model_auto_compact_token_limit": 64000,
+          "tool_output_token_limit": 2048
+        },
+        "rationale": "Repository accounting, launch integration, and qualification share interfaces, source architecture, and test context.",
+        "forced_freshness_reason": "subsystem_independence"
+      },
+      {
+        "schema_version": 1,
+        "epoch_id": "epoch-c-coding-audit",
+        "subtask_ids": ["05-coding-audit"],
+        "role": "coding_auditor",
+        "fresh_session_at_start": true,
+        "continuation_policy": "single_subtask",
+        "context_economy_profile": "B4",
+        "configuration": {
+          "model": "gpt-5.6-sol",
+          "reasoning_effort": "high",
+          "sandbox": "read-only",
+          "model_auto_compact_token_limit": 64000,
+          "tool_output_token_limit": 2048
+        },
+        "rationale": "The Coding Auditor requires a fresh read-only identity without Worker conversation history.",
+        "forced_freshness_reason": "role_change"
+      }
+    ]
+  },
   "plan": {
     "schema_version": 1,
     "plan_id": "token-accounting-bootstrap-semantic-v1",

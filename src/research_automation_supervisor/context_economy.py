@@ -285,14 +285,16 @@ class HandoffV1(BaseModel):
 
 def handoff_disposition(
     reason: Literal["task_boundary", "budget_exhaustion", "qualified_recovery"],
+    *,
+    continue_same_epoch: bool = False,
 ) -> HandoffV1:
-    """Prefer a fresh session except where recovery is tied to the original identity."""
-    preserve = reason == "qualified_recovery"
+    """Keep semantic handoff and session-boundary choices independent."""
+    preserve = reason == "qualified_recovery" or continue_same_epoch
     return HandoffV1(
         reason=reason,
         start_fresh_session=not preserve,
         preserve_original_session_identity=preserve,
-        compact_handoff_required=not preserve,
+        compact_handoff_required=reason != "qualified_recovery",
     )
 
 
@@ -314,13 +316,29 @@ class ContextEconomyReceiptV1(BaseModel):
     inference_token_sample_count: Annotated[int, Field(ge=0)] | None
     tool_call_count: Annotated[int, Field(ge=0)]
     model_visible_tool_output_chars: Annotated[int, Field(ge=0)]
-    compaction_count: Annotated[int, Field(ge=0)]
+    compaction_count: Annotated[int, Field(ge=0)] | None
     max_inference_input_tokens: Annotated[int, Field(ge=0)] | None
     median_inference_input_tokens: Annotated[int, Field(ge=0)] | None
     overrides: Annotated[
         tuple[ContextEconomyOverrideV1, ...],
         BeforeValidator(_freeze_json_sequence),
     ]
+
+    @model_validator(mode="after")
+    def validate_inference_diagnostics(self) -> ContextEconomyReceiptV1:
+        diagnostics = (
+            self.max_inference_input_tokens,
+            self.median_inference_input_tokens,
+            self.compaction_count,
+        )
+        if self.inference_token_sample_count is None:
+            if any(value is not None for value in diagnostics):
+                raise ValueError("unavailable inference samples require unavailable diagnostics")
+        elif self.inference_token_sample_count == 0:
+            raise ValueError("unavailable inference samples must be null, not zero")
+        elif any(value is None for value in diagnostics):
+            raise ValueError("inference samples require context and compaction diagnostics")
+        return self
 
 
 def context_economy_receipt_from_events(
@@ -361,10 +379,21 @@ def context_economy_receipt_from_events(
             )
         if event_type in {"thread.compacted", "context.compacted", "context_compacted"}:
             compactions += 1
-        if event_type == "turn.completed":
+        # ``turn.completed.usage`` is the authoritative cumulative total for that turn,
+        # not one model-inference context sample.  Only explicit rollout/token-count
+        # events are eligible for the diagnostic distribution.
+        if event_type in {
+            "inference.token_count",
+            "inference.completed",
+            "rollout.token_count",
+            "rollout.completed",
+        }:
             usage = event.get("usage")
-            if isinstance(usage, dict) and isinstance(usage.get("input_tokens"), int):
-                inference_inputs.append(usage["input_tokens"])
+            candidate = event.get("input_tokens")
+            if not isinstance(candidate, int) and isinstance(usage, dict):
+                candidate = usage.get("input_tokens")
+            if isinstance(candidate, int) and candidate >= 0:
+                inference_inputs.append(candidate)
     complete = usage_receipt.complete
     return ContextEconomyReceiptV1(
         profile=profile, prompt_bytes=prompt_bytes, prompt_tokens=None,
@@ -376,9 +405,9 @@ def context_economy_receipt_from_events(
         output_tokens=usage_receipt.output_tokens if complete else None,
         reasoning_output_tokens=(usage_receipt.reasoning_output_tokens if complete else None),
         combined_tokens=usage_receipt.combined_tokens if complete else None,
-        inference_token_sample_count=len(inference_inputs) if complete else None,
+        inference_token_sample_count=len(inference_inputs) if inference_inputs else None,
         tool_call_count=tool_calls, model_visible_tool_output_chars=visible_chars,
-        compaction_count=compactions,
+        compaction_count=compactions if inference_inputs else None,
         max_inference_input_tokens=max(inference_inputs) if inference_inputs else None,
         median_inference_input_tokens=(
             statistics.median_low(inference_inputs) if inference_inputs else None
@@ -435,3 +464,29 @@ def durable_context_config_item(item: str) -> str:
         return item
     digest = hashlib.sha256(item.encode("utf-8")).hexdigest()
     return f"<CONTEXT_CONFIG_SHA256:{digest}>"
+
+
+def codex_context_configuration(
+    profile_name: BrevityProfile,
+    override: ContextEconomyOverrideV1 | None = None,
+) -> tuple[str, ...]:
+    """Render the exact documented Codex context configuration arguments."""
+    profile = CONTEXT_ECONOMY_PROFILES[profile_name]
+    compact_limit = (
+        override.model_auto_compact_token_limit
+        if override is not None and override.model_auto_compact_token_limit is not None
+        else profile.model_auto_compact_token_limit
+    )
+    output_limit = (
+        override.tool_output_token_limit
+        if override is not None and override.tool_output_token_limit is not None
+        else profile.tool_output_token_limit
+    )
+    values: list[str] = []
+    if compact_limit is not None:
+        values.extend(("-c", f"model_auto_compact_token_limit={compact_limit}"))
+    if output_limit is not None:
+        values.extend(("-c", f"tool_output_token_limit={output_limit}"))
+    instructions = supervisor_developer_instructions(profile_name, override)
+    values.extend(("-c", f"developer_instructions={json.dumps(instructions)}"))
+    return tuple(values)

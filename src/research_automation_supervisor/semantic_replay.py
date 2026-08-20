@@ -1,8 +1,8 @@
 """Human-launched, semantically decomposed replay harness.
 
 The command is deliberately a dry run unless an operator supplies the exact execution
-acknowledgement.  It never uses ``codex-task resume`` for an independent subtask and never
-silently replaces an existing task ledger with a new session.
+acknowledgement.  Semantic task boundaries remain durable while bounded session epochs may
+continue the same verified Codex thread with ``codex-task resume``.
 """
 
 from __future__ import annotations
@@ -42,7 +42,10 @@ from research_automation_supervisor.semantic_decomposition import (
     SemanticSubtaskTelemetryV1,
     SemanticSubtaskV1,
     SemanticTaskPlanV1,
+    SessionEpochPlanV1,
+    SessionEpochV1,
     aggregate_semantic_telemetry,
+    continued_epoch_launch,
     fresh_session_launch,
     measure_agent_handoff,
     semantic_subtask_telemetry,
@@ -71,13 +74,16 @@ WriterIds = Annotated[tuple[str, ...], BeforeValidator(_freeze_sequence)]
 
 
 class ReplayCommandV1(BaseModel):
-    """One exact fresh-session command and its durable inputs."""
+    """One exact epoch turn command and its durable inputs."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1] = 1
+    epoch_id: str
+    epoch_turn_index: Annotated[int, Field(ge=1)]
     subtask_id: str
     task_id: str
+    mode: Literal["run", "resume"]
     prompt_path: str
     handoff_path: str
     launch_path: str
@@ -98,6 +104,7 @@ class ControlledReplayV1(BaseModel):
     workload_authority: AuthorityReferenceV1
     global_target_writer_subtask_ids: WriterIds
     plan: SemanticTaskPlanV1
+    epoch_plan: SessionEpochPlanV1
 
     @model_validator(mode="after")
     def bind_workload_authority(self) -> ControlledReplayV1:
@@ -111,6 +118,25 @@ class ControlledReplayV1(BaseModel):
             raise ValueError("global target writer subtask ID is absent from the plan")
         if any(tasks[writer].role.endswith("auditor") for writer in writers):
             raise ValueError("auditors cannot write the controlled global target")
+        if self.epoch_plan.semantic_plan_id != self.plan.plan_id:
+            raise ValueError("session epoch plan identifies the wrong semantic plan")
+        ordered = tuple(subtask.subtask_id for subtask in self.plan.subtasks)
+        if self.epoch_plan.ordered_subtask_ids != ordered:
+            raise ValueError("session epoch plan must preserve exact semantic subtask order")
+        for epoch in self.epoch_plan.epochs:
+            epoch_tasks = tuple(tasks[subtask_id] for subtask_id in epoch.subtask_ids)
+            if any(subtask.role != epoch.role for subtask in epoch_tasks):
+                raise ValueError("session epoch cannot cross semantic subtask roles")
+            if epoch.configuration.model != self.model:
+                raise ValueError("session epoch model differs from frozen replay model")
+            if epoch.configuration.reasoning_effort != self.reasoning_effort:
+                raise ValueError("session epoch reasoning differs from frozen replay reasoning")
+            expected_sandbox = (
+                "read-only" if epoch.role in {"coding_auditor", "physics_auditor"}
+                else "workspace-write"
+            )
+            if epoch.configuration.sandbox != expected_sandbox:
+                raise ValueError("session epoch sandbox differs from role policy")
         return self
 
 
@@ -140,6 +166,7 @@ class ReplayPreparationV1(BaseModel):
     schema_version: Literal[1] = 1
     control_id: str
     plan_id: str
+    epoch_plan_id: str
     control_sha256: str
     implementation_authority_commit: str
     replay_start_commit: str
@@ -228,17 +255,41 @@ def repository_identity(workspace: Path, base_commit: str) -> RepositoryIdentity
 def render_subtask_prompt(
     subtask: SemanticSubtaskV1,
     *,
+    epoch: SessionEpochV1,
+    epoch_turn_index: int,
     predecessor_artifacts: Sequence[ArtifactReferenceV1],
     authority_root: Path,
     expected_repository: RepositoryIdentityV1,
     global_target: Path,
 ) -> str:
-    """Render only the current semantic unit and compact durable predecessor references."""
+    """Render a fresh epoch handoff or a compact in-epoch semantic delta."""
     profile = CONTEXT_ECONOMY_PROFILES["B4"]
     assert profile.model_auto_compact_token_limit == 64_000
     assert profile.tool_output_token_limit == 2_048
+    if subtask.subtask_id != epoch.subtask_ids[epoch_turn_index - 1]:
+        raise ValueError("prompt subtask does not match the epoch turn order")
+    continued = epoch_turn_index > 1
+    semantic_payload: dict[str, object]
+    if continued:
+        semantic_payload = {
+            "subtask_id": subtask.subtask_id,
+            "sequence": subtask.sequence,
+            "next_objective": subtask.objective,
+            "scope": subtask.scope,
+            "deliverables": subtask.deliverables,
+            "completion_conditions": subtask.completion_conditions,
+            "validation_requirements": subtask.validation_requirements,
+            "stop_conditions": subtask.stop_conditions,
+        }
+    else:
+        semantic_payload = subtask.model_dump(mode="json")
     payload = {
-        "semantic_subtask": subtask.model_dump(mode="json"),
+        "epoch": {
+            "epoch_id": epoch.epoch_id,
+            "epoch_turn_index": epoch_turn_index,
+            "continuation_policy": epoch.continuation_policy,
+        },
+        "semantic_subtask" if not continued else "semantic_delta": semantic_payload,
         "authority_locations": [
             {
                 "path": str(
@@ -252,6 +303,15 @@ def render_subtask_prompt(
         "repository_identity_at_launch": expected_repository.model_dump(mode="json"),
         "controlled_global_target": str(global_target),
     }
+    session_statement = (
+        "This is a compact semantic delta inside the current epoch. Continue from the source, "
+        "test architecture, and interfaces already in this same bounded session. No full "
+        "AgentHandoffV1 is injected back into this session; durable predecessor results exist "
+        "only for crash recovery."
+        if continued
+        else "This begins a fresh session epoch. No conversation transcript was transferred; "
+        "the compact predecessor artifacts are the only cross-epoch handoff."
+    )
     return (
         "Semantic Context Economy V1: use B4 with a 64000-token auto-compaction limit "
         "and a 2048-token tool-output limit. Inspect and plan once; batch related searches, "
@@ -259,8 +319,8 @@ def render_subtask_prompt(
         "not hard denial thresholds. Do not rerun a valid PASS unless its recorded validity "
         "inputs changed. Preserve verbose output in durable files and expose bounded summaries. "
         "Do not repeat status, diff, or tests without a new reason."
-        "\n\nThis is one independent semantic subtask. Repository state, authority files, "
-        "hashes, receipts, and handoffs are durable memory; no prior conversation was supplied. "
+        f"\n\n{session_statement} Repository state, authority files, "
+        "hashes, receipts, and handoffs are durable memory. "
         "Read predecessor artifacts only as needed. Follow the bounded scope, validation, and "
         "stop conditions. Do not launch PA-5D scientific work or the replay harness. Preserve "
         "qualified recovery and exactly-once behavior. The controlled_global_target is the "
@@ -318,7 +378,7 @@ def prepare_replay(
     if head != control.replay_start_commit:
         raise ValueError("replay workspace HEAD does not match frozen replay_start_commit")
     dirty = bool(_git(workspace, "status", "--porcelain=v1", "-z"))
-    completed_prefix = _completed_subtask_prefix(plan, artifact_root)
+    completed_prefix = _completed_subtask_prefix(plan, artifact_root, control.epoch_plan)
     recovery_subtask = (
         plan.subtasks[len(completed_prefix)] if len(completed_prefix) < len(plan.subtasks) else None
     )
@@ -345,41 +405,56 @@ def prepare_replay(
     profile = CONTEXT_ECONOMY_PROFILES["B4"]
     assert profile.model_auto_compact_token_limit == 64_000
     commands: list[ReplayCommandV1] = []
+    epoch_by_subtask = {
+        subtask_id: (epoch, turn_index)
+        for epoch in control.epoch_plan.epochs
+        for turn_index, subtask_id in enumerate(epoch.subtask_ids, start=1)
+    }
     for subtask in plan.subtasks:
-        task_id = f"{plan.plan_id}.{subtask.subtask_id}"
+        epoch, epoch_turn_index = epoch_by_subtask[subtask.subtask_id]
+        task_id = f"{plan.plan_id}.{epoch.epoch_id}"
         if len(task_id) > 128:
             raise ValueError("composed replay task_id exceeds codex-task's 128-character limit")
         prompt_path = artifact_root / "prompts" / f"{subtask.subtask_id}.md"
         handoff_path = artifact_root / "handoffs" / f"{subtask.subtask_id}.json"
         launch_path = artifact_root / "launches" / f"{subtask.subtask_id}.json"
-        sandbox = "read-only" if subtask.role.endswith("auditor") else "workspace-write"
-        argv = [
-            str(codex_task),
-            "run",
-            task_id,
-            str(workspace),
-            str(prompt_path),
-            "--sandbox",
-            sandbox,
-            "-c",
-            "model_auto_compact_token_limit=64000",
-            "-c",
-            "tool_output_token_limit=2048",
-        ]
-        if subtask.subtask_id in control.global_target_writer_subtask_ids:
-            argv.extend(("--add-dir", str(global_target)))
-        argv.extend(
-            (
-                "--model",
-                control.model,
+        if epoch_turn_index == 1:
+            argv = [
+                str(codex_task),
+                "run",
+                task_id,
+                str(workspace),
+                str(prompt_path),
+                "--sandbox",
+                epoch.configuration.sandbox,
                 "-c",
-                f"model_reasoning_effort={control.reasoning_effort}",
+                "model_auto_compact_token_limit=64000",
+                "-c",
+                "tool_output_token_limit=2048",
+            ]
+            if any(
+                item in control.global_target_writer_subtask_ids for item in epoch.subtask_ids
+            ):
+                argv.extend(("--add-dir", str(global_target)))
+            argv.extend(
+                (
+                    "--model",
+                    epoch.configuration.model,
+                    "-c",
+                    f"model_reasoning_effort={epoch.configuration.reasoning_effort}",
+                )
             )
-        )
+            mode: Literal["run", "resume"] = "run"
+        else:
+            argv = [str(codex_task), "resume", task_id, str(prompt_path)]
+            mode = "resume"
         commands.append(
             ReplayCommandV1(
+                epoch_id=epoch.epoch_id,
+                epoch_turn_index=epoch_turn_index,
                 subtask_id=subtask.subtask_id,
                 task_id=task_id,
+                mode=mode,
                 prompt_path=str(prompt_path),
                 handoff_path=str(handoff_path),
                 launch_path=str(launch_path),
@@ -389,6 +464,7 @@ def prepare_replay(
     return ReplayPreparationV1(
         control_id=control.control_id,
         plan_id=plan.plan_id,
+        epoch_plan_id=control.epoch_plan.epoch_plan_id,
         control_sha256=hashlib.sha256(control_path.read_bytes()).hexdigest(),
         implementation_authority_commit=control.implementation_authority_commit,
         replay_start_commit=control.replay_start_commit,
@@ -412,7 +488,7 @@ def execute_replay(
     global_target: Path,
     codex_task: Path = DEFAULT_CODEX_TASK,
 ) -> SemanticStageTelemetryV1:
-    """Execute a prepared plan externally, one fresh session per semantic subtask."""
+    """Execute semantic turns in bounded epochs with qualified run/resume recovery."""
     preparation = prepare_replay(
         control_path=control_path,
         authority_root=authority_root,
@@ -438,59 +514,116 @@ def execute_replay(
     codex_task = codex_task.resolve()
     if _paths_overlap(global_target, ledger_root) or _paths_overlap(global_target, codex_task):
         raise ValueError("global_target overlaps the trusted launcher or authoritative ledger")
+    epochs = {epoch.epoch_id: epoch for epoch in control.epoch_plan.epochs}
+    first_commands = {
+        command.epoch_id: command
+        for command in preparation.commands
+        if command.epoch_turn_index == 1
+    }
     telemetry: list[SemanticSubtaskTelemetryV1] = []
     for subtask, command in zip(plan.subtasks, preparation.commands, strict=True):
+        epoch = epochs[command.epoch_id]
         handoff_path = Path(command.handoff_path)
         task_root = ledger_root / command.task_id
         if handoff_path.exists():
             telemetry_path = artifact_root / "telemetry" / f"{subtask.subtask_id}.json"
             if telemetry_path.exists():
-                telemetry.append(_load_existing_telemetry(artifact_root, subtask))
-                continue
-        predecessors = _resolve_replay_predecessors(subtask, artifact_root)
-        prompt_path = Path(command.prompt_path)
-        launch = fresh_session_launch(subtask)
-        launch_path = Path(command.launch_path)
-        if task_root.exists():
-            if not prompt_path.is_file() or not launch_path.is_file():
-                raise ValueError(
-                    "an existing task ledger requires its exact durable prompt and launch decision"
+                record = _load_existing_telemetry(
+                    artifact_root,
+                    subtask,
+                    epoch=epoch,
+                    epoch_turn_index=command.epoch_turn_index,
                 )
-            _verify_launch_record(launch_path, launch)
+                _, _, completed_state = _verified_completed_task(
+                    task_root=task_root,
+                    command=command,
+                    epoch_run_command=first_commands[epoch.epoch_id],
+                    workspace=workspace,
+                    expected_model=control.model,
+                    allow_later_turns=True,
+                )
+                if _required_string(completed_state, "thread_id") != record.codex_thread_id:
+                    raise ValueError("completed epoch telemetry has the wrong Codex thread")
+                telemetry.append(record)
+                continue
+        predecessors = _resolve_replay_predecessors(
+            subtask,
+            artifact_root,
+            epoch_plan=control.epoch_plan,
+            include_usage_receipts=subtask.role in {"coding_auditor", "physics_auditor"},
+        )
+        prompt_path = Path(command.prompt_path)
+        launch_path = Path(command.launch_path)
+        identity = repository_identity(workspace, base_commit)
+        if subtask.sequence == 1:
+            if identity.dirty:
+                raise ValueError(
+                    "first-subtask pre-launch recovery no longer has a clean replay tree"
+                )
         else:
-            identity = repository_identity(workspace, base_commit)
-            if subtask.sequence == 1:
-                if identity.dirty:
-                    raise ValueError(
-                        "first-subtask pre-launch recovery no longer has a clean replay tree"
-                    )
-            else:
-                previous_id = plan.subtasks[subtask.sequence - 2].subtask_id
-                previous = _parse_stored_handoff(artifact_root / "handoffs" / f"{previous_id}.json")
-                if previous.repository_identity != identity:
-                    raise ValueError("pre-launch replay tree differs from the predecessor handoff")
-            prompt = render_subtask_prompt(
+            previous_id = plan.subtasks[subtask.sequence - 2].subtask_id
+            previous = _parse_stored_handoff(artifact_root / "handoffs" / f"{previous_id}.json")
+            if previous.repository_identity != identity:
+                raise ValueError("pre-launch replay tree differs from the predecessor handoff")
+        state = _read_task_state(task_root) if task_root.exists() else None
+        if command.epoch_turn_index == 1:
+            launch = fresh_session_launch(subtask, epoch_id=epoch.epoch_id)
+        else:
+            if state is None:
+                raise ValueError("continued epoch has no existing task ledger")
+            state_thread_id = _required_string(state, "thread_id")
+            if any(
+                record.epoch_id == epoch.epoch_id
+                and record.codex_thread_id != state_thread_id
+                for record in telemetry
+            ):
+                raise ValueError("continued epoch task state changed Codex thread identity")
+            launch = continued_epoch_launch(
                 subtask,
-                predecessor_artifacts=predecessors,
-                authority_root=authority_root,
-                expected_repository=identity,
-                global_target=global_target,
+                epoch=epoch,
+                epoch_turn_index=command.epoch_turn_index,
+                thread_id=state_thread_id,
             )
-            _write_or_verify(prompt_path, prompt.encode("utf-8"))
-            _json_or_verify(launch_path, launch.model_dump(mode="json"))
+        prompt = render_subtask_prompt(
+            subtask,
+            epoch=epoch,
+            epoch_turn_index=command.epoch_turn_index,
+            predecessor_artifacts=predecessors,
+            authority_root=authority_root,
+            expected_repository=identity,
+            global_target=global_target,
+        )
+        _write_or_verify(prompt_path, prompt.encode("utf-8"))
+        _json_or_verify(launch_path, launch.model_dump(mode="json"))
+        if task_root.exists():
+            _verify_launch_record(launch_path, launch)
+        completed_turns = _state_turn_count(state) if state is not None else 0
+        if completed_turns == command.epoch_turn_index:
+            pass
+        elif completed_turns == command.epoch_turn_index - 1:
+            _refuse_unqualified_turn_relaunch(task_root, command.epoch_turn_index)
+            if task_root.exists() and command.mode == "run":
+                raise ValueError("fresh epoch task state exists without a completed turn")
             completed = subprocess.run(command.argv, check=False)
             if completed.returncode != 0:
                 raise RuntimeError(
                     f"subtask {subtask.subtask_id} failed; preserve {task_root} for qualified "
                     "recovery"
                 )
+        else:
+            raise ValueError("epoch ledger turn count does not match the next semantic turn")
         event_log, final_message, task_state = _verified_completed_task(
             task_root=task_root,
             command=command,
+            epoch_run_command=first_commands[epoch.epoch_id],
             workspace=workspace,
             expected_model=control.model,
         )
-        prompt = prompt_path.read_text(encoding="utf-8")
+        if (
+            launch.prior_thread_id is not None
+            and _required_string(task_state, "thread_id") != launch.prior_thread_id
+        ):
+            raise ValueError("continued epoch changed Codex thread identity")
         actual_identity = repository_identity(workspace, base_commit)
         handoff = _parse_final_handoff(final_message, subtask, actual_identity)
         handoff_size = _write_or_verify_handoff(handoff, handoff_path)
@@ -529,6 +662,7 @@ def execute_replay(
             context=context,
             launch=launch,
             handoff_size=handoff_size,
+            codex_thread_id=_required_string(task_state, "thread_id"),
         )
         _json_or_verify(
             artifact_root / "telemetry" / f"{subtask.subtask_id}.json",
@@ -544,10 +678,22 @@ def execute_replay(
 
 
 def _resolve_replay_predecessors(
-    subtask: SemanticSubtaskV1, artifact_root: Path
+    subtask: SemanticSubtaskV1,
+    artifact_root: Path,
+    *,
+    epoch_plan: SessionEpochPlanV1,
+    include_usage_receipts: bool,
 ) -> tuple[ArtifactReferenceV1, ...]:
+    """Verify all semantic dependencies, but transfer only compact cross-epoch state."""
     resolved: list[ArtifactReferenceV1] = []
     resolved_root = artifact_root.resolve(strict=True)
+    membership = {
+        subtask_id: epoch
+        for epoch in epoch_plan.epochs
+        for subtask_id in epoch.subtask_ids
+    }
+    current_epoch = membership[subtask.subtask_id]
+    terminal_subtasks = {epoch.subtask_ids[-1] for epoch in epoch_plan.epochs}
     for requirement in subtask.required_predecessor_artifacts:
         relative = Path(requirement.path)
         if relative.is_absolute():
@@ -560,34 +706,70 @@ def _resolve_replay_predecessors(
         digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
         if requirement.sha256 is not None and digest != requirement.sha256:
             raise ValueError(f"predecessor hash changed: {requirement.path}")
-        resolved.append(
-            ArtifactReferenceV1(
-                path=str(candidate),
-                sha256=digest,
-                kind=requirement.kind,
+        producer = requirement.produced_by_subtask_id
+        if (
+            current_epoch.subtask_ids[0] == subtask.subtask_id
+            and producer in terminal_subtasks
+            and producer is not None
+            and membership[producer] != current_epoch
+        ):
+            resolved.append(
+                ArtifactReferenceV1(
+                    path=str(candidate),
+                    sha256=digest,
+                    kind=requirement.kind,
+                )
             )
-        )
+    if include_usage_receipts:
+        current_position = epoch_plan.ordered_subtask_ids.index(subtask.subtask_id)
+        for prior_id in epoch_plan.ordered_subtask_ids[:current_position]:
+            candidate = resolved_root / "usage" / f"{prior_id}.json"
+            if not candidate.is_file():
+                raise ValueError(f"auditor usage receipt unavailable: {prior_id}")
+            resolved.append(
+                ArtifactReferenceV1(
+                    path=str(candidate),
+                    sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                    kind="evidence",
+                )
+            )
     return tuple(resolved)
 
 
 def _load_existing_telemetry(
-    artifact_root: Path, subtask: SemanticSubtaskV1
+    artifact_root: Path,
+    subtask: SemanticSubtaskV1,
+    *,
+    epoch: SessionEpochV1,
+    epoch_turn_index: int,
 ) -> SemanticSubtaskTelemetryV1:
     path = artifact_root / "telemetry" / f"{subtask.subtask_id}.json"
     try:
         record = SemanticSubtaskTelemetryV1.model_validate_json(path.read_bytes())
     except (OSError, ValidationError) as exc:
         raise ValueError("existing handoff lacks matching valid telemetry") from exc
-    if record.subtask_id != subtask.subtask_id or record.role != subtask.role:
+    if (
+        record.subtask_id != subtask.subtask_id
+        or record.role != subtask.role
+        or record.epoch_id != epoch.epoch_id
+        or record.epoch_turn_index != epoch_turn_index
+    ):
         raise ValueError("existing telemetry identifies the wrong semantic subtask")
     if not record.accounting_complete:
         raise ValueError("existing telemetry has incomplete authoritative token accounting")
-    if not record.session_fresh or record.continuation_reason is not None:
-        raise ValueError("independent replay recovery requires a fresh-session receipt")
+    expected_fresh = epoch_turn_index == 1
+    if record.session_fresh != expected_fresh:
+        raise ValueError("existing telemetry contradicts the epoch session boundary")
+    if not expected_fresh and record.continuation_reason != "epoch_continuation":
+        raise ValueError("continued epoch telemetry lacks its continuation reason")
     return record
 
 
-def _completed_subtask_prefix(plan: SemanticTaskPlanV1, artifact_root: Path) -> tuple[str, ...]:
+def _completed_subtask_prefix(
+    plan: SemanticTaskPlanV1,
+    artifact_root: Path,
+    epoch_plan: SessionEpochPlanV1 | None = None,
+) -> tuple[str, ...]:
     """Accept only a contiguous, fully evidenced prefix during external recovery."""
     completed: list[str] = []
     gap_seen = False
@@ -608,7 +790,28 @@ def _completed_subtask_prefix(plan: SemanticTaskPlanV1, artifact_root: Path) -> 
             raise ValueError("stored replay handoff identifies the wrong subtask")
         if stored.authority_references != subtask.authority_references:
             raise ValueError("stored replay handoff has mismatched authority")
-        _load_existing_telemetry(artifact_root, subtask)
+        if epoch_plan is not None:
+            epoch = next(
+                item for item in epoch_plan.epochs if subtask.subtask_id in item.subtask_ids
+            )
+            _load_existing_telemetry(
+                artifact_root,
+                subtask,
+                epoch=epoch,
+                epoch_turn_index=epoch.subtask_ids.index(subtask.subtask_id) + 1,
+            )
+        else:
+            path = artifact_root / "telemetry" / f"{subtask.subtask_id}.json"
+            try:
+                record = SemanticSubtaskTelemetryV1.model_validate_json(path.read_bytes())
+            except (OSError, ValidationError) as exc:
+                raise ValueError("existing handoff lacks matching valid telemetry") from exc
+            if (
+                record.subtask_id != subtask.subtask_id
+                or record.role != subtask.role
+                or not record.accounting_complete
+            ):
+                raise ValueError("existing telemetry identifies the wrong semantic subtask")
         completed.append(subtask.subtask_id)
     return tuple(completed)
 
@@ -620,44 +823,86 @@ def _recovery_inputs_exist(artifact_root: Path, subtask: SemanticSubtaskV1) -> b
     return prompt.is_file() and launch.is_file()
 
 
-def _completed_task_files(task_root: Path) -> tuple[Path, Path, dict[str, Any]]:
+def _read_task_state(task_root: Path) -> dict[str, Any]:
     state_path = task_root / "task.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
-    if not isinstance(state, dict) or state.get("usage_complete") is not True:
-        raise ValueError("global task receipt is incomplete")
-    events = sorted((task_root / "turns").glob("*.events.jsonl"))
-    finals = sorted((task_root / "turns").glob("*.final-message.md"))
-    if len(events) != 1 or len(finals) != 1:
-        raise ValueError("fresh semantic subtask must have exactly one completed turn")
-    return events[0], finals[0], state
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("global task state is invalid") from exc
+    if not isinstance(state, dict):
+        raise ValueError("global task state is invalid")
+    return state
+
+
+def _state_turn_count(state: dict[str, Any]) -> int:
+    value = state.get("turn_count", 0)
+    if type(value) is not int or value < 0:
+        raise ValueError("global task state has an invalid turn count")
+    return value
+
+
+def _refuse_unqualified_turn_relaunch(task_root: Path, turn_index: int) -> None:
+    """Fail closed when durable turn files exist beyond the qualified task state.
+
+    The global wrapper owns task-state recovery.  The replay supervisor must not infer a
+    completed turn from partial files, but their presence proves that launching the same turn
+    again could duplicate external actions.
+    """
+    turns = task_root / "turns"
+    stem = f"{turn_index:06d}"
+    candidates = (
+        turns / f"{stem}.events.jsonl",
+        turns / f"{stem}.final-message.md",
+        turns / f"{stem}.prompt.sha256",
+    )
+    if any(path.exists() for path in candidates):
+        raise ValueError(
+            "epoch turn artifacts exist beyond qualified task state; refusing duplicate launch"
+        )
 
 
 def _verified_completed_task(
     *,
     task_root: Path,
     command: ReplayCommandV1,
+    epoch_run_command: ReplayCommandV1,
     workspace: Path,
     expected_model: str,
+    allow_later_turns: bool = False,
 ) -> tuple[Path, Path, dict[str, Any]]:
-    """Qualify one completed global ledger for consumption without another launch."""
-    event_log, final_message, state = _completed_task_files(task_root)
+    """Qualify exactly one completed epoch turn for consumption without another launch."""
+    state = _read_task_state(task_root)
+    if state.get("usage_complete") is not True:
+        raise ValueError("global task receipt is incomplete")
     if state.get("schema_version") != 1:
         raise ValueError("global task state has an unsupported schema")
     if state.get("task_id") != command.task_id:
-        raise ValueError("global task state identifies the wrong subtask")
+        raise ValueError("global task state identifies the wrong epoch")
     if state.get("working_directory") != str(workspace.resolve(strict=True)):
         raise ValueError("global task state identifies the wrong replay workspace")
     if state.get("model") != expected_model:
         raise ValueError("global task state identifies the wrong model")
-    if state.get("initial_options") != list(command.argv[5:]):
+    if state.get("initial_options") != list(epoch_run_command.argv[5:]):
         raise ValueError("global task state launch options differ from the frozen command")
-    if state.get("turn_count") != 1:
-        raise ValueError("fresh semantic subtask ledger must contain exactly one turn")
+    state_turn_count = _state_turn_count(state)
+    turn_count_matches = (
+        state_turn_count >= command.epoch_turn_index
+        if allow_later_turns
+        else state_turn_count == command.epoch_turn_index
+    )
+    if not turn_count_matches:
+        raise ValueError("global epoch ledger does not contain the expected completed turn")
+    stem = f"{command.epoch_turn_index:06d}"
+    event_log = task_root / "turns" / f"{stem}.events.jsonl"
+    final_message = task_root / "turns" / f"{stem}.final-message.md"
+    if not event_log.is_file() or not final_message.is_file():
+        raise ValueError("global epoch ledger lacks the expected completed turn files")
     prompt_hashes = sorted((task_root / "turns").glob("*.prompt.sha256"))
-    if len(prompt_hashes) != 1:
-        raise ValueError("fresh semantic subtask must retain exactly one prompt hash")
+    if len(prompt_hashes) != state_turn_count:
+        raise ValueError("global epoch ledger does not retain every completed prompt hash")
     expected_prompt_hash = hashlib.sha256(Path(command.prompt_path).read_bytes()).hexdigest()
-    if prompt_hashes[0].read_text(encoding="ascii").strip() != expected_prompt_hash:
+    prompt_hash = task_root / "turns" / f"{stem}.prompt.sha256"
+    if prompt_hash.read_text(encoding="ascii").strip() != expected_prompt_hash:
         raise ValueError("global task prompt hash differs from the durable replay prompt")
     return event_log, final_message, state
 

@@ -30,10 +30,9 @@ from research_automation_supervisor.codex_models import (
     load_codex_request,
 )
 from research_automation_supervisor.context_economy import (
-    CONTEXT_ECONOMY_PROFILES,
+    codex_context_configuration,
     context_economy_receipt_from_events,
     durable_context_config_item,
-    supervisor_developer_instructions,
 )
 from research_automation_supervisor.doctor import MINIMUM_CODEX, _parse_codex_version
 from research_automation_supervisor.errors import (
@@ -878,26 +877,12 @@ def build_codex_command(
 def _context_economy_config(prepared: PreparedCodexRequest) -> list[str]:
     """Render only documented Codex configuration; never fake a context window."""
     request = prepared.request
-    profile = CONTEXT_ECONOMY_PROFILES[request.brevity_profile]
-    override = request.context_economy_override
-    compact_limit = (
-        override.model_auto_compact_token_limit
-        if override is not None and override.model_auto_compact_token_limit is not None
-        else profile.model_auto_compact_token_limit
+    return list(
+        codex_context_configuration(
+            request.brevity_profile,
+            request.context_economy_override,
+        )
     )
-    output_limit = (
-        override.tool_output_token_limit
-        if override is not None and override.tool_output_token_limit is not None
-        else profile.tool_output_token_limit
-    )
-    values: list[str] = []
-    if compact_limit is not None:
-        values.extend(("-c", f"model_auto_compact_token_limit={compact_limit}"))
-    if output_limit is not None:
-        values.extend(("-c", f"tool_output_token_limit={output_limit}"))
-    instructions = supervisor_developer_instructions(request.brevity_profile, override)
-    values.extend(("-c", f"developer_instructions={json.dumps(instructions)}"))
-    return values
 
 
 def probe_codex_version(

@@ -191,12 +191,53 @@ def test_context_receipt_uses_deterministic_fake_events(tmp_path: Path) -> None:
     assert receipt.uncached_input_tokens == 70
     assert receipt.output_tokens == 30
     assert receipt.combined_tokens == 430
-    assert receipt.inference_token_sample_count == 2
+    assert receipt.inference_token_sample_count is None
     assert receipt.tool_call_count == 1
     assert receipt.model_visible_tool_output_chars == 5
-    assert receipt.compaction_count == 1
-    assert receipt.max_inference_input_tokens == 300
+    assert receipt.compaction_count is None
+    assert receipt.max_inference_input_tokens is None
+    assert receipt.median_inference_input_tokens is None
+
+
+def test_context_receipt_uses_only_genuine_inference_samples(tmp_path: Path) -> None:
+    events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {"type": "inference.token_count", "input_tokens": 100},
+        {"type": "inference.token_count", "input_tokens": 300},
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 900,
+                "cached_input_tokens": 700,
+                "output_tokens": 40,
+                "reasoning_output_tokens": 10,
+            },
+        },
+    ]
+    event_log = tmp_path / "events.jsonl"
+    event_log.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    usage = receipt_from_jsonl(
+        event_log,
+        binding=CodexUsageBindingV1(
+            campaign_id="campaign",
+            task_id="task",
+            action_id="action",
+            role="supervisor",
+        ),
+        model="gpt-5.6-sol",
+        codex_cli_version="codex-cli 0.test",
+    )
+    receipt = context_economy_receipt_from_events(
+        event_log,
+        prompt_bytes=42,
+        profile="B4",
+        usage_receipt=usage,
+    )
+    assert receipt.input_tokens == 900
+    assert receipt.inference_token_sample_count == 2
     assert receipt.median_inference_input_tokens == 100
+    assert receipt.max_inference_input_tokens == 300
+    assert receipt.compaction_count == 0
 
 
 def test_material_prompt_dedup_uses_path_hash_and_detects_changes() -> None:
@@ -222,6 +263,10 @@ def test_handoff_prefers_fresh_session_but_preserves_qualified_recovery_identity
     boundary = handoff_disposition("task_boundary")
     assert boundary.start_fresh_session is True
     assert boundary.compact_handoff_required is True
+    continued_boundary = handoff_disposition("task_boundary", continue_same_epoch=True)
+    assert continued_boundary.start_fresh_session is False
+    assert continued_boundary.preserve_original_session_identity is True
+    assert continued_boundary.compact_handoff_required is True
     recovery = handoff_disposition("qualified_recovery")
     assert recovery.start_fresh_session is False
     assert recovery.preserve_original_session_identity is True

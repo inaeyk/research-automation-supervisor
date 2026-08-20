@@ -20,6 +20,10 @@ from research_automation_supervisor.auth_confidentiality import (
 )
 from research_automation_supervisor.codex_adapter import CodexProcessLaunch
 from research_automation_supervisor.codex_models import PreparedCodexRequest
+from research_automation_supervisor.context_economy import (
+    codex_context_configuration,
+    durable_context_config_item,
+)
 from research_automation_supervisor.errors import (
     LiveShadowDependencyError,
     LiveShadowIntegrityError,
@@ -620,6 +624,7 @@ def verify_recorded_bubblewrap_command(
 def verify_projected_auditor_bubblewrap_command(
     metadata: CodexMetadata,
     *,
+    prepared: PreparedCodexRequest,
     identity: BubblewrapBackendIdentity,
     projected_workspace: Path,
     runtime_home: Path,
@@ -691,6 +696,13 @@ def verify_projected_auditor_bubblewrap_command(
         Path(identity.canonical_bubblewrap_path),
         mounts,
     )
+    context_configuration = tuple(
+        durable_context_config_item(item)
+        for item in codex_context_configuration(
+            prepared.request.brevity_profile,
+            prepared.request.context_economy_override,
+        )
+    )
     expected.extend(
         (
             "--",
@@ -712,6 +724,7 @@ def verify_projected_auditor_bubblewrap_command(
             "sandbox_workspace_write.network_access=false",
             "-c",
             "features.skill_mcp_dependency_install=false",
+            *context_configuration,
             "--sandbox",
             "read-only",
             "--ignore-user-config",

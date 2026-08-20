@@ -837,6 +837,15 @@ def test_real_pa3_exec_verifies_exact_certificate_before_scripted_process_start(
             index = sys.argv.index("--output-last-message")
             Path(sys.argv[index + 1]).write_text("{}", encoding="ascii")
             print(json.dumps({"type": "thread.started", "thread_id": "certified-fake"}))
+            print(json.dumps({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "reasoning_output_tokens": 0,
+                },
+            }))
             '''
         ),
         encoding="ascii",

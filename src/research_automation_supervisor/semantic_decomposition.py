@@ -20,7 +20,8 @@ from pydantic import (
     model_validator,
 )
 
-from research_automation_supervisor.context_economy import ContextEconomyReceiptV1
+from research_automation_supervisor.codex_models import ModelName, ReasoningEffort
+from research_automation_supervisor.context_economy import BrevityProfile, ContextEconomyReceiptV1
 from research_automation_supervisor.token_accounting import CodexUsageReceiptV1
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -41,8 +42,34 @@ SemanticBoundary = Literal[
     "independent_repair",
 ]
 ContinuationReason = Literal[
+    "epoch_continuation",
     "qualified_recovery",
     "unrepresentable_working_context",
+]
+EpochContinuationPolicy = Literal["single_subtask", "continue_same_thread"]
+ForcedFreshnessReason = Literal[
+    "initial_epoch",
+    "role_change",
+    "auditor_independence",
+    "physics_auditor_security",
+    "subsystem_independence",
+    "low_context_locality",
+    "context_health_limit",
+    "qualified_recovery_identity",
+]
+SessionBoundaryReason = Literal[
+    "same_subsystem",
+    "dependent_interfaces",
+    "shared_source_test_architecture",
+    "implementation_integration_qualification",
+    "repair_current_candidate",
+    "role_change",
+    "auditor_independence",
+    "physics_auditor_security",
+    "subsystem_independence",
+    "low_context_locality",
+    "context_health_limit",
+    "qualified_recovery_identity",
 ]
 ArtifactKind = Literal[
     "authority",
@@ -262,6 +289,158 @@ class SemanticTaskPlanV1(BaseModel):
         return self
 
 
+class EpochModelConfigurationV1(BaseModel):
+    """Frozen model and bounded-context configuration for one session epoch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    model: ModelName
+    reasoning_effort: ReasoningEffort
+    sandbox: Literal["workspace-write", "read-only"]
+    model_auto_compact_token_limit: Literal[64000] = 64_000
+    tool_output_token_limit: Literal[2048] = 2_048
+
+
+class SessionEpochV1(BaseModel):
+    """One fresh session followed by zero or more verified resumptions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, str_strip_whitespace=True)
+
+    schema_version: Literal[1] = 1
+    epoch_id: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")]
+    subtask_ids: Annotated[
+        tuple[str, ...], BeforeValidator(_freeze_sequence), Field(min_length=1, max_length=6)
+    ]
+    role: SubtaskRole
+    fresh_session_at_start: Literal[True] = True
+    continuation_policy: EpochContinuationPolicy
+    context_economy_profile: BrevityProfile
+    configuration: EpochModelConfigurationV1
+    rationale: Annotated[str, Field(min_length=16, max_length=2_000)]
+    forced_freshness_reason: ForcedFreshnessReason | None = None
+
+    @model_validator(mode="after")
+    def validate_epoch(self) -> SessionEpochV1:
+        if len(set(self.subtask_ids)) != len(self.subtask_ids):
+            raise ValueError("an epoch cannot contain a semantic subtask more than once")
+        if self.continuation_policy == "single_subtask" and len(self.subtask_ids) != 1:
+            raise ValueError("single_subtask epoch must contain exactly one semantic subtask")
+        if self.continuation_policy == "continue_same_thread" and len(self.subtask_ids) < 2:
+            raise ValueError("continued epoch must contain at least two semantic subtasks")
+        if self.context_economy_profile != "B4":
+            raise ValueError("controlled session epochs require the qualified B4 profile")
+        if self.role in {"coding_auditor", "physics_auditor"}:
+            if self.configuration.sandbox != "read-only":
+                raise ValueError("auditor epochs must be read-only")
+            if len(self.subtask_ids) != 1:
+                raise ValueError("auditor epochs cannot continue a prior or later subtask")
+        return self
+
+
+class SessionEpochPlanV1(BaseModel):
+    """Independent mapping from ordered semantic subtasks to contiguous session epochs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, str_strip_whitespace=True)
+
+    schema_version: Literal[1] = 1
+    epoch_plan_id: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")]
+    semantic_plan_id: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")]
+    ordered_subtask_ids: Annotated[
+        tuple[str, ...], BeforeValidator(_freeze_sequence), Field(min_length=1, max_length=6)
+    ]
+    epochs: Annotated[
+        tuple[SessionEpochV1, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=1, max_length=6),
+    ]
+
+    @model_validator(mode="after")
+    def validate_partition(self) -> SessionEpochPlanV1:
+        if len(set(self.ordered_subtask_ids)) != len(self.ordered_subtask_ids):
+            raise ValueError("ordered semantic subtask IDs must be unique")
+        epoch_ids = tuple(epoch.epoch_id for epoch in self.epochs)
+        if len(set(epoch_ids)) != len(epoch_ids):
+            raise ValueError("session epoch IDs must be unique")
+        flattened = tuple(item for epoch in self.epochs for item in epoch.subtask_ids)
+        if flattened != self.ordered_subtask_ids:
+            raise ValueError(
+                "epochs must partition semantic subtasks exactly once in contiguous order"
+            )
+        if self.epochs[0].forced_freshness_reason != "initial_epoch":
+            raise ValueError("the first epoch must durably identify initial freshness")
+        if any(epoch.forced_freshness_reason is None for epoch in self.epochs[1:]):
+            raise ValueError("each later epoch must durably explain its forced freshness")
+        return self
+
+
+class ContextLocalityFactsV1(BaseModel):
+    """Deterministic facts used to choose continuation without another model call."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    same_subsystem: bool = False
+    depends_on_previous_interfaces: bool = False
+    shared_source_test_architecture: bool = False
+    implementation_integration_qualification_chain: bool = False
+    repair_current_candidate: bool = False
+    subsystem_independent: bool = False
+    little_relevant_context: bool = False
+    context_health_exceeded: bool = False
+    security_or_blindness_requires_freshness: bool = False
+    qualified_recovery_requires_new_identity: bool = False
+
+
+class SessionBoundaryDecisionV1(BaseModel):
+    """Durable explainable result of the deterministic session-boundary policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    fresh_session: bool
+    reason: SessionBoundaryReason
+
+
+def choose_session_boundary(
+    previous: SemanticSubtaskV1,
+    current: SemanticSubtaskV1,
+    facts: ContextLocalityFactsV1,
+) -> SessionBoundaryDecisionV1:
+    """Choose freshness by role, safety, health, and locality in deterministic order."""
+    if previous.role != current.role:
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="role_change")
+    if current.role == "coding_auditor":
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="auditor_independence")
+    if current.role == "physics_auditor":
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="physics_auditor_security")
+    if facts.security_or_blindness_requires_freshness:
+        return SessionBoundaryDecisionV1(
+            fresh_session=True, reason="physics_auditor_security"
+        )
+    if facts.context_health_exceeded:
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="context_health_limit")
+    if facts.qualified_recovery_requires_new_identity:
+        return SessionBoundaryDecisionV1(
+            fresh_session=True, reason="qualified_recovery_identity"
+        )
+    if facts.subsystem_independent:
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="subsystem_independence")
+    if facts.little_relevant_context:
+        return SessionBoundaryDecisionV1(fresh_session=True, reason="low_context_locality")
+    locality_reasons: tuple[tuple[bool, SessionBoundaryReason], ...] = (
+        (facts.depends_on_previous_interfaces, "dependent_interfaces"),
+        (facts.shared_source_test_architecture, "shared_source_test_architecture"),
+        (
+            facts.implementation_integration_qualification_chain,
+            "implementation_integration_qualification",
+        ),
+        (facts.repair_current_candidate, "repair_current_candidate"),
+        (facts.same_subsystem, "same_subsystem"),
+    )
+    for applies, reason in locality_reasons:
+        if applies:
+            return SessionBoundaryDecisionV1(fresh_session=False, reason=reason)
+    return SessionBoundaryDecisionV1(fresh_session=True, reason="low_context_locality")
+
+
 def write_semantic_task_plan(plan: SemanticTaskPlanV1, destination: Path) -> None:
     """Durably record a validated exact plan once, before any subtask launch."""
     raw = _canonical_json(plan.model_dump(mode="json"))
@@ -449,11 +628,13 @@ def write_agent_handoff(
 
 
 class SessionLaunchV1(BaseModel):
-    """Durable fresh/continue decision made before a subtask launch."""
+    """Durable fresh/continue decision made before one epoch turn."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, str_strip_whitespace=True)
 
     schema_version: Literal[1] = 1
+    epoch_id: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")]
+    epoch_turn_index: Annotated[int, Field(ge=1)]
     subtask_id: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")]
     role: SubtaskRole
     fresh_session: bool = True
@@ -493,9 +674,43 @@ class SessionLaunchV1(BaseModel):
         return self
 
 
-def fresh_session_launch(subtask: SemanticSubtaskV1) -> SessionLaunchV1:
-    """Return the default launch policy for every independent semantic subtask."""
-    return SessionLaunchV1(subtask_id=subtask.subtask_id, role=subtask.role)
+def fresh_session_launch(
+    subtask: SemanticSubtaskV1, *, epoch_id: str | None = None
+) -> SessionLaunchV1:
+    """Return a fresh launch for the first turn of an explicit epoch."""
+    return SessionLaunchV1(
+        epoch_id=epoch_id or subtask.subtask_id,
+        epoch_turn_index=1,
+        subtask_id=subtask.subtask_id,
+        role=subtask.role,
+    )
+
+
+def continued_epoch_launch(
+    subtask: SemanticSubtaskV1,
+    *,
+    epoch: SessionEpochV1,
+    epoch_turn_index: int,
+    thread_id: str,
+) -> SessionLaunchV1:
+    """Bind a later semantic subtask to the verified existing epoch thread."""
+    if epoch_turn_index <= 1:
+        raise ValueError("continued epoch turn index must be greater than one")
+    if epoch.continuation_policy != "continue_same_thread":
+        raise ValueError("epoch policy does not permit continuation")
+    if subtask.subtask_id != epoch.subtask_ids[epoch_turn_index - 1]:
+        raise ValueError("continued subtask does not match the epoch turn order")
+    return SessionLaunchV1(
+        epoch_id=epoch.epoch_id,
+        epoch_turn_index=epoch_turn_index,
+        subtask_id=subtask.subtask_id,
+        role=subtask.role,
+        fresh_session=False,
+        prior_thread_id=thread_id,
+        continuation_reason="epoch_continuation",
+        durable_reason=epoch.rationale,
+        authority_references=subtask.authority_references,
+    )
 
 
 def resolve_predecessor_artifacts(
@@ -598,11 +813,14 @@ def validation_reuse_decision(
 
 
 class SemanticSubtaskTelemetryV1(BaseModel):
-    """Authoritative counters for one Supervisor-launched model session."""
+    """Authoritative counters for one semantic subtask / epoch turn."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1] = 1
+    epoch_id: str
+    epoch_turn_index: Annotated[int, Field(ge=1)]
+    codex_thread_id: Annotated[str, Field(min_length=1, max_length=256)]
     subtask_id: str
     role: SubtaskRole
     repair_or_retry: bool
@@ -617,7 +835,7 @@ class SemanticSubtaskTelemetryV1(BaseModel):
     inference_sample_count: Annotated[int, Field(ge=0)] | None
     median_inference_context_tokens: Annotated[int, Field(ge=0)] | None
     max_inference_context_tokens: Annotated[int, Field(ge=0)] | None
-    compactions: Annotated[int, Field(ge=0)]
+    compactions: Annotated[int, Field(ge=0)] | None
     command_tool_count: Annotated[int, Field(ge=0)]
     model_visible_tool_output_chars: Annotated[int, Field(ge=0)]
     handoff_size_bytes: Annotated[int, Field(ge=0)]
@@ -653,6 +871,18 @@ class SemanticSubtaskTelemetryV1(BaseModel):
                 raise ValueError("combined tokens must equal input plus output")
         if self.session_fresh != (self.continuation_reason is None):
             raise ValueError("continuation reason must agree with session freshness")
+        diagnostics = (
+            self.median_inference_context_tokens,
+            self.max_inference_context_tokens,
+            self.compactions,
+        )
+        if self.inference_sample_count is None:
+            if any(value is not None for value in diagnostics):
+                raise ValueError("unavailable inference samples require unavailable diagnostics")
+        elif self.inference_sample_count == 0:
+            raise ValueError("unavailable inference samples must be null, not zero")
+        elif any(value is None for value in diagnostics):
+            raise ValueError("inference samples require context and compaction diagnostics")
         return self
 
 
@@ -663,12 +893,16 @@ def semantic_subtask_telemetry(
     context: ContextEconomyReceiptV1,
     launch: SessionLaunchV1,
     handoff_size: HandoffSizeV1,
+    codex_thread_id: str,
 ) -> SemanticSubtaskTelemetryV1:
     """Join exact usage/context receipts with launch and handoff measurements."""
     if launch.subtask_id != subtask.subtask_id or launch.role != subtask.role:
         raise ValueError("launch decision does not identify the semantic subtask")
     complete = usage.complete
     return SemanticSubtaskTelemetryV1(
+        epoch_id=launch.epoch_id,
+        epoch_turn_index=launch.epoch_turn_index,
+        codex_thread_id=codex_thread_id,
         subtask_id=subtask.subtask_id,
         role=subtask.role,
         repair_or_retry=usage.repair_or_retry,
@@ -701,6 +935,7 @@ class TelemetryTotalsV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     session_count: Annotated[int, Field(ge=0)]
+    turn_count: Annotated[int, Field(ge=0)]
     incomplete_session_count: Annotated[int, Field(ge=0)]
     input_tokens: Annotated[int, Field(ge=0)] | None
     cached_input_tokens: Annotated[int, Field(ge=0)] | None
@@ -711,7 +946,7 @@ class TelemetryTotalsV1(BaseModel):
     inference_sample_count: Annotated[int, Field(ge=0)] | None
     median_inference_context_tokens: Annotated[int, Field(ge=0)] | None
     max_inference_context_tokens: Annotated[int, Field(ge=0)] | None
-    compactions: Annotated[int, Field(ge=0)]
+    compactions: Annotated[int, Field(ge=0)] | None
     command_tool_count: Annotated[int, Field(ge=0)]
     model_visible_tool_output_chars: Annotated[int, Field(ge=0)]
     handoff_size_bytes: Annotated[int, Field(ge=0)]
@@ -730,7 +965,10 @@ class SemanticStageTelemetryV1(BaseModel):
 
 
 def _telemetry_totals(items: Sequence[SemanticSubtaskTelemetryV1]) -> TelemetryTotalsV1:
-    incomplete = sum(not item.accounting_complete for item in items)
+    session_keys = {item.codex_thread_id for item in items}
+    incomplete_sessions = {
+        (item.epoch_id, item.codex_thread_id) for item in items if not item.accounting_complete
+    }
 
     def exact_sum(field: str) -> int | None:
         values = [getattr(item, field) for item in items]
@@ -741,12 +979,13 @@ def _telemetry_totals(items: Sequence[SemanticSubtaskTelemetryV1]) -> TelemetryT
         for item in items
         if item.max_inference_context_tokens is not None
     ]
-    # An aggregate median cannot be recovered exactly from session medians.  Preserve it only
-    # for a single session; otherwise report it as unavailable rather than estimating.
+    # An aggregate median cannot be recovered exactly from per-turn medians. Preserve it only
+    # for a single record; otherwise report it as unavailable rather than estimating.
     median = items[0].median_inference_context_tokens if len(items) == 1 else None
     return TelemetryTotalsV1(
-        session_count=len(items),
-        incomplete_session_count=incomplete,
+        session_count=len(session_keys),
+        turn_count=len(items),
+        incomplete_session_count=len(incomplete_sessions),
         input_tokens=exact_sum("input_tokens"),
         cached_input_tokens=exact_sum("cached_input_tokens"),
         uncached_input_tokens=exact_sum("uncached_input_tokens"),
@@ -756,7 +995,7 @@ def _telemetry_totals(items: Sequence[SemanticSubtaskTelemetryV1]) -> TelemetryT
         inference_sample_count=exact_sum("inference_sample_count"),
         median_inference_context_tokens=median,
         max_inference_context_tokens=max(maxima, default=None),
-        compactions=sum(item.compactions for item in items),
+        compactions=exact_sum("compactions"),
         command_tool_count=sum(item.command_tool_count for item in items),
         model_visible_tool_output_chars=sum(item.model_visible_tool_output_chars for item in items),
         handoff_size_bytes=sum(item.handoff_size_bytes for item in items),
@@ -772,6 +1011,31 @@ def aggregate_semantic_telemetry(
     identifiers = tuple(item.usage_receipt_id for item in items)
     if len(set(identifiers)) != len(identifiers):
         raise ValueError("duplicate usage receipt in semantic telemetry")
+    turn_keys = tuple((item.epoch_id, item.epoch_turn_index) for item in items)
+    if len(set(turn_keys)) != len(turn_keys):
+        raise ValueError("duplicate epoch turn in semantic telemetry")
+    by_epoch: defaultdict[str, list[SemanticSubtaskTelemetryV1]] = defaultdict(list)
+    epochs_by_thread: defaultdict[str, set[str]] = defaultdict(set)
+    for item in items:
+        by_epoch[item.epoch_id].append(item)
+        epochs_by_thread[item.codex_thread_id].add(item.epoch_id)
+    if any(len(epoch_ids) != 1 for epoch_ids in epochs_by_thread.values()):
+        raise ValueError("Codex thread identity is reused across fresh session epochs")
+    for epoch_id, epoch_items in by_epoch.items():
+        ordered = sorted(epoch_items, key=lambda item: item.epoch_turn_index)
+        if [item.epoch_turn_index for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError(f"epoch {epoch_id} telemetry turns are not contiguous from one")
+        if len({item.codex_thread_id for item in ordered}) != 1:
+            raise ValueError(f"epoch {epoch_id} telemetry changes Codex thread identity")
+        if len({item.role for item in ordered}) != 1:
+            raise ValueError(f"epoch {epoch_id} telemetry changes role")
+        if not ordered[0].session_fresh or ordered[0].continuation_reason is not None:
+            raise ValueError(f"epoch {epoch_id} must begin with a fresh-session turn")
+        if any(
+            item.session_fresh or item.continuation_reason != "epoch_continuation"
+            for item in ordered[1:]
+        ):
+            raise ValueError(f"epoch {epoch_id} later turns must continue the same epoch")
     grouped: defaultdict[str, list[SemanticSubtaskTelemetryV1]] = defaultdict(list)
     for item in items:
         grouped[item.role].append(item)

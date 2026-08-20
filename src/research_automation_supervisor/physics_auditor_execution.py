@@ -1486,6 +1486,7 @@ def _verify_codex_run(
         raise PhysicsAuditorIntegrityError("Codex result was substituted")
     verify_projected_auditor_bubblewrap_command(
         metadata,
+        prepared=prepared,
         identity=bubblewrap_identity,
         projected_workspace=prepared.workspace,
         runtime_home=prepared.workspace.parent / "codex-home",

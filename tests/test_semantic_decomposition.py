@@ -13,14 +13,19 @@ from research_automation_supervisor.semantic_decomposition import (
     AgentHandoffV1,
     ArtifactReferenceV1,
     AuthorityReferenceV1,
+    ContextLocalityFactsV1,
     PredecessorArtifactRequirementV1,
     RepositoryIdentityV1,
     SemanticSubtaskTelemetryV1,
     SemanticSubtaskV1,
     SemanticTaskPlanV1,
+    SessionEpochPlanV1,
+    SessionEpochV1,
     SessionLaunchV1,
     ValidationReceiptV1,
     aggregate_semantic_telemetry,
+    choose_session_boundary,
+    continued_epoch_launch,
     fresh_session_launch,
     measure_agent_handoff,
     validation_reuse_decision,
@@ -31,6 +36,7 @@ from research_automation_supervisor.semantic_replay import (
     ControlledReplayV1,
     ReplayCommandV1,
     _completed_subtask_prefix,
+    _refuse_unqualified_turn_relaunch,
     _verified_completed_task,
     execute_replay,
     load_control,
@@ -81,6 +87,57 @@ def _plan(*subtasks: SemanticSubtaskV1) -> SemanticTaskPlanV1:
         substantial_stage=True,
         authority_references=(_authority(),),
         subtasks=subtasks,
+    )
+
+
+def _epoch(
+    epoch_id: str,
+    subtasks: tuple[SemanticSubtaskV1, ...],
+    *,
+    forced_freshness_reason: str,
+) -> SessionEpochV1:
+    return SessionEpochV1.model_validate(
+        {
+            "epoch_id": epoch_id,
+            "subtask_ids": [subtask.subtask_id for subtask in subtasks],
+            "role": subtasks[0].role,
+            "continuation_policy": (
+                "continue_same_thread" if len(subtasks) > 1 else "single_subtask"
+            ),
+            "context_economy_profile": "B4",
+            "configuration": {
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "sandbox": (
+                    "read-only"
+                    if subtasks[0].role in {"coding_auditor", "physics_auditor"}
+                    else "workspace-write"
+                ),
+            },
+            "rationale": "Durable deterministic test policy for this bounded session epoch.",
+            "forced_freshness_reason": forced_freshness_reason,
+        }
+    )
+
+
+def _epoch_plan(
+    plan: SemanticTaskPlanV1,
+    groups: tuple[tuple[SemanticSubtaskV1, ...], ...] | None = None,
+) -> SessionEpochPlanV1:
+    selected = groups or tuple((subtask,) for subtask in plan.subtasks)
+    epochs = tuple(
+        _epoch(
+            f"epoch-{index}",
+            group,
+            forced_freshness_reason="initial_epoch" if index == 1 else "role_change",
+        )
+        for index, group in enumerate(selected, start=1)
+    )
+    return SessionEpochPlanV1(
+        epoch_plan_id=f"{plan.plan_id}-epochs",
+        semantic_plan_id=plan.plan_id,
+        ordered_subtask_ids=tuple(subtask.subtask_id for subtask in plan.subtasks),
+        epochs=epochs,
     )
 
 
@@ -156,6 +213,8 @@ def test_fresh_session_default_and_qualified_continuation_exception() -> None:
     worker = _subtask(1)
     assert fresh_session_launch(worker).fresh_session is True
     continued = SessionLaunchV1(
+        epoch_id="worker-epoch",
+        epoch_turn_index=2,
         subtask_id=worker.subtask_id,
         role="repair",
         fresh_session=False,
@@ -167,6 +226,8 @@ def test_fresh_session_default_and_qualified_continuation_exception() -> None:
     assert continued.fresh_session is False
     with pytest.raises(ValidationError, match="auditors must start"):
         SessionLaunchV1(
+            epoch_id="audit-epoch",
+            epoch_turn_index=2,
             subtask_id="audit",
             role="coding_auditor",
             fresh_session=False,
@@ -175,6 +236,77 @@ def test_fresh_session_default_and_qualified_continuation_exception() -> None:
             durable_reason="An invalid attempt to continue the Worker session for an audit.",
             authority_references=(_authority(),),
         )
+
+
+def test_semantic_boundaries_are_partitioned_into_contiguous_session_epochs() -> None:
+    first, second, third = (_subtask(index) for index in range(1, 4))
+    plan = _plan(first, second, third)
+    epoch_plan = _epoch_plan(plan, ((first,), (second, third)))
+    assert epoch_plan.ordered_subtask_ids == ("task-1", "task-2", "task-3")
+    assert epoch_plan.epochs[1].subtask_ids == ("task-2", "task-3")
+    assert len(epoch_plan.epochs) == 2
+    launch = continued_epoch_launch(
+        third,
+        epoch=epoch_plan.epochs[1],
+        epoch_turn_index=2,
+        thread_id="thread-shared",
+    )
+    assert launch.continuation_reason == "epoch_continuation"
+    assert launch.prior_thread_id == "thread-shared"
+
+    invalid = epoch_plan.model_dump(mode="json")
+    invalid["epochs"][0]["subtask_ids"] = ["task-1", "task-3"]
+    invalid["epochs"][0]["continuation_policy"] = "continue_same_thread"
+    invalid["epochs"][1]["subtask_ids"] = ["task-2"]
+    invalid["epochs"][1]["continuation_policy"] = "single_subtask"
+    with pytest.raises(ValidationError, match="contiguous order"):
+        SessionEpochPlanV1.model_validate(invalid)
+
+
+def test_context_locality_policy_is_deterministic_and_role_changes_force_freshness() -> None:
+    worker = _subtask(1)
+    adjacent_worker = _subtask(2)
+    continuation = choose_session_boundary(
+        worker,
+        adjacent_worker,
+        ContextLocalityFactsV1(
+            same_subsystem=True,
+            depends_on_previous_interfaces=True,
+            shared_source_test_architecture=True,
+            implementation_integration_qualification_chain=True,
+            repair_current_candidate=False,
+            subsystem_independent=False,
+            little_relevant_context=False,
+            context_health_exceeded=False,
+            qualified_recovery_requires_new_identity=False,
+        )
+    )
+    assert continuation.fresh_session is False
+    assert continuation.reason == "dependent_interfaces"
+
+    auditor = _subtask(
+        2,
+        role="coding_auditor",
+        boundary="implementation_to_audit",
+        objective="Independently audit the implemented candidate and evidence.",
+    )
+    fresh = choose_session_boundary(
+        worker,
+        auditor,
+        ContextLocalityFactsV1(
+            same_subsystem=True,
+            depends_on_previous_interfaces=True,
+            shared_source_test_architecture=True,
+            implementation_integration_qualification_chain=True,
+            repair_current_candidate=False,
+            subsystem_independent=False,
+            little_relevant_context=False,
+            context_health_exceeded=False,
+            qualified_recovery_requires_new_identity=False,
+        )
+    )
+    assert fresh.fresh_session is True
+    assert fresh.reason == "role_change"
 
 
 def test_handoff_schema_hash_references_transcript_ban_and_size_limits() -> None:
@@ -232,14 +364,17 @@ def test_worker_audit_and_audit_repair_boundaries_transfer_only_durable_state() 
     )
     launch = fresh_session_launch(auditor)
     assert launch.fresh_session and launch.prior_thread_id is None
+    audit_epoch = _epoch("audit-epoch", (auditor,), forced_freshness_reason="initial_epoch")
     prompt = render_subtask_prompt(
         auditor,
+        epoch=audit_epoch,
+        epoch_turn_index=1,
         predecessor_artifacts=(_artifact("handoffs/worker.json", "b" * 64),),
         authority_root=Path("/authority"),
         expected_repository=_repository(),
         global_target=Path("/isolated/codex-home"),
     )
-    assert "no prior conversation was supplied" in prompt
+    assert "No conversation transcript was transferred" in prompt
     assert "handoffs/worker.json" in prompt
     assert "Worker reasoning history" not in prompt
 
@@ -254,6 +389,8 @@ def test_worker_audit_and_audit_repair_boundaries_transfer_only_durable_state() 
     )
     assert audit_handoff.transcript_included is False
     repair = SessionLaunchV1(
+        epoch_id="repair-epoch",
+        epoch_turn_index=2,
         subtask_id="repair-f-1",
         role="repair",
         fresh_session=False,
@@ -263,6 +400,29 @@ def test_worker_audit_and_audit_repair_boundaries_transfer_only_durable_state() 
         authority_references=(_authority(),),
     )
     assert repair.continuation_reason == "qualified_recovery"
+
+
+def test_continued_epoch_prompt_is_a_compact_delta_without_handoff_reinjection() -> None:
+    first, second = (_subtask(index) for index in range(1, 3))
+    epoch = _epoch(
+        "worker-epoch",
+        (first, second),
+        forced_freshness_reason="initial_epoch",
+    )
+    prompt = render_subtask_prompt(
+        second,
+        epoch=epoch,
+        epoch_turn_index=2,
+        predecessor_artifacts=(),
+        authority_root=Path("/authority"),
+        expected_repository=_repository(),
+        global_target=Path("/isolated/codex-home"),
+    )
+    assert '"semantic_delta"' in prompt
+    assert '"semantic_subtask"' not in prompt
+    assert '"required_predecessor_artifacts"' not in prompt
+    assert '"predecessor_artifacts": []' in prompt
+    assert "No full AgentHandoffV1 is injected back into this session" in prompt
 
 
 def test_pass_receipt_reuse_requires_every_validity_input_to_be_unchanged() -> None:
@@ -305,10 +465,16 @@ def _telemetry(
     *,
     repair_or_retry: bool = False,
     input_tokens: int = 100,
+    epoch_id: str | None = None,
+    epoch_turn_index: int = 1,
+    thread_id: str | None = None,
 ) -> SemanticSubtaskTelemetryV1:
     return SemanticSubtaskTelemetryV1.model_validate(
         {
             "subtask_id": subtask_id,
+            "epoch_id": epoch_id or f"epoch-{subtask_id}",
+            "epoch_turn_index": epoch_turn_index,
+            "codex_thread_id": thread_id or f"thread-{subtask_id}",
             "role": role,
             "repair_or_retry": repair_or_retry,
             "usage_receipt_id": f"receipt-{subtask_id}",
@@ -327,8 +493,10 @@ def _telemetry(
             "model_visible_tool_output_chars": 400,
             "handoff_size_bytes": 600,
             "handoff_size_tokens": 150,
-            "session_fresh": True,
-            "continuation_reason": None,
+            "session_fresh": epoch_turn_index == 1,
+            "continuation_reason": (
+                None if epoch_turn_index == 1 else "epoch_continuation"
+            ),
         }
     )
 
@@ -343,6 +511,8 @@ def test_token_telemetry_aggregates_by_subtask_role_and_repair_without_estimates
     assert aggregate.repair_or_retry.input_tokens == 140
     assert aggregate.total_stage.input_tokens == 360
     assert aggregate.total_stage.combined_tokens == 390
+    assert aggregate.total_stage.turn_count == 3
+    assert aggregate.total_stage.session_count == 3
     assert aggregate.total_stage.median_inference_context_tokens is None
     with pytest.raises(ValueError, match="duplicate usage receipt"):
         aggregate_semantic_telemetry((worker, worker))
@@ -352,13 +522,70 @@ def test_token_telemetry_aggregates_by_subtask_role_and_repair_without_estimates
         SemanticSubtaskTelemetryV1.model_validate(malformed)
 
 
-def test_frozen_bootstrap_replay_plan_has_five_material_fresh_boundaries() -> None:
+def test_multi_turn_epoch_aggregates_each_receipt_once_without_fabricated_inference() -> None:
+    first = _telemetry(
+        "task-1", "worker", epoch_id="worker-epoch", thread_id="thread-shared"
+    ).model_copy(
+        update={
+            "inference_sample_count": None,
+            "median_inference_context_tokens": None,
+            "max_inference_context_tokens": None,
+            "compactions": None,
+        }
+    )
+    second = _telemetry(
+        "task-2",
+        "worker",
+        input_tokens=130,
+        epoch_id="worker-epoch",
+        epoch_turn_index=2,
+        thread_id="thread-shared",
+    ).model_copy(
+        update={
+            "inference_sample_count": None,
+            "median_inference_context_tokens": None,
+            "max_inference_context_tokens": None,
+            "compactions": None,
+        }
+    )
+    aggregate = aggregate_semantic_telemetry((first, second))
+    assert aggregate.total_stage.input_tokens == 230
+    assert aggregate.total_stage.combined_tokens == 250
+    assert aggregate.total_stage.turn_count == 2
+    assert aggregate.total_stage.session_count == 1
+    assert aggregate.total_stage.inference_sample_count is None
+    assert aggregate.total_stage.max_inference_context_tokens is None
+    assert aggregate.total_stage.compactions is None
+
+    changed_thread = second.model_copy(update={"codex_thread_id": "thread-new"})
+    with pytest.raises(ValueError, match="changes Codex thread identity"):
+        aggregate_semantic_telemetry((first, changed_thread))
+
+    reused_fresh_thread = _telemetry(
+        "task-3", "worker", epoch_id="fresh-epoch", thread_id="thread-shared"
+    )
+    with pytest.raises(ValueError, match="reused across fresh session epochs"):
+        aggregate_semantic_telemetry((first, reused_fresh_thread))
+
+
+def test_frozen_bootstrap_replay_plan_has_exact_three_epoch_topology() -> None:
     root = Path(__file__).resolve().parents[1]
     control = load_control(
         root / "docs/validation/semantic_decomposition_v1/bootstrap_replay_control.json"
     )
     assert len(control.plan.subtasks) == 5
     assert control.plan.subtasks[-1].role == "coding_auditor"
+    assert tuple(epoch.subtask_ids for epoch in control.epoch_plan.epochs) == (
+        ("01-runtime-wrapper",),
+        ("02-ras-accounting", "03-launch-integration", "04-qualification"),
+        ("05-coding-audit",),
+    )
+    assert tuple(epoch.role for epoch in control.epoch_plan.epochs) == (
+        "worker",
+        "worker",
+        "coding_auditor",
+    )
+    assert control.epoch_plan.epochs[-1].configuration.sandbox == "read-only"
     assert control.workload_authority.sha256 == (
         "2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde"
     )
@@ -395,9 +622,12 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
     ).stdout.strip()
     digest = hashlib.sha256(authority_path.read_bytes()).hexdigest()
     authority = _authority(digest=digest)
-    worker = _subtask(1).model_copy(update={"authority_references": (authority,)})
+    workers = tuple(
+        _subtask(index).model_copy(update={"authority_references": (authority,)})
+        for index in range(1, 5)
+    )
     auditor = _subtask(
-        2,
+        5,
         role="coding_auditor",
         boundary="implementation_to_audit",
         objective="Independently audit the implemented candidate and evidence.",
@@ -406,9 +636,9 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
             "authority_references": (authority,),
             "required_predecessor_artifacts": (
                 PredecessorArtifactRequirementV1(
-                    path="handoffs/task-1.json",
+                    path="handoffs/task-4.json",
                     kind="handoff",
-                    produced_by_subtask_id="task-1",
+                    produced_by_subtask_id="task-4",
                 ),
             ),
         }
@@ -418,8 +648,9 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
         stage_id="substantial implementation stage",
         substantial_stage=True,
         authority_references=(authority,),
-        subtasks=(worker, auditor),
+        subtasks=(*workers, auditor),
     )
+    epoch_plan = _epoch_plan(plan, ((workers[0],), workers[1:], (auditor,)))
     control = ControlledReplayV1(
         control_id="synthetic-replay",
         implementation_authority_commit=commit,
@@ -427,8 +658,9 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
         model="gpt-5.6-sol",
         reasoning_effort="high",
         workload_authority=authority,
-        global_target_writer_subtask_ids=(worker.subtask_id,),
+        global_target_writer_subtask_ids=(workers[0].subtask_id, workers[-1].subtask_id),
         plan=plan,
+        epoch_plan=epoch_plan,
     )
     control_path = tmp_path / "control.json"
     control_path.write_text(json.dumps(control.model_dump(mode="json")), encoding="utf-8")
@@ -445,9 +677,20 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
     assert not artifact_root.exists()
     assert not global_target.exists()
     assert preparation.ledger_root.endswith("/task-ledgers")
-    assert len({command.task_id for command in preparation.commands}) == 2
-    assert all(command.argv[1] == "run" for command in preparation.commands)
-    assert all("resume" not in command.argv for command in preparation.commands)
+    assert len({command.task_id for command in preparation.commands}) == 3
+    assert [command.mode for command in preparation.commands] == [
+        "run",
+        "run",
+        "resume",
+        "resume",
+        "run",
+    ]
+    assert preparation.commands[1].task_id == preparation.commands[2].task_id
+    assert preparation.commands[2].task_id == preparation.commands[3].task_id
+    assert preparation.commands[2].argv[1] == "resume"
+    assert preparation.commands[3].argv[1] == "resume"
+    assert "model_auto_compact_token_limit=64000" in preparation.commands[1].argv
+    assert "tool_output_token_limit=2048" in preparation.commands[1].argv
     assert "--add-dir" in preparation.commands[0].argv
     assert str(global_target) in preparation.commands[0].argv
     assert "--add-dir" not in preparation.commands[-1].argv
@@ -480,7 +723,9 @@ def test_replay_preparation_is_dry_fresh_and_exactly_once_safe(tmp_path: Path) -
         json.dumps(stored_handoff.model_dump(mode="json")), encoding="utf-8"
     )
     (recovery_telemetry / "task-1.json").write_text(
-        json.dumps(_telemetry("task-1", "worker").model_dump(mode="json")),
+        json.dumps(
+            _telemetry("task-1", "worker", epoch_id="epoch-1").model_dump(mode="json")
+        ),
         encoding="utf-8",
     )
     (workspace / "candidate.py").write_text("mutated after handoff\n", encoding="utf-8")
@@ -514,8 +759,11 @@ def test_completed_global_task_is_qualified_for_exactly_once_recovery(
         "gpt-5.6-sol",
     )
     command = ReplayCommandV1(
+        epoch_id="epoch-1",
+        epoch_turn_index=1,
         subtask_id="task-1",
         task_id="plan.task-1",
+        mode="run",
         prompt_path=str(prompt),
         handoff_path=str(tmp_path / "handoff.json"),
         launch_path=str(tmp_path / "launch.json"),
@@ -537,6 +785,7 @@ def test_completed_global_task_is_qualified_for_exactly_once_recovery(
             {
                 "schema_version": 1,
                 "task_id": command.task_id,
+                "thread_id": "thread-task-1",
                 "working_directory": str(workspace.resolve()),
                 "model": "gpt-5.6-sol",
                 "initial_options": list(argv[5:]),
@@ -549,19 +798,64 @@ def test_completed_global_task_is_qualified_for_exactly_once_recovery(
     events, final, _ = _verified_completed_task(
         task_root=task_root,
         command=command,
+        epoch_run_command=command,
         workspace=workspace,
         expected_model="gpt-5.6-sol",
     )
     assert events.name == "000001.events.jsonl"
     assert final.name == "000001.final-message.md"
+    (turns / "000002.events.jsonl").write_text(
+        '{"type":"turn.completed","usage":{"input_tokens":1}}\n',
+        encoding="utf-8",
+    )
+    (turns / "000002.final-message.md").write_text("{}\n", encoding="utf-8")
+    (turns / "000002.prompt.sha256").write_text("1" * 64 + "\n", encoding="ascii")
+    state = json.loads((task_root / "task.json").read_text(encoding="utf-8"))
+    state["turn_count"] = 2
+    (task_root / "task.json").write_text(json.dumps(state), encoding="utf-8")
+    _verified_completed_task(
+        task_root=task_root,
+        command=command,
+        epoch_run_command=command,
+        workspace=workspace,
+        expected_model="gpt-5.6-sol",
+        allow_later_turns=True,
+    )
+    with pytest.raises(ValueError, match="expected completed turn"):
+        _verified_completed_task(
+            task_root=task_root,
+            command=command,
+            epoch_run_command=command,
+            workspace=workspace,
+            expected_model="gpt-5.6-sol",
+        )
     (turns / "000001.prompt.sha256").write_text("0" * 64 + "\n", encoding="ascii")
     with pytest.raises(ValueError, match="prompt hash"):
         _verified_completed_task(
             task_root=task_root,
             command=command,
+            epoch_run_command=command,
             workspace=workspace,
             expected_model="gpt-5.6-sol",
+            allow_later_turns=True,
         )
+
+
+def test_crash_artifacts_beyond_task_state_forbid_duplicate_turn_launch(
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "ledger" / "epoch-task"
+    turns = task_root / "turns"
+    turns.mkdir(parents=True)
+    (turns / "000002.events.jsonl").write_text(
+        '{"type":"turn.completed","usage":{"input_tokens":1}}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="refusing duplicate launch"):
+        _refuse_unqualified_turn_relaunch(task_root, 2)
+
+    _refuse_unqualified_turn_relaunch(task_root, 3)
 
 
 @pytest.mark.parametrize("handoff_already_exists", [False, True])
@@ -625,6 +919,7 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
         authority_references=(authority,),
         subtasks=(worker, auditor),
     )
+    epoch_plan = _epoch_plan(plan)
     control = ControlledReplayV1(
         control_id="synthetic-recovery",
         implementation_authority_commit=commit,
@@ -634,6 +929,7 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
         workload_authority=authority,
         global_target_writer_subtask_ids=(worker.subtask_id,),
         plan=plan,
+        epoch_plan=epoch_plan,
     )
     control_path = tmp_path / "control.json"
     control_path.write_text(json.dumps(control.model_dump(mode="json")), encoding="utf-8")
@@ -654,6 +950,8 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
     initial_identity = repository_identity(workspace, commit)
     prompt = render_subtask_prompt(
         worker,
+        epoch=epoch_plan.epochs[0],
+        epoch_turn_index=1,
         predecessor_artifacts=(),
         authority_root=workspace,
         expected_repository=initial_identity,
@@ -665,7 +963,15 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
     launch_path = Path(worker_command.launch_path)
     launch_path.parent.mkdir(parents=True)
     launch_path.write_text(
-        json.dumps(fresh_session_launch(worker).model_dump(mode="json")), encoding="utf-8"
+        json.dumps(
+            fresh_session_launch(worker, epoch_id=epoch_plan.epochs[0].epoch_id).model_dump(
+                mode="json"
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
     final_draft = {
@@ -717,6 +1023,7 @@ def test_replay_recovers_completed_0147_task_without_relaunch_and_advances(
             {
                 "schema_version": 1,
                 "task_id": worker_command.task_id,
+                "thread_id": "thread-task-1",
                 "working_directory": str(workspace.resolve()),
                 "model": "gpt-5.6-sol",
                 "codex_cli_version": "codex-cli 0.147.0",

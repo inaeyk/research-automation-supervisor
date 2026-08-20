@@ -1,8 +1,9 @@
 # Semantic Decomposition V1
 
-This stage makes repository state and compact artifacts the durable memory of a
-Supervisor-controlled stage. Model conversation is ephemeral and is not forwarded across
-semantic boundaries.
+This stage makes repository state and compact artifacts the durable recovery memory of a
+Supervisor-controlled stage. Semantic task boundaries remain explicit, but they are independent
+of model-session boundaries. Conversation persists only inside a bounded session epoch and is
+never transferred between epochs.
 
 PA-5D remains paused. This implementation and its replay harness do not regenerate PA-5D0,
 launch PA-5D scientific sessions, merge, tag, or release anything.
@@ -28,17 +29,24 @@ deny an otherwise justified call or create a retry loop.
 
 ## Session and handoff policy
 
-Every independent semantic task starts with a fresh `codex-task run`. No prior thread or model
-conversation is passed. `SessionLaunchV1` permits continuation only for:
+`SessionEpochPlanV1` groups each semantic subtask into exactly one ordered `SessionEpochV1`.
+Epochs may contain only contiguous subtasks with one role, model/configuration, context-economy
+profile, and continuation policy. Every epoch begins fresh. Its first subtask uses
+`codex-task run`; later subtasks use `codex-task resume` with the same epoch task ID and verified
+Codex thread identity. Resume preserves B4's 64,000-token auto-compaction ceiling and 2,048-token
+tool-output ceiling from the initial run.
 
-- qualified recovery tied to the exact previous thread identity; or
-- unresolved working context that cannot safely be represented by a compact artifact.
+The deterministic locality policy continues adjacent Worker tasks that share a subsystem,
+newly-created interfaces, source/test architecture, an implementation-to-integration-to-
+qualification chain, or current-candidate repair context. It starts a fresh epoch on a role
+change, required security/blindness independence, genuine subsystem independence, little useful
+shared context, an exceeded context-health limit, or qualified recovery requiring another
+identity. Each decision and rationale is durable; no model call is used to make it.
 
-A continuation records the exact prior thread, a typed reason, a durable explanation, and the
-governing authority reference. Coding and physics auditors cannot continue another session.
-Existing PA-4/PA-5 same-Worker repair requirements therefore remain intact: the fresh auditor
-hands concise findings back to the exact qualified Worker thread rather than transferring the
-auditor conversation.
+Coding Auditor epochs are always fresh, singleton, and read-only. They receive authority,
+candidate repository/diff identity, compact completed-epoch handoffs, and relevant valid
+receipts, but no Worker conversation. Physics Auditor freshness/security and existing PA-4/PA-5
+same-Worker repair semantics remain unchanged.
 
 `AgentHandoffV1` contains only:
 
@@ -55,10 +63,14 @@ auditor conversation.
 
 Unknown fields fail validation and `transcript_included` can only be `false`. The model authors
 only the semantic draft; the Supervisor binds repository identity, authority hashes, and the
-handoff ID. Handoffs target at most 1,000 tokens and have a 2,000-token soft maximum. Exceeding
-the soft maximum requires an explicit justification; the defensive absolute bound is 8,000
-tokens. When an exact tokenizer is unavailable, enforcement uses UTF-8 byte count as a proven
-upper bound and reports the token count itself as unavailable, never estimated.
+handoff ID. When no exact compatible tokenizer exists, the qualified deterministic policy targets
+3,072 UTF-8 bytes, requires justification above the 4,096-byte soft maximum, and rejects more
+than 8,192 bytes. Token count is reported unavailable rather than estimated.
+
+Every subtask result is persisted for recovery. Inside an epoch, the resumed model receives only
+the new semantic delta: the next objective and its relevant authority/scope changes. The full
+`AgentHandoffV1` is not injected back into the same conversation. Between epochs, the compact
+handoff is injected; no conversation transcript is transferred.
 
 Worker-to-Auditor prompts contain the current task, candidate-tree identity, compact Worker
 handoff references, valid receipts, and audit scope. They contain no Worker transcript,
@@ -74,25 +86,27 @@ or any changed or uncertain fingerprint requires a rerun. This is not a general 
 
 ## Telemetry and recovery
 
-Each Supervisor-launched task joins the authoritative global `TaskUsageReceipt` with the B4
+Each Supervisor-launched turn joins the authoritative global `TaskUsageReceipt` with the B4
 context-economy receipt, launch decision, and handoff measurement. It records exact input,
 cached input, uncached input, output, reasoning output, combined total, inference samples when
-available, per-session median and maximum context when available, compactions, command/tool
+available, median and maximum inference context when available, compactions, command/tool
 count, model-visible tool-output characters, handoff size, and freshness/continuation reason.
-Aggregation is by role, repair/retry, and total stage. Missing authoritative counters remain
-unavailable. A cross-session median is unavailable because it cannot be reconstructed exactly
-from per-session medians.
+Authoritative totals aggregate each completed resumed turn exactly once and include turn and
+session counts. Turn-level cumulative `turn.completed.usage` is never substituted for an
+inference-context sample. Inference sample count, median/max context, and compactions are populated
+only from genuine rollout/token-count inference events; otherwise they remain null/unavailable.
+A combined median remains unavailable when it cannot be reconstructed exactly.
 
-Replay task IDs are deterministic and every independent task uses `run`, never `resume`. An
-existing incomplete global ledger stops for qualified recovery instead of launching a duplicate.
+Replay task IDs are deterministic per epoch. An existing incomplete global ledger stops for
+qualified recovery instead of launching a duplicate.
 The manifest records the authoritative ledger selected by the active `CODEX_HOME`; the launcher
 and recovery reader cannot be pointed at different ledger roots.
-An already-completed ledger is consumed only after its task identity, workspace, model, exact
-launch options, one-turn shape, completion state, and durable prompt hash all match. External
-replay recovery accepts only a contiguous prefix containing both a valid handoff and matching
-telemetry for every completed task; partial current-task artifacts are verified or reconstructed
-without overwriting conflicting bytes. Handoffs are exclusive-created, and receipts retain the
-global wrapper's existing exact-turn and deduplication behavior.
+An already-completed turn is reused only after its epoch identity, workspace, model, exact initial
+launch options, required completed turn, completion state, every retained prompt hash, and thread identity
+all match. The next semantic subtask resumes that same epoch thread only when the durable epoch
+plan requires continuation. Turn files beyond the qualified task state cause a fail-closed stop,
+not a duplicate launch. Recovery accepts only a contiguous prefix containing a valid handoff and
+matching telemetry for every completed task; conflicting partial artifacts are never overwritten.
 
 ## Controlled bootstrap replay
 
@@ -106,7 +120,10 @@ It freezes:
   `2da7e7a7e3e67b4f70200846a07bf5eea9190ad800d86d691be3992776d6bbde`;
 - model `gpt-5.6-sol`, reasoning effort `high`, and B4 64k auto-compaction; and
 - five semantic boundaries: global runtime wrapper, RAS schema/aggregation, launch integration,
-  recovery/qualification/docs, and a fresh read-only coding audit.
+  recovery/qualification/docs, and coding audit; and
+- exactly three epochs: A is fresh Worker `01-runtime-wrapper`; B is one fresh Worker session for
+  `02-ras-accounting`, then same-thread resumes for `03-launch-integration` and
+  `04-qualification`; C is fresh read-only Coding Auditor `05-coding-audit`.
 
 The original evidence did not authoritatively retain model and reasoning metadata, so those two
 runtime controls are explicit replay controls rather than reconstructed claims about the original
@@ -131,9 +148,10 @@ git worktree add --detach \
 The dry run verifies all authority and repository identities and prints the exact commands without
 creating artifacts or launching Codex. Human execution is the same command with the explicit final
 argument. The global target must initially be absent or empty and must be outside the authority
-checkout, replay worktree, replay artifacts, and live `$CODEX_HOME`. Only the runtime-wrapper and
-qualification Workers receive write authority to this disposable stand-in; the live credentials
-and authoritative replay ledger remain inaccessible to model writes.
+checkout, replay worktree, replay artifacts, and live `$CODEX_HOME`. Epochs A and B receive write
+authority to this disposable stand-in because each contains a designated writer subtask; the live
+credentials and authoritative replay ledger remain inaccessible to model writes. Epoch C remains
+read-only.
 
 ```bash
 .venv/bin/python -m research_automation_supervisor.semantic_replay \
