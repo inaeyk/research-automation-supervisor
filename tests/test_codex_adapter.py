@@ -35,6 +35,10 @@ from research_automation_supervisor.errors import (
     CodexDependencyError,
     CodexRequestError,
 )
+from research_automation_supervisor.execution_budget import ExecutionBudgetPolicyV1
+from research_automation_supervisor.execution_budget_enforcement import (
+    LiveExecutionBudgetControllerV1,
+)
 from research_automation_supervisor.redaction import redact_text
 
 FAKE_CODEX = (Path(__file__).parent / "fixtures" / "fake_codex.py").resolve()
@@ -123,6 +127,7 @@ def run_fake(
     limits: AdapterLimits | None = None,
     environ: dict[str, str] | None = None,
     monotonic=time.monotonic,
+    execution_budget_controller: LiveExecutionBudgetControllerV1 | None = None,
 ) -> CodexRunResult:
     return run_prepared_codex(
         prepared,
@@ -131,7 +136,91 @@ def run_fake(
         environ=environ or fake_environment(),
         limits=limits or AdapterLimits(),
         monotonic=monotonic,
+        execution_budget_controller=execution_budget_controller,
     )
+
+
+def test_optional_live_execution_budget_observer_stops_admission_without_retry(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_request(tmp_path, "worker")
+    codex_home = tmp_path / "codex-home"
+    native_rollout = (
+        codex_home
+        / "sessions"
+        / "2026"
+        / "08"
+        / "20"
+        / "rollout-2026-08-20T11-20-30-thread-123.jsonl"
+    )
+    native_rollout.parent.mkdir(parents=True)
+    tool_event = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "input": 'text(await tools.exec_command({"cmd":"pwd"}));',
+    }
+    native_tool_event = {"type": "response_item", "payload": tool_event}
+    native_rollout.write_text(
+        "\n".join(
+            (
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-123"}}),
+                json.dumps(native_tool_event),
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    completed_event = {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 20,
+            "cached_input_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_output_tokens": 0,
+        },
+    }
+    configure(
+        prepared,
+        stdout_lines=[
+            json.dumps({"thread_id": "thread-123", "type": "thread.started"}),
+            json.dumps(tool_event),
+            json.dumps(tool_event),
+            json.dumps(completed_event),
+        ],
+        final="completed",
+    )
+    controller = LiveExecutionBudgetControllerV1.start_new_turn(
+        checkpoint_path=tmp_path / "execution-budget.json",
+        normalized_event_directory=tmp_path / "execution-budget-events",
+        task_id="task-1",
+        policy=ExecutionBudgetPolicyV1(
+            max_inference_samples=100,
+            max_tool_calls=1,
+            max_patch_calls=100,
+            max_compactions=100,
+            max_input_token_delta=100_000_000,
+        ),
+    )
+
+    result = run_fake(
+        prepared,
+        environ=fake_environment(CODEX_HOME=str(codex_home)),
+        execution_budget_controller=controller,
+    )
+
+    assert result.status == "succeeded"
+    assert result.event_count == 4
+    assert controller.outcome.decision == "bounded_continuation_required"
+    assert controller.outcome.task_failure is False
+    assert controller.outcome.automatic_retry_or_repair is False
+    assert controller.checkpoint.codex_thread_id == "thread-123"
+    assert controller.checkpoint.state.tool_call_count == 1
+    assert controller.checkpoint.state.last_supervisor_event_sequence == 0
+    cursor_files = list(
+        (codex_home / "execution-budget-rollout-cursors").glob("*.json")
+    )
+    assert len(cursor_files) == 1
+    assert len(list((tmp_path / "runs").iterdir())) == 1
 
 
 @pytest.mark.parametrize(

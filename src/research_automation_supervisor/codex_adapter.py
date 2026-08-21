@@ -40,6 +40,12 @@ from research_automation_supervisor.errors import (
     CodexDependencyError,
     CodexRequestError,
 )
+from research_automation_supervisor.execution_budget_enforcement import (
+    LiveExecutionBudgetControllerV1,
+)
+from research_automation_supervisor.native_rollout_budget import (
+    NativeRolloutBudgetObserverV1,
+)
 from research_automation_supervisor.redaction import (
     is_sensitive_name,
     redact_json,
@@ -233,6 +239,7 @@ class _ProcessObservation:
     stderr: bytearray = field(default_factory=bytearray)
     launch_error: str | None = None
     confidentiality_violation_detected: bool = False
+    execution_budget_decision: str | None = None
 
 
 @dataclass
@@ -248,6 +255,7 @@ class _EventProcessor:
     identifier_value: str | None = None
     started_thread_ids: list[str] = field(default_factory=list)
     confidentiality_violation_detected: bool = False
+    native_rollout_budget_observer: NativeRolloutBudgetObserverV1 | None = None
 
     def feed(self, chunk: bytes) -> None:
         """Accept a bounded stdout chunk and emit all complete redacted events."""
@@ -278,6 +286,8 @@ class _EventProcessor:
             if not isinstance(value, dict):
                 raise ValueError("JSONL event is not an object")
             redacted = redact_json(value, self.sensitive_values)
+            if not isinstance(redacted, dict):
+                raise ValueError("redacted JSONL event is not an object")
             rendered = json.dumps(
                 redacted,
                 ensure_ascii=True,
@@ -292,6 +302,9 @@ class _EventProcessor:
             malformed_evidence = b"confidentiality-violation" if rejected else line
             self.malformed_hashes.append(hashlib.sha256(malformed_evidence).hexdigest())
             return
+
+        if started_thread_id is not None and self.native_rollout_budget_observer is not None:
+            self.native_rollout_budget_observer.bind_thread(started_thread_id)
 
         self.event_count += 1
         if permission_evidence:
@@ -410,6 +423,7 @@ def run_prepared_codex(
     process_launch_verifier: ProcessLaunchVerifier | None = None,
     process_started: ProcessStarted | None = None,
     process_finished: ProcessFinished | None = None,
+    execution_budget_controller: LiveExecutionBudgetControllerV1 | None = None,
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
@@ -472,6 +486,16 @@ def run_prepared_codex(
     observation = _ProcessObservation()
     event_path = artifact_directory / "events.jsonl"
     raw_final_bytes: bytes | None = None
+    native_rollout_budget_observer = (
+        NativeRolloutBudgetObserverV1.create(
+            controller=execution_budget_controller,
+            sessions_root=_codex_sessions_root(environment),
+            source_cursor_directory=_native_rollout_cursor_directory(environment),
+            require_existing_source_cursor=resume_thread_id is not None,
+        )
+        if execution_budget_controller is not None
+        else None
+    )
 
     with tempfile.TemporaryDirectory(prefix="research-supervisor-codex-") as temporary:
         temporary_final = Path(temporary) / "last-message.md"
@@ -504,6 +528,7 @@ def run_prepared_codex(
                 event_file,
                 redaction_values,
                 rejected_values,
+                native_rollout_budget_observer=native_rollout_budget_observer,
             )
             _run_process(
                 launch.command,
@@ -523,6 +548,7 @@ def run_prepared_codex(
                 ),
                 process_started,
                 process_finished,
+                native_rollout_budget_observer,
             )
             event_processor.finish()
 
@@ -932,6 +958,22 @@ def probe_codex_version(
     return _parse_codex_version(completed.stdout)
 
 
+def _codex_sessions_root(environment: Mapping[str, str]) -> Path:
+    codex_home = environment.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).resolve() / "sessions"
+    home = environment.get("HOME")
+    if not home:
+        raise CodexRequestError(
+            "execution-budget integration requires CODEX_HOME or HOME"
+        )
+    return Path(home).resolve() / ".codex" / "sessions"
+
+
+def _native_rollout_cursor_directory(environment: Mapping[str, str]) -> Path:
+    return _codex_sessions_root(environment).parent / "execution-budget-rollout-cursors"
+
+
 def _run_process(
     command: Sequence[str],
     prepared: PreparedCodexRequest,
@@ -946,6 +988,7 @@ def _run_process(
     prelaunch_verifier: Callable[[], None] | None,
     process_started: ProcessStarted | None,
     process_finished: ProcessFinished | None,
+    native_rollout_budget_observer: NativeRolloutBudgetObserverV1 | None,
 ) -> None:
     if prelaunch_verifier is not None:
         prelaunch_verifier()
@@ -1019,6 +1062,10 @@ def _run_process(
 
     try:
         while True:
+            if native_rollout_budget_observer is not None:
+                observation.execution_budget_decision = (
+                    native_rollout_budget_observer.poll().decision
+                )
             now = monotonic()
             polled = process.poll()
             if polled is not None:

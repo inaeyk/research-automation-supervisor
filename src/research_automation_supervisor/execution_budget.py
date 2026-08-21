@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
-from research_automation_supervisor.durable_state import atomic_write_json
+from research_automation_supervisor.durable_state import ZERO_HASH, atomic_write_json
 from research_automation_supervisor.token_accounting import (
     CodexTurnUsageV1,
     cumulative_usage_delta,
@@ -23,6 +23,7 @@ HardLimitReason = Literal[
 ]
 CompletionKind = Literal["turn_completed", "task_complete"]
 AuthoritativeUsageEventKind = Literal["token_count", "turn_completed"]
+CompletionReconciliationState = Literal["not_open", "open", "closed"]
 
 _LIMIT_ORDER: tuple[HardLimitReason, ...] = (
     "max_inference_samples",
@@ -41,6 +42,7 @@ HardLimitReasonTuple = Annotated[
     tuple[HardLimitReason, ...],
     BeforeValidator(_tuple_from_json),
 ]
+Sha256Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 class ExecutionBudgetPolicyV1(BaseModel):
@@ -129,8 +131,33 @@ class PartialExecutionBudgetCheckpointV1(BaseModel):
     schema_version: Literal[1] = 1
     checkpoint_kind: Literal["partial_execution_budget"] = "partial_execution_budget"
     task_id: Annotated[str, Field(min_length=1)]
-    codex_thread_id: Annotated[str, Field(min_length=1)]
+    codex_thread_id: Annotated[str, Field(min_length=1)] | None = None
+    normalized_event_journal_base_sequence: Annotated[int, Field(ge=-1)] = -1
+    normalized_event_journal_base_sha256: Sha256Digest = ZERO_HASH
+    normalized_event_journal_prefix_sha256: Sha256Digest = ZERO_HASH
+    completion_reconciliation_state: CompletionReconciliationState = "not_open"
     state: ExecutionBudgetStateV1
+
+    @model_validator(mode="after")
+    def validate_journal_anchor(self) -> PartialExecutionBudgetCheckpointV1:
+        cursor = self.state.last_supervisor_event_sequence
+        base = self.normalized_event_journal_base_sequence
+        if base > cursor:
+            raise ValueError("normalized event journal base cannot exceed the state cursor")
+        if base == cursor and (
+            self.normalized_event_journal_base_sha256
+            != self.normalized_event_journal_prefix_sha256
+        ):
+            raise ValueError("an empty normalized event journal suffix cannot change its anchor")
+        if self.codex_thread_id is None and cursor != -1:
+            raise ValueError("an observed normalized event requires a bound Codex thread")
+        if self.completion_reconciliation_state == "open" and (
+            not self.state.reached_hard_limits or self.state.completion_kind is not None
+        ):
+            raise ValueError(
+                "completion reconciliation may be open only for an incomplete budget stop"
+            )
+        return self
 
 
 class SupervisorNormalizedExecutionEventV1(BaseModel):
@@ -292,13 +319,21 @@ def observe_execution_event(
 def partial_execution_budget_checkpoint(
     *,
     task_id: str,
-    codex_thread_id: str,
+    codex_thread_id: str | None,
     state: ExecutionBudgetStateV1,
+    normalized_event_journal_base_sequence: int = -1,
+    normalized_event_journal_base_sha256: str = ZERO_HASH,
+    normalized_event_journal_prefix_sha256: str = ZERO_HASH,
+    completion_reconciliation_state: CompletionReconciliationState = "not_open",
 ) -> PartialExecutionBudgetCheckpointV1:
     """Bind exact partial budget state to its task and Codex thread."""
     return PartialExecutionBudgetCheckpointV1(
         task_id=task_id,
         codex_thread_id=codex_thread_id,
+        normalized_event_journal_base_sequence=normalized_event_journal_base_sequence,
+        normalized_event_journal_base_sha256=normalized_event_journal_base_sha256,
+        normalized_event_journal_prefix_sha256=normalized_event_journal_prefix_sha256,
+        completion_reconciliation_state=completion_reconciliation_state,
         state=state,
     )
 
