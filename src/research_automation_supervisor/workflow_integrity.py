@@ -937,6 +937,8 @@ def _verify_codex_command(
             "--strict-config",
             "--cd",
             pending.workspace,
+            "--output-schema",
+            cast(str, pending.output_schema_path),
         ]
         if pending.kind == "auditor":
             expected.extend(
@@ -955,26 +957,26 @@ def _verify_codex_command(
             executable,
             "--ask-for-approval",
             "never",
-            "--sandbox",
-            pending.sandbox,
-            "--cd",
-            pending.workspace,
             "exec",
-            "resume",
-            pending.resume_thread_id,
             "--json",
             "--output-last-message",
             "<FINAL_MESSAGE_TEMP>",
             "--model",
             cast(str, pending.model),
             *common_configuration,
+            "--sandbox",
+            pending.sandbox,
             "--ignore-user-config",
             "--ignore-rules",
             "--strict-config",
+            "--cd",
+            pending.workspace,
+            "--output-schema",
+            cast(str, pending.output_schema_path),
+            "resume",
+            pending.resume_thread_id,
         ]
-    expected.extend(
-        ["--output-schema", cast(str, pending.output_schema_path), "<PROMPT_FROM_STDIN>"]
-    )
+    expected.append("<PROMPT_FROM_STDIN>")
     expected = [durable_context_config_item(item) for item in expected]
     if metadata.command != tuple(expected):
         raise WorkflowStateError("Codex command does not preserve the exact frozen policy")
