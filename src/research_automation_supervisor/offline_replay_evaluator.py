@@ -1589,6 +1589,22 @@ def _validate_test_definition(
     )
 
 
+def _present_masked_runtime_directories(
+    directories: Sequence[Path],
+) -> tuple[Path, ...]:
+    """Return existing mask targets while rejecting unexpected path types."""
+    present: list[Path] = []
+    for directory in directories:
+        if not os.path.lexists(directory):
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise OfflineEvaluationError(
+                "audited unrelated runtime directory is invalid"
+            )
+        present.append(directory)
+    return tuple(present)
+
+
 def _offline_bubblewrap_command(
     workspace: Path,
     package_root: Path,
@@ -1638,11 +1654,9 @@ def _offline_bubblewrap_command(
             raise OfflineEvaluationError(
                 "audited compiler runtime component is unavailable"
             )
-    for directory in _MASKED_RUNTIME_DIRECTORIES:
-        if not directory.is_dir() or directory.is_symlink():
-            raise OfflineEvaluationError(
-                "audited unrelated runtime directory is unavailable"
-            )
+    present_masked_runtime_directories = _present_masked_runtime_directories(
+        _MASKED_RUNTIME_DIRECTORIES
+    )
     if not git_metadata.is_dir() or git_metadata.is_symlink():
         raise OfflineEvaluationError(
             "ephemeral evaluation Git metadata is unavailable"
@@ -1718,7 +1732,7 @@ def _offline_bubblewrap_command(
         command.extend(("--ro-bind", str(directory), str(directory)))
     for component in _COMPILER_RUNTIME_FILES:
         command.extend(("--ro-bind", str(component), str(component)))
-    for directory in _MASKED_RUNTIME_DIRECTORIES:
+    for directory in present_masked_runtime_directories:
         command.extend(("--tmpfs", str(directory)))
     command.extend(
         (
