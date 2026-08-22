@@ -44,6 +44,10 @@ from research_automation_supervisor.context_economy import (
     supervisor_developer_instructions,
 )
 from research_automation_supervisor.errors import WorkflowStateError
+from research_automation_supervisor.process_enforcement import (
+    PROCESS_TERMINATION_EVIDENCE_FILENAME,
+    load_process_termination_evidence,
+)
 from research_automation_supervisor.redaction import is_sensitive_name
 from research_automation_supervisor.test_runner import TestAttemptResult
 from research_automation_supervisor.token_accounting import (
@@ -139,11 +143,19 @@ class CodexMetadata(BaseModel):
     codex_executable: str
     codex_version: str | None
     process_launched: bool
+    process_enforcement_enabled: bool
+    containment_termination_failed: bool
     launch_error_present: bool
     stdin_error: bool
     process_exit_code: int | None
     terminating_signal: Annotated[int, Field(gt=0)] | None
-    termination_reason: Literal["timeout", "output_limit"] | None
+    termination_reason: Literal[
+        "timeout",
+        "output_limit",
+        "execution_budget_exhausted",
+        "execution_budget_accounting_integrity_failure",
+        "wall_clock_limit_exceeded",
+    ] | None
     valid_event_count: Annotated[int, Field(ge=0)]
     malformed_event_count: Annotated[int, Field(ge=0)]
     malformed_event_sha256: Annotated[
@@ -401,6 +413,12 @@ def verify_codex_artifacts(
     if pending.kind not in {"worker", "auditor"}:
         raise WorkflowStateError("Codex proof received a non-Codex intent")
     artifact_directory = Path(pending.artifact_path)
+    termination_evidence_path = (
+        artifact_directory / PROCESS_TERMINATION_EVIDENCE_FILENAME
+    )
+    stage1_names = set(STAGE1_CORE_ARTIFACT_NAMES)
+    if termination_evidence_path.is_file():
+        stage1_names.add(PROCESS_TERMINATION_EVIDENCE_FILENAME)
     scratch_directories = (
         frozenset({AUDITOR_SCRATCH_DIRECTORY_NAME})
         if pending.kind == "auditor"
@@ -408,7 +426,7 @@ def verify_codex_artifacts(
     )
     _require_exact_directory(
         artifact_directory,
-        STAGE2_STAGE1_ARTIFACT_NAMES,
+        frozenset(stage1_names) | {"stage2-completion.json"},
         directories=scratch_directories,
     )
     completion = _model_from_json(
@@ -416,9 +434,7 @@ def verify_codex_artifacts(
         Stage2CompletionManifest,
         "Stage 2 completion manifest",
     )
-    expected_core_paths = {
-        str(artifact_directory / name) for name in STAGE1_CORE_ARTIFACT_NAMES
-    }
+    expected_core_paths = {str(artifact_directory / name) for name in stage1_names}
     if set(completion.artifact_hashes) != expected_core_paths:
         raise WorkflowStateError("Stage 2 completion manifest artifact set is incomplete")
     verify_hash_mapping(completion.artifact_hashes)
@@ -432,6 +448,8 @@ def verify_codex_artifacts(
         CodexMetadata,
         "Codex metadata",
     )
+    if metadata.process_enforcement_enabled != termination_evidence_path.is_file():
+        raise WorkflowStateError("process containment evidence presence contradicts metadata")
     if pending.kind == "auditor":
         expected_scratch = artifact_directory / AUDITOR_SCRATCH_DIRECTORY_NAME
         if (
@@ -548,6 +566,28 @@ def verify_codex_artifacts(
         raise WorkflowStateError("Codex result and metadata disagree about the final message")
 
     _verify_codex_process_result(metadata, adapter_result)
+    if metadata.process_enforcement_enabled:
+        termination = load_process_termination_evidence(termination_evidence_path)
+        expected_reason = {
+            "bounded_continuation_required": "execution_budget_exhausted",
+            "accounting_integrity_failure": (
+                "execution_budget_accounting_integrity_failure"
+            ),
+            "wall_clock_limit_exceeded": "wall_clock_limit_exceeded",
+        }.get(adapter_result.status)
+        if (
+            termination.action_id != pending.action_id
+            or termination.termination_reason != expected_reason
+            and expected_reason is not None
+            or termination.phase not in {"reaped", "termination_failed"}
+            or termination.phase == "reaped"
+            and (
+                termination.containment_closed is not True
+                or termination.cgroup_empty is not True
+                or termination.process_reaped is not True
+            )
+        ):
+            raise WorkflowStateError("process containment evidence contradicts action result")
     _verify_codex_command(pending, request, metadata)
     _verify_time_agreement(
         metadata.started_at,
@@ -584,7 +624,7 @@ def verify_codex_artifacts(
 
     artifact_hashes = {
         str(artifact_directory / name): sha256_regular_file(artifact_directory / name)
-        for name in sorted(STAGE2_STAGE1_ARTIFACT_NAMES)
+        for name in sorted(stage1_names | {"stage2-completion.json"})
     }
     artifact_hashes[pending.handoff_path] = sha256_regular_file(Path(pending.handoff_path))
     if pending.output_schema_path is None:
@@ -831,6 +871,15 @@ def _verify_codex_process_result(
         )
     elif result.status == "timed_out":
         valid = metadata.termination_reason == "timeout"
+    elif result.status == "bounded_continuation_required":
+        valid = metadata.termination_reason == "execution_budget_exhausted"
+    elif result.status == "accounting_integrity_failure":
+        valid = (
+            metadata.termination_reason
+            == "execution_budget_accounting_integrity_failure"
+        )
+    elif result.status == "wall_clock_limit_exceeded":
+        valid = metadata.termination_reason == "wall_clock_limit_exceeded"
     elif result.status == "output_limit_exceeded":
         selected_count = (
             metadata.stdout_byte_count
@@ -856,6 +905,7 @@ def _verify_codex_process_result(
             or metadata.terminating_signal is not None
             or metadata.stdin_error
             or metadata.confidentiality_violation_detected
+            or metadata.containment_termination_failed
         )
     elif result.status == "launch_failed":
         valid = (
@@ -868,7 +918,14 @@ def _verify_codex_process_result(
     else:
         valid = result.status == "permission_blocked" and result.permission_evidence
     if (
-        result.status not in {"timed_out", "output_limit_exceeded"}
+        result.status
+        not in {
+            "timed_out",
+            "bounded_continuation_required",
+            "accounting_integrity_failure",
+            "wall_clock_limit_exceeded",
+            "output_limit_exceeded",
+        }
         and output_breached
     ):
         valid = False

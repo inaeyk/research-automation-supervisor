@@ -56,6 +56,14 @@ from research_automation_supervisor.git_evidence import (
     collect_git_evidence,
     record_git_baseline,
 )
+from research_automation_supervisor.process_enforcement import (
+    PROCESS_TERMINATION_EVIDENCE_FILENAME,
+    ContainmentBackend,
+    ContainmentControlError,
+    ProcessTerminationEvidenceError,
+    SystemdUserCgroupV2Backend,
+    reconcile_process_termination_recovery,
+)
 from research_automation_supervisor.redaction import redact_text, would_redact_text
 from research_automation_supervisor.shadow_models import canonical_supervisor_uuid
 from research_automation_supervisor.test_runner import (
@@ -120,6 +128,9 @@ _TRANSPORT_FAILURE_STATUSES = frozenset(
     {
         "launch_failed",
         "timed_out",
+        "bounded_continuation_required",
+        "accounting_integrity_failure",
+        "wall_clock_limit_exceeded",
         "output_limit_exceeded",
         "permission_blocked",
         "malformed_event_stream",
@@ -453,6 +464,7 @@ class WorkflowServices:
     usage_task_id: str | None = None
     usage_ledger_root: Path | None = None
     usage_ledger_path: Path | None = None
+    containment_backend: ContainmentBackend | None = None
 
 
 DEFAULT_WORKFLOW_SERVICES = WorkflowServices()
@@ -2281,6 +2293,35 @@ def _recover_pending_action(context: _WorkflowContext) -> WorkflowState:
     pending = context.state.pending_action
     if pending is None:
         return context.state
+    if pending.kind in {"worker", "auditor"}:
+        containment_path = (
+            Path(pending.artifact_path) / PROCESS_TERMINATION_EVIDENCE_FILENAME
+        )
+        if containment_path.is_file():
+            environment, _, _ = build_subprocess_environment(context.services.environ)
+            backend = context.services.containment_backend or SystemdUserCgroupV2Backend(
+                environment
+            )
+            try:
+                containment = reconcile_process_termination_recovery(
+                    containment_path,
+                    backend,
+                    stop_grace_seconds=DEFAULT_LIMITS.termination_grace_seconds,
+                )
+            except (
+                ContainmentControlError,
+                ProcessTerminationEvidenceError,
+                OSError,
+                ValueError,
+            ):
+                containment = None
+            if containment is None or containment.disposition != "already_closed":
+                return _pause(
+                    context,
+                    "human_paused",
+                    "uncertain_in_flight_action",
+                    "The exact action containment is unresolved; execution will not be guessed.",
+                )
     try:
         if pending.kind == "auditor" and Path(pending.artifact_path).exists():
             prepare_auditor_scratch_directory(Path(pending.artifact_path))

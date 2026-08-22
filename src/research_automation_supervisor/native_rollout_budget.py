@@ -96,6 +96,11 @@ class NativeRolloutBudgetObserverV1:
         return self._source_cursor_path
 
     @property
+    def rollout_path(self) -> Path | None:
+        """Bound native rollout path, available after deterministic discovery."""
+        return self._rollout_path
+
+    @property
     def outcome(self) -> ExecutionBudgetEnforcementOutcomeV1:
         return self.controller.outcome
 

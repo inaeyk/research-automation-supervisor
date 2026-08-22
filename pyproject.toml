@@ -98,6 +98,9 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+  "systemd_host: real-host systemd user/cgroup-v2 containment qualification",
+]
 
 [tool.ruff]
 target-version = "py311"

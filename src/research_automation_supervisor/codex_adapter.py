@@ -46,6 +46,25 @@ from research_automation_supervisor.execution_budget_enforcement import (
 from research_automation_supervisor.native_rollout_budget import (
     NativeRolloutBudgetObserverV1,
 )
+from research_automation_supervisor.process_enforcement import (
+    CONTAINMENT_BACKEND,
+    PROCESS_TERMINATION_EVIDENCE_FILENAME,
+    ContainmentBackend,
+    ContainmentControlError,
+    OwnedProcessIdentityV1,
+    ProcessEnforcementPolicyV1,
+    ProcessGroupSignalResultV1,
+    ProcessTerminationEvidenceV1,
+    ProcessTerminationReasonV1,
+    SystemdStopResultV1,
+    SystemdUnitInspectionV1,
+    SystemdUserCgroupV2Backend,
+    file_sha256,
+    inspect_owned_process_group,
+    new_action_unit_name,
+    process_start_ticks,
+    write_process_termination_evidence,
+)
 from research_automation_supervisor.redaction import (
     is_sensitive_name,
     redact_json,
@@ -55,6 +74,9 @@ from research_automation_supervisor.redaction import (
 from research_automation_supervisor.structured_outputs import (
     ProductionSchemaError,
     validate_production_schema,
+)
+from research_automation_supervisor.systemd_launch_helper import (
+    encode_environment_frame,
 )
 from research_automation_supervisor.token_accounting import (
     CodexTurnUsageV1,
@@ -240,6 +262,7 @@ class _ProcessObservation:
     launch_error: str | None = None
     confidentiality_violation_detected: bool = False
     execution_budget_decision: str | None = None
+    termination_evidence: ProcessTerminationEvidenceV1 | None = None
 
 
 @dataclass
@@ -359,6 +382,8 @@ def execute_codex_request(
     monotonic: Monotonic = time.monotonic,
     utc_now: UtcNow = lambda: datetime.now(UTC),
     version_probe: VersionProbe | None = None,
+    process_enforcement_policy: ProcessEnforcementPolicyV1 | None = None,
+    containment_backend: ContainmentBackend | None = None,
 ) -> CodexRunResult:
     """Validate one request and execute exactly one deterministic Codex process."""
     environment, _, sensitive_values = build_subprocess_environment(environ)
@@ -400,6 +425,8 @@ def execute_codex_request(
         monotonic=monotonic,
         utc_now=utc_now,
         version_probe=use_probed_version,
+        process_enforcement_policy=process_enforcement_policy,
+        containment_backend=containment_backend,
     )
 
 
@@ -424,6 +451,8 @@ def run_prepared_codex(
     process_started: ProcessStarted | None = None,
     process_finished: ProcessFinished | None = None,
     execution_budget_controller: LiveExecutionBudgetControllerV1 | None = None,
+    process_enforcement_policy: ProcessEnforcementPolicyV1 | None = None,
+    containment_backend: ContainmentBackend | None = None,
 ) -> CodexRunResult:
     """Run an already validated request and durably finalize its artifacts."""
     environment, removed_names, sensitive_values = build_subprocess_environment(environ)
@@ -486,6 +515,54 @@ def run_prepared_codex(
     observation = _ProcessObservation()
     event_path = artifact_directory / "events.jsonl"
     raw_final_bytes: bytes | None = None
+    process_enforcement_enabled = (
+        execution_budget_controller is not None
+        or process_enforcement_policy is not None
+    )
+    effective_process_enforcement_policy = (
+        process_enforcement_policy or ProcessEnforcementPolicyV1()
+        if process_enforcement_enabled
+        else None
+    )
+    effective_containment_backend = (
+        containment_backend
+        or SystemdUserCgroupV2Backend(
+            environment,
+            control_plane_timeout_seconds=(
+                effective_process_enforcement_policy.control_plane_timeout_seconds
+                if effective_process_enforcement_policy is not None
+                else 5.0
+            ),
+        )
+        if process_enforcement_enabled
+        else None
+    )
+    process_termination_evidence_path = (
+        artifact_directory / PROCESS_TERMINATION_EVIDENCE_FILENAME
+        if process_enforcement_enabled
+        else None
+    )
+    if process_termination_evidence_path is not None:
+        initial_thread_id = (
+            execution_budget_controller.checkpoint.codex_thread_id
+            if execution_budget_controller is not None
+            else resume_thread_id
+        )
+        observation.termination_evidence = ProcessTerminationEvidenceV1(
+            task_id=(
+                execution_budget_controller.checkpoint.task_id
+                if execution_budget_controller is not None
+                else prepared.request.run_id
+            ),
+            action_id=prepared.request.run_id,
+            codex_thread_id=initial_thread_id,
+            containment_backend=CONTAINMENT_BACKEND,
+            unit_name=new_action_unit_name(),
+        )
+        write_process_termination_evidence(
+            process_termination_evidence_path,
+            observation.termination_evidence,
+        )
     native_rollout_budget_observer = (
         NativeRolloutBudgetObserverV1.create(
             controller=execution_budget_controller,
@@ -549,6 +626,9 @@ def run_prepared_codex(
                 process_started,
                 process_finished,
                 native_rollout_budget_observer,
+                effective_process_enforcement_policy,
+                process_termination_evidence_path,
+                effective_containment_backend,
             )
             event_processor.finish()
 
@@ -974,6 +1054,709 @@ def _native_rollout_cursor_directory(environment: Mapping[str, str]) -> Path:
     return _codex_sessions_root(environment).parent / "execution-budget-rollout-cursors"
 
 
+def _run_systemd_contained_process(
+    command: Sequence[str],
+    prepared: PreparedCodexRequest,
+    environment: Mapping[str, str],
+    cwd: Path,
+    events: _EventProcessor,
+    observation: _ProcessObservation,
+    limits: AdapterLimits,
+    started_monotonic: float,
+    monotonic: Monotonic,
+    rejected_values: Sequence[bytes],
+    prelaunch_verifier: Callable[[], None] | None,
+    process_started: ProcessStarted | None,
+    process_finished: ProcessFinished | None,
+    observer: NativeRolloutBudgetObserverV1 | None,
+    policy: ProcessEnforcementPolicyV1,
+    evidence_path: Path,
+    backend: ContainmentBackend,
+) -> None:
+    """Run one action with systemd/cgroup-v2 as its only closure authority."""
+    evidence = observation.termination_evidence
+    if evidence is None:
+        raise RuntimeError("process termination evidence was not initialized")
+    unit_name = evidence.unit_name
+    if prelaunch_verifier is not None:
+        prelaunch_verifier()
+    try:
+        backend.preflight(unit_name)
+    except ContainmentControlError as exc:
+        observation.launch_error = "Codex containment is unavailable"
+        _persist_containment_failure(observation, evidence_path, str(exc), None)
+        return
+
+    _update_process_termination_evidence(
+        observation,
+        evidence_path,
+        phase="launch_intent_persisted",
+    )
+    launch_command = backend.build_launch_command(
+        unit_name,
+        command,
+        cwd,
+        limits.termination_grace_seconds,
+        min(prepared.request.timeout_seconds, policy.max_wall_clock_seconds),
+    )
+    try:
+        process = subprocess.Popen(
+            list(launch_command),
+            cwd=cwd,
+            env=dict(environment),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        observation.launch_error = "Codex containment launch failed"
+        return
+
+    observation.launched = True
+    process_identity = _diagnostic_process_identity(process.pid)
+    try:
+        identity = backend.bind_identity(unit_name, process.pid)
+    except (ContainmentControlError, OSError) as exc:
+        identity = SystemdUnitInspectionV1(
+            state="ambiguous",
+            unit_name=unit_name,
+            error=str(exc),
+        )
+    if (
+        identity.state != "proven_live"
+        or identity.invocation_id is None
+        or identity.control_group is None
+    ):
+        observation.launch_error = "Codex containment identity could not be proven"
+        _reconcile_post_launch_identity_uncertainty(
+            process,
+            observation,
+            evidence_path,
+            backend,
+            limits,
+            identity,
+            process_identity,
+        )
+        return
+    _update_process_termination_evidence(
+        observation,
+        evidence_path,
+        phase="running",
+        process_identity=process_identity,
+        invocation_id=identity.invocation_id,
+        control_group=identity.control_group,
+        unit_active_state=identity.active_state,
+        unit_sub_state=identity.sub_state,
+        unit_result=identity.unit_result,
+        cgroup_empty=False,
+    )
+
+    try:
+        if process_started is not None:
+            process_started(process.pid)
+    except BaseException:
+        _close_systemd_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            evidence_path,
+            observer,
+            process_finished,
+            backend,
+        )
+        raise
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        observation.launch_error = "Codex containment pipes were unavailable"
+        _close_systemd_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            evidence_path,
+            observer,
+            process_finished,
+            backend,
+        )
+        return
+
+    input_bytes = encode_environment_frame(dict(environment)) + prepared.prompt_bytes
+    input_offset = 0
+    selector = selectors.DefaultSelector()
+    streams = {
+        "stdin": process.stdin,
+        "stdout": process.stdout,
+        "stderr": process.stderr,
+    }
+    try:
+        for name, stream in streams.items():
+            os.set_blocking(stream.fileno(), False)
+            selector.register(
+                stream,
+                selectors.EVENT_WRITE if name == "stdin" else selectors.EVENT_READ,
+                name,
+            )
+    except (KeyError, OSError, ValueError):
+        for stream in streams.values():
+            if _is_registered(selector, stream):
+                _unregister_and_close(selector, stream)
+        selector.close()
+        observation.launch_error = "Codex containment pipes could not be configured"
+        _close_systemd_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            evidence_path,
+            observer,
+            process_finished,
+            backend,
+        )
+        return
+
+    request_deadline = started_monotonic + prepared.request.timeout_seconds
+    wall_clock_deadline = started_monotonic + policy.max_wall_clock_seconds
+    stdout_open = True
+    stderr_open = True
+    stop_attempted = False
+    termination_failed = False
+    closure: SystemdUnitInspectionV1 | None = None
+    closure_drain_deadline: float | None = None
+
+    try:
+        while True:
+            if observer is not None and observation.termination_reason is None:
+                observation.execution_budget_decision = observer.poll().decision
+            now = monotonic()
+
+            budget_reason = _budget_termination_reason(
+                observation.execution_budget_decision
+            )
+            if budget_reason is not None and observation.termination_reason is None:
+                observation.termination_reason = budget_reason
+                _persist_termination_intent(
+                    observation,
+                    evidence_path,
+                    budget_reason,
+                    now - started_monotonic,
+                    observer,
+                )
+            if (
+                observation.termination_reason is None
+                and observation.exit_code is None
+                and now >= wall_clock_deadline
+            ):
+                observation.termination_reason = "wall_clock_limit_exceeded"
+                _persist_termination_intent(
+                    observation,
+                    evidence_path,
+                    "wall_clock_limit_exceeded",
+                    now - started_monotonic,
+                    observer,
+                )
+            if (
+                observation.termination_reason is None
+                and observation.exit_code is None
+                and now >= request_deadline
+            ):
+                observation.termination_reason = "timeout"
+                _persist_generic_containment_stop_intent(
+                    observation,
+                    evidence_path,
+                    "adapter_timeout",
+                )
+
+            if observation.termination_reason is not None and not stop_attempted:
+                stop_attempted = True
+                stopped = _request_systemd_containment_stop(
+                    observation,
+                    evidence_path,
+                    backend,
+                    limits.termination_grace_seconds,
+                )
+                if stopped.status == "failed":
+                    termination_failed = True
+                else:
+                    closure = stopped.inspection
+                    closure_drain_deadline = (
+                        time.monotonic() + backend.control_plane_timeout_seconds
+                    )
+
+            if (
+                not stdout_open
+                and not stderr_open
+                and closure is None
+                and not stop_attempted
+            ):
+                if _is_registered(selector, process.stdin):
+                    observation.stdin_error = input_offset < len(input_bytes)
+                    _unregister_and_close(selector, process.stdin)
+                inspected = backend.inspect(
+                    unit_name,
+                    identity.invocation_id,
+                    identity.control_group,
+                )
+                if inspected.state == "proven_live":
+                    _persist_generic_containment_stop_intent(
+                        observation,
+                        evidence_path,
+                        "surviving_processes_after_wrapper_exit",
+                    )
+                    stop_attempted = True
+                    stopped = _request_systemd_containment_stop(
+                        observation,
+                        evidence_path,
+                        backend,
+                        limits.termination_grace_seconds,
+                    )
+                    if stopped.status == "failed":
+                        termination_failed = True
+                    else:
+                        closure = stopped.inspection
+                        closure_drain_deadline = (
+                            time.monotonic() + backend.control_plane_timeout_seconds
+                        )
+                else:
+                    closure = _normalize_closed_inspection(inspected, identity)
+                    if closure is None:
+                        _persist_containment_failure(
+                            observation,
+                            evidence_path,
+                            inspected.error
+                            or "exact containment closure was not proven",
+                            inspected,
+                        )
+                        termination_failed = True
+
+            if termination_failed:
+                break
+            if closure is not None:
+                if not stdout_open and not stderr_open:
+                    break
+                if (
+                    closure_drain_deadline is not None
+                    and time.monotonic() >= closure_drain_deadline
+                ):
+                    break
+
+            timeout = limits.io_poll_seconds
+            if observation.termination_reason is None and observation.exit_code is None:
+                timeout = min(
+                    timeout,
+                    max(0.0, request_deadline - now),
+                    max(0.0, wall_clock_deadline - now),
+                )
+            try:
+                ready = selector.select(timeout)
+            except InterruptedError:
+                continue
+            for key, _ in ready:
+                stream_name = str(key.data)
+                ready_stream: Any = key.fileobj
+                if stream_name == "stdin":
+                    input_offset = _write_prompt_chunk(
+                        selector,
+                        ready_stream,
+                        input_bytes,
+                        input_offset,
+                        observation,
+                    )
+                    continue
+                try:
+                    chunk = os.read(ready_stream.fileno(), 64 * 1024)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    _unregister_and_close(selector, ready_stream)
+                    if stream_name == "stdout":
+                        stdout_open = False
+                    else:
+                        stderr_open = False
+                    continue
+                if _contains_confidential_fragment(chunk, rejected_values):
+                    observation.confidentiality_violation_detected = True
+                if stream_name == "stdout":
+                    accepted = _accepted_prefix(
+                        chunk,
+                        observation.stdout_bytes,
+                        limits.stdout_bytes,
+                    )
+                    observation.stdout_bytes += len(chunk)
+                    if accepted:
+                        events.feed(accepted)
+                    if observation.stdout_bytes > limits.stdout_bytes:
+                        observation.output_limit_stream = "stdout"
+                        observation.termination_reason = "output_limit"
+                        _persist_generic_containment_stop_intent(
+                            observation,
+                            evidence_path,
+                            "stdout_limit_exceeded",
+                        )
+                else:
+                    accepted = _accepted_prefix(
+                        chunk,
+                        observation.stderr_bytes,
+                        limits.stderr_bytes,
+                    )
+                    observation.stderr_bytes += len(chunk)
+                    observation.stderr.extend(accepted)
+                    if observation.stderr_bytes > limits.stderr_bytes:
+                        observation.output_limit_stream = "stderr"
+                        observation.termination_reason = "output_limit"
+                        _persist_generic_containment_stop_intent(
+                            observation,
+                            evidence_path,
+                            "stderr_limit_exceeded",
+                        )
+    except BaseException:
+        _close_systemd_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            evidence_path,
+            observer,
+            process_finished,
+            backend,
+        )
+        raise
+    finally:
+        for stream in streams.values():
+            if _is_registered(selector, stream):
+                _unregister_and_close(selector, stream)
+        selector.close()
+
+    if termination_failed:
+        return
+    if closure is None:
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            "exact containment closure was not observed",
+            None,
+        )
+        return
+    if not _bounded_reap_wrapper(process, backend.control_plane_timeout_seconds, limits):
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            "local systemd-run wrapper could not be reaped boundedly",
+            closure,
+        )
+        return
+    observation.exit_code = process.returncode
+    _persist_reaped_process_evidence(
+        observation,
+        evidence_path,
+        observer,
+        closure,
+    )
+    if process_finished is not None:
+        process_finished(process.pid)
+
+
+def _diagnostic_process_identity(pid: int) -> OwnedProcessIdentityV1 | None:
+    ticks = process_start_ticks(pid)
+    if ticks is None:
+        return None
+    try:
+        return OwnedProcessIdentityV1(
+            pid=pid,
+            process_group_id=os.getpgid(pid),
+            session_id=os.getsid(pid),
+            start_ticks=ticks,
+        )
+    except (OSError, ProcessLookupError):
+        return None
+
+
+def _reconcile_post_launch_identity_uncertainty(
+    process: subprocess.Popen[bytes],
+    observation: _ProcessObservation,
+    evidence_path: Path,
+    backend: ContainmentBackend,
+    limits: AdapterLimits,
+    initial: SystemdUnitInspectionV1,
+    process_identity: OwnedProcessIdentityV1 | None,
+) -> None:
+    """Never abandon a crossed launch boundary without exact-unit reconciliation."""
+    evidence = observation.termination_evidence
+    if evidence is None:
+        raise RuntimeError("process termination evidence was not initialized")
+    try:
+        reconciled = backend.inspect(evidence.unit_name, None, None)
+    except (ContainmentControlError, OSError) as exc:
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            str(exc),
+            initial,
+            process_identity=process_identity,
+        )
+        return
+    if (
+        reconciled.state == "proven_live"
+        and reconciled.invocation_id is not None
+        and reconciled.control_group is not None
+    ):
+        _update_process_termination_evidence(
+            observation,
+            evidence_path,
+            phase="termination_intent_persisted",
+            process_identity=process_identity,
+            invocation_id=reconciled.invocation_id,
+            control_group=reconciled.control_group,
+            containment_stop_reason="post_launch_identity_uncertainty",
+            unit_active_state=reconciled.active_state,
+            unit_sub_state=reconciled.sub_state,
+            unit_result=reconciled.unit_result,
+            containment_closed=False,
+            cgroup_empty=False,
+        )
+        stopped = _request_systemd_containment_stop(
+            observation,
+            evidence_path,
+            backend,
+            limits.termination_grace_seconds,
+        )
+        if stopped.status != "closed":
+            return
+        if _bounded_reap_wrapper(
+            process,
+            backend.control_plane_timeout_seconds,
+            limits,
+        ):
+            observation.exit_code = process.returncode
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            "post-launch identity binding failed after exact-unit closure",
+            stopped.inspection,
+            process_identity=process_identity,
+        )
+        return
+    if (
+        reconciled.state == "proven_closed"
+        and reconciled.invocation_id is not None
+        and reconciled.control_group is not None
+        and reconciled.cgroup_empty is True
+    ):
+        if _bounded_reap_wrapper(
+            process,
+            backend.control_plane_timeout_seconds,
+            limits,
+        ):
+            observation.exit_code = process.returncode
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            "post-launch identity binding failed after containment closed",
+            reconciled,
+            process_identity=process_identity,
+        )
+        return
+    _persist_containment_failure(
+        observation,
+        evidence_path,
+        reconciled.error
+        or initial.error
+        or "post-launch containment identity remains unresolved",
+        reconciled,
+        process_identity=process_identity,
+    )
+
+
+def _normalize_closed_inspection(
+    inspected: SystemdUnitInspectionV1,
+    bound: SystemdUnitInspectionV1,
+) -> SystemdUnitInspectionV1 | None:
+    if inspected.state == "proven_closed" and inspected.cgroup_empty is True:
+        return inspected
+    if inspected.state == "absent" and inspected.cgroup_empty is True:
+        return bound.model_copy(
+            update={
+                "state": "proven_closed",
+                "active_state": "inactive",
+                "sub_state": "dead",
+                "cgroup_empty": True,
+            }
+        )
+    return None
+
+
+def _persist_generic_containment_stop_intent(
+    observation: _ProcessObservation,
+    destination: Path,
+    reason: str,
+) -> None:
+    current = observation.termination_evidence
+    if current is None or current.phase not in {
+        "termination_intent_persisted",
+        "graceful_termination_sent",
+        "hard_kill_sent",
+    }:
+        _update_process_termination_evidence(
+            observation,
+            destination,
+            phase="termination_intent_persisted",
+            containment_stop_reason=reason,
+        )
+
+
+def _request_systemd_containment_stop(
+    observation: _ProcessObservation,
+    destination: Path,
+    backend: ContainmentBackend,
+    stop_grace_seconds: float,
+) -> SystemdStopResultV1:
+    evidence = observation.termination_evidence
+    if evidence is None:
+        raise RuntimeError("process termination evidence was not initialized")
+    _update_process_termination_evidence(
+        observation,
+        destination,
+        systemd_stop_requested=True,
+    )
+    stopped = backend.stop(
+        evidence.unit_name,
+        evidence.invocation_id,
+        evidence.control_group,
+        stop_grace_seconds,
+    )
+    if stopped.status == "failed":
+        _persist_containment_failure(
+            observation,
+            destination,
+            stopped.error or "bounded systemd containment stop failed",
+            stopped.inspection,
+        )
+        return stopped
+    inspection = stopped.inspection
+    _update_process_termination_evidence(
+        observation,
+        destination,
+        phase="hard_kill_sent" if stopped.final_kill_observed else "graceful_termination_sent",
+        graceful_termination_sent=stopped.stop_requested,
+        hard_kill_sent=stopped.final_kill_observed,
+        unit_active_state=inspection.active_state,
+        unit_sub_state=inspection.sub_state,
+        unit_result=inspection.unit_result,
+        cgroup_empty=inspection.cgroup_empty,
+    )
+    return stopped
+
+
+def _persist_containment_failure(
+    observation: _ProcessObservation,
+    destination: Path,
+    error: str,
+    inspection: SystemdUnitInspectionV1 | None,
+    *,
+    process_identity: OwnedProcessIdentityV1 | None = None,
+) -> None:
+    updates: dict[str, Any] = {
+        "phase": "termination_failed",
+        "signal_error": error,
+        "final_return_code": observation.exit_code,
+        "process_reaped": observation.exit_code is not None,
+    }
+    if process_identity is not None:
+        updates["process_identity"] = process_identity
+    current = observation.termination_evidence
+    if inspection is not None:
+        if (
+            current is not None
+            and current.invocation_id is None
+            and inspection.state in {"proven_live", "proven_closed"}
+            and inspection.invocation_id is not None
+            and inspection.control_group is not None
+        ):
+            updates["invocation_id"] = inspection.invocation_id
+            updates["control_group"] = inspection.control_group
+        updates.update(
+            unit_active_state=inspection.active_state,
+            unit_sub_state=inspection.sub_state,
+            unit_result=inspection.unit_result,
+            cgroup_empty=inspection.cgroup_empty,
+            containment_closed=(
+                True
+                if inspection.state == "proven_closed"
+                and inspection.cgroup_empty is True
+                else False
+                if inspection.state == "proven_live"
+                else None
+            ),
+        )
+    _update_process_termination_evidence(observation, destination, **updates)
+
+
+def _close_systemd_after_adapter_failure(
+    process: subprocess.Popen[bytes],
+    observation: _ProcessObservation,
+    limits: AdapterLimits,
+    evidence_path: Path,
+    observer: NativeRolloutBudgetObserverV1 | None,
+    process_finished: ProcessFinished | None,
+    backend: ContainmentBackend,
+) -> None:
+    evidence = observation.termination_evidence
+    if evidence is None or evidence.invocation_id is None or evidence.control_group is None:
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            "containment identity unavailable during adapter cleanup",
+            None,
+        )
+        return
+    _persist_generic_containment_stop_intent(
+        observation,
+        evidence_path,
+        "adapter_failure",
+    )
+    stopped = _request_systemd_containment_stop(
+        observation,
+        evidence_path,
+        backend,
+        limits.termination_grace_seconds,
+    )
+    if stopped.status != "closed":
+        return
+    if not _bounded_reap_wrapper(process, backend.control_plane_timeout_seconds, limits):
+        _persist_containment_failure(
+            observation,
+            evidence_path,
+            "local systemd-run wrapper could not be reaped boundedly",
+            stopped.inspection,
+        )
+        return
+    observation.exit_code = process.returncode
+    _persist_reaped_process_evidence(
+        observation,
+        evidence_path,
+        observer,
+        stopped.inspection,
+    )
+    if process_finished is not None:
+        process_finished(process.pid)
+
+
+def _bounded_reap_wrapper(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    limits: AdapterLimits,
+) -> bool:
+    try:
+        process.wait(timeout=timeout_seconds)
+        return True
+    except subprocess.TimeoutExpired:
+        _emergency_process_group_cleanup(process, limits)
+        try:
+            process.wait(timeout=limits.termination_grace_seconds)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+
 def _run_process(
     command: Sequence[str],
     prepared: PreparedCodexRequest,
@@ -989,9 +1772,41 @@ def _run_process(
     process_started: ProcessStarted | None,
     process_finished: ProcessFinished | None,
     native_rollout_budget_observer: NativeRolloutBudgetObserverV1 | None,
+    process_enforcement_policy: ProcessEnforcementPolicyV1 | None,
+    process_termination_evidence_path: Path | None,
+    containment_backend: ContainmentBackend | None,
 ) -> None:
+    if process_enforcement_policy is not None:
+        assert process_termination_evidence_path is not None
+        assert containment_backend is not None
+        _run_systemd_contained_process(
+            command,
+            prepared,
+            environment,
+            cwd,
+            events,
+            observation,
+            limits,
+            started_monotonic,
+            monotonic,
+            rejected_values,
+            prelaunch_verifier,
+            process_started,
+            process_finished,
+            native_rollout_budget_observer,
+            process_enforcement_policy,
+            process_termination_evidence_path,
+            containment_backend,
+        )
+        return
     if prelaunch_verifier is not None:
         prelaunch_verifier()
+    if process_termination_evidence_path is not None:
+        _update_process_termination_evidence(
+            observation,
+            process_termination_evidence_path,
+            phase="launch_intent_persisted",
+        )
     try:
         process = subprocess.Popen(
             list(command),
@@ -1008,21 +1823,60 @@ def _run_process(
         return
 
     observation.launched = True
+    process_identity: OwnedProcessIdentityV1 | None = None
+    if process_termination_evidence_path is not None:
+        start_ticks = process_start_ticks(process.pid)
+        if start_ticks is None:
+            observation.launch_error = "Codex process identity could not be proven"
+            _emergency_process_group_cleanup(process, limits)
+            observation.exit_code = process.wait()
+            _update_process_termination_evidence(
+                observation,
+                process_termination_evidence_path,
+                phase="termination_failed",
+                signal_error=observation.launch_error,
+                final_return_code=observation.exit_code,
+                process_reaped=True,
+                owned_process_group_empty=None,
+            )
+            return
+        process_identity = OwnedProcessIdentityV1(
+            pid=process.pid,
+            process_group_id=process.pid,
+            session_id=process.pid,
+            start_ticks=start_ticks,
+        )
+        _update_process_termination_evidence(
+            observation,
+            process_termination_evidence_path,
+            phase="running",
+            process_identity=process_identity,
+        )
     try:
         if process_started is not None:
             process_started(process.pid)
     except BaseException:
-        _emergency_process_group_cleanup(process, limits)
-        process.wait()
-        if process_finished is not None:
-            process_finished(process.pid)
+        _close_process_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            process_identity,
+            process_termination_evidence_path,
+            native_rollout_budget_observer,
+            process_finished,
+        )
         raise
     if process.stdin is None or process.stdout is None or process.stderr is None:
         observation.launch_error = "Codex process pipes were unavailable"
-        _emergency_process_group_cleanup(process, limits)
-        observation.exit_code = process.wait()
-        if process_finished is not None:
-            process_finished(process.pid)
+        _close_process_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            process_identity,
+            process_termination_evidence_path,
+            native_rollout_budget_observer,
+            process_finished,
+        )
         return
 
     selector = selectors.DefaultSelector()
@@ -1045,16 +1899,28 @@ def _run_process(
             if _is_registered(selector, stream):
                 _unregister_and_close(selector, stream)
         selector.close()
-        _emergency_process_group_cleanup(process, limits)
-        observation.exit_code = process.wait()
-        if process_finished is not None:
-            process_finished(process.pid)
+        _close_process_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            process_identity,
+            process_termination_evidence_path,
+            native_rollout_budget_observer,
+            process_finished,
+        )
         return
 
     prompt_offset = 0
     deadline = started_monotonic + prepared.request.timeout_seconds
+    wall_clock_deadline = (
+        started_monotonic + process_enforcement_policy.max_wall_clock_seconds
+        if process_enforcement_policy is not None
+        else None
+    )
     termination_started: float | None = None
     killed = False
+    hard_kill_started: float | None = None
+    termination_failed = False
     normal_cleanup_started: float | None = None
     normal_cleanup_forced = False
     stdout_open = True
@@ -1062,7 +1928,10 @@ def _run_process(
 
     try:
         while True:
-            if native_rollout_budget_observer is not None:
+            if (
+                native_rollout_budget_observer is not None
+                and observation.termination_reason is None
+            ):
                 observation.execution_budget_decision = (
                     native_rollout_budget_observer.poll().decision
                 )
@@ -1077,10 +1946,63 @@ def _run_process(
                 if (
                     observation.termination_reason is None
                     and normal_cleanup_started is None
-                    and _process_group_exists(process.pid)
+                    and (
+                        inspect_owned_process_group(process_identity).state
+                        == "verified_owned_group_present"
+                        if process_identity is not None
+                        else _process_group_exists(process.pid)
+                    )
                 ):
                     normal_cleanup_started = now
-                    _signal_process_group(process, signal.SIGTERM)
+                    if process_identity is not None:
+                        _verified_process_group_signal(process_identity, signal.SIGTERM)
+                    else:
+                        _signal_process_group(process, signal.SIGTERM)
+
+            budget_termination_reason = _budget_termination_reason(
+                observation.execution_budget_decision
+            )
+            if (
+                budget_termination_reason is not None
+                and observation.termination_reason is None
+            ):
+                observation.termination_reason = budget_termination_reason
+                termination_started = now
+                if process_termination_evidence_path is not None:
+                    _persist_termination_intent(
+                        observation,
+                        process_termination_evidence_path,
+                        budget_termination_reason,
+                        now - started_monotonic,
+                        native_rollout_budget_observer,
+                    )
+                _send_graceful_enforcement_signal(
+                    observation,
+                    process_termination_evidence_path,
+                    process_identity,
+                )
+
+            if (
+                wall_clock_deadline is not None
+                and observation.termination_reason is None
+                and observation.exit_code is None
+                and now >= wall_clock_deadline
+            ):
+                observation.termination_reason = "wall_clock_limit_exceeded"
+                termination_started = now
+                assert process_termination_evidence_path is not None
+                _persist_termination_intent(
+                    observation,
+                    process_termination_evidence_path,
+                    "wall_clock_limit_exceeded",
+                    now - started_monotonic,
+                    native_rollout_budget_observer,
+                )
+                _send_graceful_enforcement_signal(
+                    observation,
+                    process_termination_evidence_path,
+                    process_identity,
+                )
 
             if (
                 observation.termination_reason is None
@@ -1096,27 +2018,105 @@ def _run_process(
                 and not killed
                 and now - termination_started >= limits.termination_grace_seconds
             ):
-                _signal_process_group(process, signal.SIGKILL)
-                killed = True
+                if (
+                    process_termination_evidence_path is not None
+                    and _is_process_enforcement_reason(
+                        observation.termination_reason
+                    )
+                ):
+                    hard_result = _send_hard_enforcement_signal(
+                        observation,
+                        process_termination_evidence_path,
+                        process_identity,
+                    )
+                    if hard_result.status in {"sent", "group_already_empty"}:
+                        killed = True
+                        hard_kill_started = now
+                    else:
+                        termination_failed = True
+                        _persist_termination_failure(
+                            observation,
+                            process_termination_evidence_path,
+                            hard_result.error or "hard process-group signal failed",
+                            process_identity,
+                        )
+                else:
+                    _signal_process_group(process, signal.SIGKILL)
+                    killed = True
+                    hard_kill_started = now
 
             if (
                 normal_cleanup_started is not None
                 and not normal_cleanup_forced
-                and _process_group_exists(process.pid)
+                and (
+                    inspect_owned_process_group(process_identity).state
+                    == "verified_owned_group_present"
+                    if process_identity is not None
+                    else _process_group_exists(process.pid)
+                )
                 and now - normal_cleanup_started >= limits.termination_grace_seconds
             ):
-                _signal_process_group(process, signal.SIGKILL)
-                normal_cleanup_forced = True
+                if process_identity is not None:
+                    hard_result = _verified_process_group_signal(
+                        process_identity, signal.SIGKILL
+                    )
+                    if hard_result.status in {"sent", "group_already_empty"}:
+                        normal_cleanup_forced = True
+                        hard_kill_started = now
+                    else:
+                        termination_failed = True
+                        assert process_termination_evidence_path is not None
+                        _persist_termination_failure(
+                            observation,
+                            process_termination_evidence_path,
+                            hard_result.error or "hard process-group signal failed",
+                            process_identity,
+                        )
+                else:
+                    _signal_process_group(process, signal.SIGKILL)
+                    normal_cleanup_forced = True
+                    hard_kill_started = now
+
+            group_empty = (
+                inspect_owned_process_group(process_identity).state
+                == "owned_group_empty"
+                if process_identity is not None
+                else not _process_group_exists(process.pid)
+            )
+            if (
+                process_identity is not None
+                and hard_kill_started is not None
+                and not group_empty
+                and now - hard_kill_started >= limits.termination_grace_seconds
+            ):
+                termination_failed = True
+                assert process_termination_evidence_path is not None
+                _persist_termination_failure(
+                    observation,
+                    process_termination_evidence_path,
+                    "owned process group remained live after hard-kill grace",
+                    process_identity,
+                )
+
+            if termination_failed:
+                break
 
             if observation.exit_code is not None and not stdout_open and not stderr_open:
-                if termination_started is None and normal_cleanup_started is None:
-                    break
-                if killed or normal_cleanup_forced or not _process_group_exists(process.pid):
+                if process_identity is not None:
+                    if group_empty:
+                        break
+                elif (
+                    termination_started is None and normal_cleanup_started is None
+                ) or killed or normal_cleanup_forced or not _process_group_exists(
+                    process.pid
+                ):
                     break
 
             timeout = limits.io_poll_seconds
             if observation.termination_reason is None and observation.exit_code is None:
                 timeout = min(timeout, max(0.0, deadline - now))
+                if wall_clock_deadline is not None:
+                    timeout = min(timeout, max(0.0, wall_clock_deadline - now))
             elif termination_started is not None and not killed:
                 timeout = min(
                     timeout,
@@ -1128,6 +2128,14 @@ def _run_process(
                     max(
                         0.0,
                         normal_cleanup_started + limits.termination_grace_seconds - now,
+                    ),
+                )
+            if hard_kill_started is not None and not group_empty:
+                timeout = min(
+                    timeout,
+                    max(
+                        0.0,
+                        hard_kill_started + limits.termination_grace_seconds - now,
                     ),
                 )
             try:
@@ -1198,11 +2206,15 @@ def _run_process(
                         if termination_started is None:
                             termination_started = now
     except BaseException:
-        _emergency_process_group_cleanup(process, limits)
-        if observation.exit_code is None:
-            observation.exit_code = process.wait()
-        if process_finished is not None:
-            process_finished(process.pid)
+        _close_process_after_adapter_failure(
+            process,
+            observation,
+            limits,
+            process_identity,
+            process_termination_evidence_path,
+            native_rollout_budget_observer,
+            process_finished,
+        )
         raise
     finally:
         for stream in streams.values():
@@ -1210,8 +2222,336 @@ def _run_process(
                 _unregister_and_close(selector, stream)
         selector.close()
 
+    if termination_failed:
+        return
     if observation.exit_code is None:
         observation.exit_code = process.wait()
+    if process_termination_evidence_path is not None:
+        assert process_identity is not None
+        if inspect_owned_process_group(process_identity).state != "owned_group_empty":
+            _persist_termination_failure(
+                observation,
+                process_termination_evidence_path,
+                "owned process-group closure was not proven",
+                process_identity,
+            )
+            return
+        _persist_reaped_process_evidence(
+            observation,
+            process_termination_evidence_path,
+            native_rollout_budget_observer,
+        )
+    if process_finished is not None:
+        process_finished(process.pid)
+
+
+def _update_process_termination_evidence(
+    observation: _ProcessObservation,
+    destination: Path,
+    **updates: Any,
+) -> ProcessTerminationEvidenceV1:
+    current = observation.termination_evidence
+    if current is None:
+        raise RuntimeError("process termination evidence was not initialized")
+    payload = current.model_dump(mode="python")
+    payload.update(updates)
+    candidate = ProcessTerminationEvidenceV1.model_validate(payload)
+    write_process_termination_evidence(destination, candidate)
+    observation.termination_evidence = candidate
+    return candidate
+
+
+def _budget_termination_reason(
+    decision: str | None,
+) -> ProcessTerminationReasonV1 | None:
+    if decision == "bounded_continuation_required":
+        return "execution_budget_exhausted"
+    if decision == "accounting_integrity_failure":
+        return "execution_budget_accounting_integrity_failure"
+    return None
+
+
+def _is_process_enforcement_reason(reason: str | None) -> bool:
+    return reason in {
+        "execution_budget_exhausted",
+        "execution_budget_accounting_integrity_failure",
+        "wall_clock_limit_exceeded",
+    }
+
+
+def _persist_termination_intent(
+    observation: _ProcessObservation,
+    destination: Path,
+    reason: ProcessTerminationReasonV1,
+    elapsed_seconds: float,
+    observer: NativeRolloutBudgetObserverV1 | None,
+) -> None:
+    updates: dict[str, Any] = {
+        "phase": "termination_intent_persisted",
+        "termination_reason": reason,
+        "decision_elapsed_seconds": max(0.0, elapsed_seconds),
+    }
+    if observer is not None:
+        checkpoint = observer.controller.checkpoint
+        checkpoint_path = observer.controller.checkpoint_path
+        cursor = observer.cursor
+        updates.update(
+            {
+                "codex_thread_id": checkpoint.codex_thread_id,
+                "reached_hard_limits": checkpoint.state.reached_hard_limits,
+                "budget_checkpoint_path": str(checkpoint_path),
+                "budget_checkpoint_sha256": file_sha256(checkpoint_path),
+                "native_source_cursor_path": (
+                    str(observer.source_cursor_path)
+                    if observer.source_cursor_path is not None
+                    else None
+                ),
+                "native_source_cursor_offset_at_stop": (
+                    cursor.consumed_byte_offset if cursor is not None else None
+                ),
+                "rollout_relative_path": (
+                    cursor.rollout_relative_path if cursor is not None else None
+                ),
+            }
+        )
+    _update_process_termination_evidence(observation, destination, **updates)
+
+
+def _verified_process_group_signal(
+    identity: OwnedProcessIdentityV1 | None,
+    requested_signal: int,
+) -> ProcessGroupSignalResultV1:
+    if identity is None:
+        return ProcessGroupSignalResultV1(
+            status="failed", error="owned process identity is unavailable"
+        )
+    inspection = inspect_owned_process_group(identity)
+    if inspection.state == "owned_group_empty":
+        return ProcessGroupSignalResultV1(status="group_already_empty")
+    if inspection.state == "ambiguous":
+        return ProcessGroupSignalResultV1(
+            status="failed", error="owned process-group identity is ambiguous"
+        )
+    try:
+        os.killpg(identity.process_group_id, requested_signal)
+    except ProcessLookupError:
+        if inspect_owned_process_group(identity).state == "owned_group_empty":
+            return ProcessGroupSignalResultV1(status="group_already_empty")
+        return ProcessGroupSignalResultV1(
+            status="failed", error="verified owned process group disappeared ambiguously"
+        )
+    except (OSError, PermissionError) as exc:
+        return ProcessGroupSignalResultV1(
+            status="failed",
+            error=f"{type(exc).__name__}: process-group signal failed",
+        )
+    return ProcessGroupSignalResultV1(status="sent")
+
+
+def _send_graceful_enforcement_signal(
+    observation: _ProcessObservation,
+    destination: Path | None,
+    identity: OwnedProcessIdentityV1 | None,
+) -> ProcessGroupSignalResultV1:
+    if destination is None:
+        return ProcessGroupSignalResultV1(
+            status="failed", error="termination evidence destination is unavailable"
+        )
+    result = _verified_process_group_signal(identity, signal.SIGTERM)
+    updates: dict[str, Any] = {}
+    if result.status == "sent":
+        updates.update(
+            phase="graceful_termination_sent",
+            graceful_termination_sent=True,
+        )
+    if result.error is not None:
+        updates["signal_error"] = result.error
+    if updates:
+        _update_process_termination_evidence(observation, destination, **updates)
+    return result
+
+
+def _send_hard_enforcement_signal(
+    observation: _ProcessObservation,
+    destination: Path,
+    identity: OwnedProcessIdentityV1 | None,
+) -> ProcessGroupSignalResultV1:
+    result = _verified_process_group_signal(identity, signal.SIGKILL)
+    updates: dict[str, Any] = {}
+    if result.status == "sent":
+        updates.update(phase="hard_kill_sent", hard_kill_sent=True)
+    if result.error is not None:
+        updates["signal_error"] = result.error
+    if updates:
+        _update_process_termination_evidence(observation, destination, **updates)
+    return result
+
+
+def _persist_reaped_process_evidence(
+    observation: _ProcessObservation,
+    destination: Path,
+    observer: NativeRolloutBudgetObserverV1 | None,
+    containment: SystemdUnitInspectionV1 | None = None,
+) -> None:
+    current = observation.termination_evidence
+    if current is None:
+        raise RuntimeError("process termination evidence was not initialized")
+    updates: dict[str, Any] = {
+        "phase": "reaped",
+        "final_return_code": observation.exit_code,
+        "process_reaped": True,
+    }
+    if containment is not None:
+        if (
+            containment.state != "proven_closed"
+            or containment.cgroup_empty is not True
+            or containment.unit_name != current.unit_name
+            or containment.invocation_id != current.invocation_id
+            or containment.control_group != current.control_group
+        ):
+            raise RuntimeError("exact systemd containment closure was not proven")
+        updates.update(
+            containment_closed=True,
+            cgroup_empty=True,
+            unit_active_state=containment.active_state,
+            unit_sub_state=containment.sub_state,
+            unit_result=containment.unit_result,
+        )
+        if current.process_identity is not None:
+            updates["owned_process_group_empty"] = (
+                inspect_owned_process_group(current.process_identity).state
+                == "owned_group_empty"
+            )
+    cursor = observer.cursor if observer is not None else None
+    if observer is not None:
+        checkpoint_path = observer.controller.checkpoint_path
+        updates.update(
+            codex_thread_id=observer.controller.checkpoint.codex_thread_id,
+            reached_hard_limits=(
+                observer.controller.checkpoint.state.reached_hard_limits
+            ),
+            budget_checkpoint_path=str(checkpoint_path),
+            budget_checkpoint_sha256=file_sha256(checkpoint_path),
+            native_source_cursor_path=(
+                str(observer.source_cursor_path)
+                if observer.source_cursor_path is not None
+                else None
+            ),
+        )
+        if current.native_source_cursor_offset_at_stop is None and cursor is not None:
+            updates["native_source_cursor_offset_at_stop"] = (
+                cursor.consumed_byte_offset
+            )
+            updates["rollout_relative_path"] = cursor.rollout_relative_path
+    rollout_path = observer.rollout_path if observer is not None else None
+    if rollout_path is not None:
+        try:
+            final_size = rollout_path.stat().st_size
+        except OSError:
+            final_size = None
+        stop_offset = updates.get(
+            "native_source_cursor_offset_at_stop",
+            current.native_source_cursor_offset_at_stop,
+        )
+        if final_size is not None and stop_offset is not None and final_size >= stop_offset:
+            tail_bytes = final_size - stop_offset
+            updates.update(
+                final_rollout_size_bytes=final_size,
+                unconsumed_tail_bytes=tail_bytes,
+                unconsumed_tail_present=tail_bytes > 0,
+            )
+    _update_process_termination_evidence(observation, destination, **updates)
+
+
+def _persist_termination_failure(
+    observation: _ProcessObservation,
+    destination: Path,
+    error: str,
+    identity: OwnedProcessIdentityV1 | None,
+) -> None:
+    """Persist bounded fail-closed evidence without claiming safe closure."""
+    group_empty: bool | None = None
+    if identity is not None:
+        inspection = inspect_owned_process_group(identity)
+        if inspection.state == "verified_owned_group_present":
+            group_empty = False
+    _update_process_termination_evidence(
+        observation,
+        destination,
+        phase="termination_failed",
+        signal_error=error,
+        final_return_code=observation.exit_code,
+        process_reaped=observation.exit_code is not None,
+        owned_process_group_empty=group_empty,
+    )
+
+
+def _close_process_after_adapter_failure(
+    process: subprocess.Popen[bytes],
+    observation: _ProcessObservation,
+    limits: AdapterLimits,
+    identity: OwnedProcessIdentityV1 | None,
+    evidence_path: Path | None,
+    observer: NativeRolloutBudgetObserverV1 | None,
+    process_finished: ProcessFinished | None,
+) -> None:
+    """Boundedly contain an adapter failure before reporting safe closure."""
+    if identity is None or evidence_path is None:
+        _emergency_process_group_cleanup(process, limits)
+        observation.exit_code = process.wait()
+        if evidence_path is not None:
+            _persist_termination_failure(
+                observation,
+                evidence_path,
+                "owned process identity was unavailable during adapter cleanup",
+                identity,
+            )
+        elif process_finished is not None:
+            process_finished(process.pid)
+        return
+
+    graceful = _verified_process_group_signal(identity, signal.SIGTERM)
+    deadline = time.monotonic() + limits.termination_grace_seconds
+    inspection = inspect_owned_process_group(identity)
+    while (
+        inspection.state == "verified_owned_group_present"
+        and time.monotonic() < deadline
+    ):
+        time.sleep(min(limits.io_poll_seconds, max(0.0, deadline - time.monotonic())))
+        inspection = inspect_owned_process_group(identity)
+
+    hard: ProcessGroupSignalResultV1 | None = None
+    if inspection.state == "verified_owned_group_present":
+        hard = _verified_process_group_signal(identity, signal.SIGKILL)
+        if hard.status in {"sent", "group_already_empty"}:
+            deadline = time.monotonic() + limits.termination_grace_seconds
+            inspection = inspect_owned_process_group(identity)
+            while (
+                inspection.state == "verified_owned_group_present"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(
+                    min(
+                        limits.io_poll_seconds,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+                inspection = inspect_owned_process_group(identity)
+
+    if inspection.state != "owned_group_empty":
+        observation.exit_code = process.poll()
+        error = (
+            hard.error
+            if hard is not None and hard.error is not None
+            else graceful.error
+            if graceful.error is not None
+            else "owned process-group closure was not proven after adapter failure"
+        )
+        _persist_termination_failure(observation, evidence_path, error, identity)
+        return
+
+    observation.exit_code = process.wait()
+    _persist_reaped_process_evidence(observation, evidence_path, observer)
     if process_finished is not None:
         process_finished(process.pid)
 
@@ -1547,6 +2887,11 @@ def _build_metadata(
         "codex_executable": executable_path,
         "codex_version": codex_version,
         "process_launched": observation.launched,
+        "process_enforcement_enabled": observation.termination_evidence is not None,
+        "containment_termination_failed": (
+            observation.termination_evidence is not None
+            and observation.termination_evidence.phase == "termination_failed"
+        ),
         "launch_error_present": observation.launch_error is not None,
         "stdin_error": observation.stdin_error,
         "process_exit_code": (
@@ -1609,7 +2954,7 @@ def _write_stage2_completion_manifest(
     output_schema: Path,
 ) -> None:
     """Seal the complete Stage 2 Stage 1 artifact set after all final writes."""
-    artifact_names = (
+    artifact_names = [
         "request.normalized.json",
         "prompt.sha256",
         "events.jsonl",
@@ -1619,7 +2964,9 @@ def _write_stage2_completion_manifest(
         "result.json",
         "usage-receipt.json",
         "context-economy-receipt.json",
-    )
+    ]
+    if (artifact_directory / PROCESS_TERMINATION_EVIDENCE_FILENAME).is_file():
+        artifact_names.append(PROCESS_TERMINATION_EVIDENCE_FILENAME)
     artifact_hashes = {
         str(artifact_directory / name): hashlib.sha256(
             (artifact_directory / name).read_bytes()
@@ -1654,8 +3001,22 @@ def _classify_status(
         return "launch_failed"
     if observation.termination_reason == "timeout":
         return "timed_out"
+    if observation.termination_reason == "execution_budget_exhausted":
+        return "bounded_continuation_required"
+    if (
+        observation.termination_reason
+        == "execution_budget_accounting_integrity_failure"
+    ):
+        return "accounting_integrity_failure"
+    if observation.termination_reason == "wall_clock_limit_exceeded":
+        return "wall_clock_limit_exceeded"
     if observation.termination_reason == "output_limit":
         return "output_limit_exceeded"
+    if (
+        observation.termination_evidence is not None
+        and observation.termination_evidence.phase == "termination_failed"
+    ):
+        return "process_failed"
     if confidentiality_violation_detected:
         return "process_failed"
     if permission_evidence:
@@ -1681,6 +3042,16 @@ def _status_messages(
         "succeeded": "Codex run succeeded.",
         "launch_failed": "Codex process could not be launched.",
         "timed_out": "Codex process exceeded its hard timeout.",
+        "bounded_continuation_required": (
+            "Codex reached a hard execution budget; bounded continuation requires "
+            "outer authorization."
+        ),
+        "accounting_integrity_failure": (
+            "Codex execution stopped because exact budget accounting integrity failed."
+        ),
+        "wall_clock_limit_exceeded": (
+            "Codex process exceeded its hard monotonic wall-clock limit."
+        ),
         "output_limit_exceeded": (
             f"Codex {observation.output_limit_stream or 'output'} exceeded its byte limit."
         ),

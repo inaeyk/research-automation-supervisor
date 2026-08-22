@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import py_compile
+import signal
 import subprocess
 import sys
 import tempfile
@@ -201,6 +202,129 @@ def main() -> int:
         "environment": dict(os.environ),
         "call_index": call_index,
     }
+    sibling_unit = configuration.get("attempt_sibling_systemd_unit")
+    if isinstance(sibling_unit, str):
+        try:
+            sibling = subprocess.run(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--quiet",
+                    f"--unit={sibling_unit}",
+                    "/bin/sleep",
+                    "30",
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            observation["sibling_systemd_escape"] = {
+                "returncode": sibling.returncode,
+                "stderr": sibling.stderr.decode("utf-8", errors="replace"),
+            }
+        except (OSError, subprocess.SubprocessError) as exc:
+            observation["sibling_systemd_escape"] = {
+                "returncode": None,
+                "error": type(exc).__name__,
+            }
+    if configuration.get("attempt_direct_cgroup_migration"):
+        try:
+            cgroup_line = next(
+                line
+                for line in Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
+                if line.startswith("0::")
+            )
+            current = Path("/sys/fs/cgroup") / cgroup_line.removeprefix("0::").lstrip("/")
+            (current.parent / "cgroup.procs").write_text(str(os.getpid()), encoding="ascii")
+            observation["direct_cgroup_migration"] = {"succeeded": True}
+        except (OSError, StopIteration) as exc:
+            observation["direct_cgroup_migration"] = {
+                "succeeded": False,
+                "error": type(exc).__name__,
+            }
+    outside_pid = configuration.get("attempt_proc_root_escape_pid")
+    proc_root_unit = configuration.get("proc_root_sibling_systemd_unit")
+    if isinstance(outside_pid, int) and isinstance(proc_root_unit, str):
+        outside_root = Path(f"/proc/{outside_pid}/root")
+        runtime_root = outside_root / f"run/user/{os.getuid()}"
+        escape_paths = {
+            "user_bus": runtime_root / "bus",
+            "user_systemd": runtime_root / "systemd",
+            "cgroup_root": outside_root / "sys/fs/cgroup",
+        }
+        path_access: dict[str, dict[str, object]] = {}
+        for name, path in escape_paths.items():
+            try:
+                path.stat()
+                path_access[name] = {"accessible": True}
+            except OSError as exc:
+                path_access[name] = {
+                    "accessible": False,
+                    "error": type(exc).__name__,
+                }
+        proc_root_observation: dict[str, object] = {"path_access": path_access}
+        try:
+            sibling = subprocess.run(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--quiet",
+                    "--wait",
+                    f"--unit={proc_root_unit}",
+                    "/bin/true",
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+                timeout=5,
+                env={
+                    **os.environ,
+                    "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_root / 'bus'}",
+                },
+            )
+            proc_root_observation["sibling_systemd_escape"] = {
+                "returncode": sibling.returncode,
+                "stderr": sibling.stderr.decode("utf-8", errors="replace"),
+            }
+        except (OSError, subprocess.SubprocessError) as exc:
+            proc_root_observation["sibling_systemd_escape"] = {
+                "returncode": None,
+                "error": type(exc).__name__,
+            }
+        try:
+            cgroup_line = next(
+                line
+                for line in Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
+                if line.startswith("0::")
+            )
+            current = Path(cgroup_line.removeprefix("0::"))
+            target = escape_paths["cgroup_root"] / str(current.parent).lstrip("/") / "cgroup.procs"
+            migration = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, pathlib, sys; "
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')",
+                    str(target),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=5,
+            )
+            proc_root_observation["direct_cgroup_migration"] = {
+                "succeeded": migration.returncode == 0,
+                "returncode": migration.returncode,
+                "stderr": migration.stderr.decode("utf-8", errors="replace"),
+            }
+        except (OSError, StopIteration, subprocess.SubprocessError) as exc:
+            proc_root_observation["direct_cgroup_migration"] = {
+                "succeeded": False,
+                "error": type(exc).__name__,
+            }
+        observation["proc_root_escape"] = proc_root_observation
     if configuration.get("exercise_tempfile"):
         with tempfile.TemporaryDirectory(prefix="auditor-reproducer-") as temporary:
             temporary_path = Path(temporary)
@@ -252,6 +376,13 @@ def main() -> int:
             if destination.is_file() or destination.is_symlink():
                 destination.unlink()
 
+    if configuration.get("ignore_term"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    for line in configuration.get("stdout_lines_before_sleep", []):
+        sys.stdout.buffer.write(str(line).encode("utf-8") + b"\n")
+    sys.stdout.buffer.flush()
+
     child_sleep = configuration.get("spawn_child_sleep")
     if isinstance(child_sleep, (int, float)):
         ready_path = workspace / ".fake-codex-child.ready"
@@ -267,6 +398,8 @@ def main() -> int:
                 f"pathlib.Path({str(ready_path)!r}).write_text('ready', encoding='ascii'); "
                 f"time.sleep({float(child_sleep)!r})"
             )
+        if configuration.get("child_setsid"):
+            child_source = "import os; os.setsid(); " + child_source
         child = subprocess.Popen(
             [sys.executable, "-c", child_source],
             stdin=subprocess.DEVNULL,
@@ -284,6 +417,8 @@ def main() -> int:
         if not ready_path.exists():
             print("fake child did not become ready", file=sys.stderr)
             return 70
+        if configuration.get("leader_exit_after_child_ready"):
+            return int(configuration.get("exit_code", 0))
 
     sleep_seconds = configuration.get("sleep_seconds", 0)
     if isinstance(sleep_seconds, (int, float)) and sleep_seconds:

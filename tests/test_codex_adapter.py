@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -128,6 +129,7 @@ def run_fake(
     environ: dict[str, str] | None = None,
     monotonic=time.monotonic,
     execution_budget_controller: LiveExecutionBudgetControllerV1 | None = None,
+    containment_backend: Any = None,
 ) -> CodexRunResult:
     return run_prepared_codex(
         prepared,
@@ -137,6 +139,7 @@ def run_fake(
         limits=limits or AdapterLimits(),
         monotonic=monotonic,
         execution_budget_controller=execution_budget_controller,
+        containment_backend=containment_backend,
     )
 
 
@@ -181,12 +184,11 @@ def test_optional_live_execution_budget_observer_stops_admission_without_retry(
     }
     configure(
         prepared,
-        stdout_lines=[
+        stdout_lines_before_sleep=[
             json.dumps({"thread_id": "thread-123", "type": "thread.started"}),
-            json.dumps(tool_event),
-            json.dumps(tool_event),
-            json.dumps(completed_event),
         ],
+        stdout_lines=[json.dumps(completed_event)],
+        sleep_seconds=30,
         final="completed",
     )
     controller = LiveExecutionBudgetControllerV1.start_new_turn(
@@ -202,14 +204,17 @@ def test_optional_live_execution_budget_observer_stops_admission_without_retry(
         ),
     )
 
+    from tests.test_process_enforcement import FakeContainmentBackend
+
     result = run_fake(
         prepared,
         environ=fake_environment(CODEX_HOME=str(codex_home)),
         execution_budget_controller=controller,
+        containment_backend=FakeContainmentBackend(),
     )
 
-    assert result.status == "succeeded"
-    assert result.event_count == 4
+    assert result.status == "bounded_continuation_required"
+    assert result.event_count == 1
     assert controller.outcome.decision == "bounded_continuation_required"
     assert controller.outcome.task_failure is False
     assert controller.outcome.automatic_retry_or_repair is False
