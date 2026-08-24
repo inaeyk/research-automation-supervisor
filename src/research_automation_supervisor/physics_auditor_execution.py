@@ -6,9 +6,9 @@ import fcntl
 import hashlib
 import json
 import os
-import shutil
 import signal
 import stat
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -31,6 +31,7 @@ from research_automation_supervisor.codex_models import (
     CodexRunResult,
     PreparedCodexRequest,
 )
+from research_automation_supervisor.custodian_errors import CustodianEnvironmentError
 from research_automation_supervisor.durable_state import (
     ZERO_HASH,
     atomic_write_bytes,
@@ -56,6 +57,14 @@ from research_automation_supervisor.live_shadow_isolation import (
     reset_runtime_home_contents,
     verify_projected_auditor_bubblewrap_command,
     write_backend_identity,
+)
+from research_automation_supervisor.managed_codex import (
+    ManagedCodexContract,
+    ManagedCodexHomeAuthorityContract,
+    ManagedCodexIdentity,
+    ManagedCodexSecurityError,
+    verified_managed_codex_home,
+    verify_managed_codex_installation,
 )
 from research_automation_supervisor.physics_auditor_evidence import (
     DiscoveredPhysicsAuditorEvidence,
@@ -201,6 +210,15 @@ class PhysicsAuditorCodexInvoker(Protocol):
 
 
 @dataclass(frozen=True)
+class QualifiedPhysicsAuditorCodex:
+    """Receipt-backed executable and canonical credential-home launch preparation."""
+
+    identity: ManagedCodexIdentity
+    codex_home: Path
+    environment: Mapping[str, str]
+
+
+@dataclass(frozen=True)
 class PhysicsAuditorValidationSummaryV1:
     """Read-only validation summary; it is not an action result or proof."""
 
@@ -302,6 +320,7 @@ def run_physics_auditor(
     attempt_number: int = 1,
     environ: Mapping[str, str] | None = None,
     codex_invoker: PhysicsAuditorCodexInvoker | None = None,
+    test_qualified_codex: QualifiedPhysicsAuditorCodex | None = None,
     blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
     checkpoint: Checkpoint = lambda _name: None,
     usage_campaign_id: str | None = None,
@@ -313,6 +332,10 @@ def run_physics_auditor(
     if blindness_authority is not None and codex_invoker is not None:
         raise PhysicsAuditorInputError(
             "blind benchmark certification requires the real PA-3 launch path"
+        )
+    if test_qualified_codex is not None and codex_invoker is not None:
+        raise PhysicsAuditorInputError(
+            "test managed identity cannot be combined with a scripted invoker"
         )
     prepared = _prepare_action(
         contract_path=contract_path,
@@ -343,6 +366,8 @@ def run_physics_auditor(
             current=current,
             environ=environ,
             codex_invoker=codex_invoker or _invoke_qualified_codex,
+            qualified_managed_codex=codex_invoker is None,
+            test_qualified_codex=test_qualified_codex,
             blindness_authority=blindness_authority,
             checkpoint=checkpoint,
             usage_campaign_id=usage_campaign_id,
@@ -364,6 +389,7 @@ def resume_physics_auditor(
     attempt_number: int = 1,
     environ: Mapping[str, str] | None = None,
     codex_invoker: PhysicsAuditorCodexInvoker | None = None,
+    test_qualified_codex: QualifiedPhysicsAuditorCodex | None = None,
     blindness_authority: BlindBenchmarkLaunchAuthority | None = None,
     checkpoint: Checkpoint = lambda _name: None,
     usage_campaign_id: str | None = None,
@@ -375,6 +401,10 @@ def resume_physics_auditor(
     if blindness_authority is not None and codex_invoker is not None:
         raise PhysicsAuditorInputError(
             "blind benchmark certification requires the real PA-3 launch path"
+        )
+    if test_qualified_codex is not None and codex_invoker is not None:
+        raise PhysicsAuditorInputError(
+            "test managed identity cannot be combined with a scripted invoker"
         )
     output = _existing_output_directory(output_directory)
     records = _load_records(output)
@@ -421,6 +451,8 @@ def resume_physics_auditor(
             current=current,
             environ=environ,
             codex_invoker=codex_invoker or _invoke_qualified_codex,
+            qualified_managed_codex=codex_invoker is None,
+            test_qualified_codex=test_qualified_codex,
             blindness_authority=blindness_authority,
             checkpoint=checkpoint,
             usage_campaign_id=usage_campaign_id,
@@ -627,6 +659,8 @@ def _continue_action(
     current: PhysicsAuditorActionRecordV1,
     environ: Mapping[str, str] | None,
     codex_invoker: PhysicsAuditorCodexInvoker,
+    qualified_managed_codex: bool,
+    test_qualified_codex: QualifiedPhysicsAuditorCodex | None,
     blindness_authority: BlindBenchmarkLaunchAuthority | None,
     checkpoint: Checkpoint,
     usage_campaign_id: str | None,
@@ -710,7 +744,23 @@ def _continue_action(
                 final_identity=launch_identity,
                 checkpoint=checkpoint,
             )
-        executable = _select_codex_executable(prepared.config)
+        launch_environ = environ
+        if qualified_managed_codex:
+            qualified_codex = (
+                resolve_qualified_physics_auditor_codex(
+                    prepared.config,
+                    environ=environ,
+                )
+                if test_qualified_codex is None
+                else _validate_test_qualified_physics_auditor_codex(
+                    prepared.config,
+                    test_qualified_codex,
+                )
+            )
+            executable = qualified_codex.identity.executable
+            launch_environ = qualified_codex.environment
+        else:
+            executable = _select_test_codex_executable(prepared.config)
         codex_prepared = _prepared_codex_request(
             output,
             prepared,
@@ -757,7 +807,7 @@ def _continue_action(
                     codex_executable=executable,
                     config=prepared.config,
                     output_schema=output_schema,
-                    environ=environ,
+                    environ=launch_environ,
                     process_started=process_started,
                     source_workspace=prepared.workspace,
                     oracle_evidence_root=prepared.oracle_evidence_root,
@@ -785,7 +835,7 @@ def _continue_action(
                     codex_executable=executable,
                     config=prepared.config,
                     output_schema=output_schema,
-                    environ=environ,
+                    environ=launch_environ,
                     process_started=process_started,
                     source_workspace=prepared.workspace,
                     oracle_evidence_root=prepared.oracle_evidence_root,
@@ -1866,18 +1916,110 @@ def _provider_failure(
     return "model_process_failed"
 
 
-def _select_codex_executable(config: PhysicsAuditorExecutionConfigV1) -> Path:
+def resolve_qualified_physics_auditor_codex(
+    config: PhysicsAuditorExecutionConfigV1,
+    *,
+    environ: Mapping[str, str] | None = None,
+    installation_contract: ManagedCodexContract | None = None,
+    home_contract: ManagedCodexHomeAuthorityContract | None = None,
+) -> QualifiedPhysicsAuditorCodex:
+    """Resolve qualified PA-3 only through the common protected managed identity."""
+    try:
+        identity = verify_managed_codex_installation(installation_contract)
+        codex_home = verified_managed_codex_home(home_contract)
+    except (ManagedCodexSecurityError, CustodianEnvironmentError) as exc:
+        raise PhysicsAuditorDependencyError(
+            "qualified managed Codex identity is unavailable"
+        ) from exc
+    _reject_conflicting_legacy_pin(config, identity)
+    source = os.environ if environ is None else environ
+    environment = dict(source)
+    environment.update(
+        {
+            "CODEX_HOME": str(codex_home),
+            "HOME": "/nonexistent",
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+    return QualifiedPhysicsAuditorCodex(identity, codex_home, environment)
+
+
+def build_test_qualified_physics_auditor_codex(
+    executable: Path,
+    codex_home: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> QualifiedPhysicsAuditorCodex:
+    """Build an explicit test-only pair for real-adapter namespace contract tests."""
+    try:
+        resolved = executable.resolve(strict=True)
+        status = resolved.stat()
+        home = codex_home.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise PhysicsAuditorInputError("test managed Codex pair is unavailable") from exc
+    if not resolved.is_file() or not os.access(resolved, os.X_OK) or not home.is_dir():
+        raise PhysicsAuditorInputError("test managed Codex pair is unsafe")
+    identity = ManagedCodexIdentity(
+        executable=resolved,
+        sha256=_sha256_file(resolved),
+        version="test-only",
+        release_id="test-only-explicit-dependency-seam",
+        device=status.st_dev,
+        inode=status.st_ino,
+    )
+    source = os.environ if environ is None else environ
+    environment = dict(source)
+    environment.update(
+        {
+            "CODEX_HOME": str(home),
+            "HOME": "/nonexistent",
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+    return QualifiedPhysicsAuditorCodex(identity, home, environment)
+
+
+def _validate_test_qualified_physics_auditor_codex(
+    config: PhysicsAuditorExecutionConfigV1,
+    selected: QualifiedPhysicsAuditorCodex,
+) -> QualifiedPhysicsAuditorCodex:
+    """Revalidate the explicit dependency seam immediately before a test launch."""
+    rebuilt = build_test_qualified_physics_auditor_codex(
+        selected.identity.executable,
+        selected.codex_home,
+        environ=selected.environment,
+    )
+    if rebuilt.identity.sha256 != selected.identity.sha256:
+        raise PhysicsAuditorInputError("test managed Codex executable identity changed")
+    _reject_conflicting_legacy_pin(config, rebuilt.identity)
+    return rebuilt
+
+
+def _reject_conflicting_legacy_pin(
+    config: PhysicsAuditorExecutionConfigV1,
+    identity: ManagedCodexIdentity,
+) -> None:
+    legacy = config.trusted_executable
+    if legacy is not None and (
+        legacy.path != str(identity.executable) or legacy.sha256 != identity.sha256
+    ):
+        raise PhysicsAuditorInputError(
+            "Physics Auditor executable pin conflicts with qualified managed Codex authority"
+        )
+
+
+def _select_test_codex_executable(config: PhysicsAuditorExecutionConfigV1) -> Path:
+    """Legacy selector reachable only with an explicitly injected test invoker."""
     if config.trusted_executable is not None:
         return validate_trusted_codex_executable(config.trusted_executable)
-    selected = shutil.which("codex")
-    if selected is None:
-        raise PhysicsAuditorDependencyError("Codex executable is required for audit execution")
     try:
-        resolved = Path(selected).resolve(strict=True)
+        resolved = Path(sys.executable).resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise PhysicsAuditorDependencyError("Codex executable could not be resolved") from exc
+        raise PhysicsAuditorDependencyError(
+            "test adapter executable could not be resolved"
+        ) from exc
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
-        raise PhysicsAuditorDependencyError("Codex executable is unavailable")
+        raise PhysicsAuditorDependencyError("test adapter executable is unavailable")
     return resolved
 
 

@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+umask 077
+PATH=/usr/bin:/bin
+export PATH
 
 project_root=${1:?project root is required}
 launch_mode=${2:-normal}
@@ -16,35 +19,59 @@ esac
 if [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
     exit 2
 fi
-if [ -n "$data_override" ]; then
-    data_root=$data_override
+managed_codex_helper=$project_root/scripts/prepare-managed-codex-home.py
+url=http://127.0.0.1:$port/
+core_socket=/run/research-supervisor-core/authority.sock
+
+if [ -x /usr/bin/python3 ]; then
+    system_python=/usr/bin/python3
 else
-    data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}/research-automation-supervisor
+    exit 3
 fi
+if [ ! -f "$managed_codex_helper" ]; then
+    echo "Managed Codex sign-in storage setup is unavailable." >&2
+    exit 7
+fi
+if [ -n "$acceptance_scenario" ]; then
+    if [ -z "$data_override" ]; then
+        exit 5
+    fi
+    managed_codex_home=$("$system_python" "$managed_codex_helper" \
+        acceptance-test "$data_override") || exit $?
+else
+    if [ -n "$data_override" ]; then
+        echo "Qualified application data cannot be redirected." >&2
+        exit 7
+    fi
+    if [ "$launch_mode" = first-run ]; then
+        managed_home_operation=initialize
+    else
+        managed_home_operation=verify
+    fi
+    managed_codex_home=$("$system_python" "$managed_codex_helper" \
+        "$managed_home_operation") || exit $?
+fi
+case "$managed_codex_home" in
+    */codex-home) data_root=${managed_codex_home%/codex-home} ;;
+    *) exit 7 ;;
+esac
 runtime_root=$data_root/runtime
 managed_venv=$runtime_root/venv
 backend_log=$data_root/custodian-state/backend.log
 install_stamp=$runtime_root/installed-commit
-url=http://127.0.0.1:$port/
 readiness=$data_root/custodian-state/backend-readiness.json
 evidence_root=$data_root/custodian-state/launcher-evidence
 evidence=$evidence_root/$readiness_instance.json
-core_socket=/run/research-supervisor-core/authority.sock
+managed_codex_home_id=$("$system_python" -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$managed_codex_home")
 
-mkdir -p "$runtime_root" "$data_root/custodian-state" "$evidence_root"
-chmod 700 "$data_root" "$runtime_root" "$data_root/custodian-state" "$evidence_root"
-
-if command -v python3 >/dev/null 2>&1; then
-    system_python=$(command -v python3)
-else
-    exit 3
-fi
+mkdir -p "$data_root/custodian-state" "$evidence_root"
+chmod 700 "$data_root/custodian-state" "$evidence_root"
 
 if [ ! -x "$managed_venv/bin/python" ]; then
     "$system_python" -m venv "$managed_venv"
 fi
 
-current_commit=$("$system_python" -c 'import hashlib,pathlib,sys; root=pathlib.Path(sys.argv[1]).resolve(); selected=[root/"pyproject.toml",*(root/"src").rglob("*.py"),*(root/"scripts").glob("*.sh"),*(root/"scripts").glob("*.service")]; digest=hashlib.sha256(); [(digest.update(str(path.relative_to(root)).encode()+b"\0"),digest.update(hashlib.sha256(path.read_bytes()).digest())) for path in sorted(selected) if path.is_file()]; print(digest.hexdigest())' "$project_root")
+current_commit=$("$system_python" -c 'import hashlib,pathlib,sys; root=pathlib.Path(sys.argv[1]).resolve(); selected=[root/"pyproject.toml",*(root/"src").rglob("*.py"),*(root/"scripts").glob("*.py"),*(root/"scripts").glob("*.sh"),*(root/"scripts").glob("*.service")]; digest=hashlib.sha256(); [(digest.update(str(path.relative_to(root)).encode()+b"\0"),digest.update(hashlib.sha256(path.read_bytes()).digest())) for path in sorted(selected) if path.is_file()]; print(digest.hexdigest())' "$project_root")
 installed_commit=$(sed -n '1p' "$install_stamp" 2>/dev/null || true)
 if [ "$launch_mode" = first-run ] || [ "$current_commit" != "$installed_commit" ]; then
     "$managed_venv/bin/python" -m pip install --disable-pip-version-check "$project_root" >>"$backend_log" 2>&1
@@ -54,17 +81,17 @@ if [ "$launch_mode" = first-run ] || [ "$current_commit" != "$installed_commit" 
 fi
 
 health_matches_any() {
-    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); instance=value.get("readiness_instance"); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and isinstance(instance,str) and len(instance)==64 else 1)' "$url" "$current_commit" >/dev/null 2>&1
+    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); instance=value.get("readiness_instance"); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and value.get("managed_codex_home_id")==sys.argv[3] and isinstance(instance,str) and len(instance)==64 else 1)' "$url" "$current_commit" "$managed_codex_home_id" >/dev/null 2>&1
 }
 
 health_matches_instance() {
-    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and value.get("readiness_instance")==sys.argv[3] else 1)' "$url" "$current_commit" "$readiness_instance" >/dev/null 2>&1
+    "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and value.get("readiness_instance")==sys.argv[3] and value.get("managed_codex_home_id")==sys.argv[4] else 1)' "$url" "$current_commit" "$readiness_instance" "$managed_codex_home_id" >/dev/null 2>&1
 }
 
 write_evidence() {
     reused=$1
     observed=$2
-    "$managed_venv/bin/python" -c 'import json,os,pathlib,platform,sys,tempfile; destination=pathlib.Path(sys.argv[1]); value={"schema_version":1,"launcher":"Research Supervisor.vbs","windows_execution_path":True,"wsl_backend":True,"wsl_distro":os.environ.get("WSL_DISTRO_NAME",""),"kernel":platform.release(),"backend_reused":sys.argv[2]=="true","requested_readiness_instance":sys.argv[3],"observed_readiness_instance":sys.argv[4],"qualified_commit":sys.argv[5],"url":sys.argv[6],"browser_open_delegated_to_windows_launcher":True}; descriptor,name=tempfile.mkstemp(prefix=".launcher-evidence.",dir=destination.parent); handle=os.fdopen(descriptor,"w",encoding="utf-8"); json.dump(value,handle,sort_keys=True); handle.write("\n"); handle.flush(); os.fsync(handle.fileno()); handle.close(); os.replace(name,destination); directory=os.open(destination.parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)); os.fsync(directory); os.close(directory)' "$evidence" "$reused" "$readiness_instance" "$observed" "$current_commit" "$url"
+    "$managed_venv/bin/python" -c 'import json,os,pathlib,platform,sys,tempfile; destination=pathlib.Path(sys.argv[1]); value={"schema_version":1,"launcher":"Research Supervisor.vbs","windows_execution_path":True,"wsl_backend":True,"wsl_distro":os.environ.get("WSL_DISTRO_NAME",""),"kernel":platform.release(),"backend_reused":sys.argv[2]=="true","requested_readiness_instance":sys.argv[3],"observed_readiness_instance":sys.argv[4],"qualified_commit":sys.argv[5],"url":sys.argv[6],"managed_codex_home_id":sys.argv[7],"browser_open_delegated_to_windows_launcher":True}; descriptor,name=tempfile.mkstemp(prefix=".launcher-evidence.",dir=destination.parent); handle=os.fdopen(descriptor,"w",encoding="utf-8"); json.dump(value,handle,sort_keys=True); handle.write("\n"); handle.flush(); os.fsync(handle.fileno()); handle.close(); os.replace(name,destination); directory=os.open(destination.parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)); os.fsync(directory); os.close(directory)' "$evidence" "$reused" "$readiness_instance" "$observed" "$current_commit" "$url" "$managed_codex_home_id"
 }
 
 observed_instance() {
@@ -104,7 +131,8 @@ else
         --data-dir "$data_root" --host 127.0.0.1 --port "$port" \
         --readiness-instance "$readiness_instance" --core-socket "$core_socket"
 fi
-RAS_MANAGED_RUNTIME=1 RAS_QUALIFIED_COMMIT="$current_commit" nohup "$@" \
+CODEX_HOME="$managed_codex_home" RAS_MANAGED_RUNTIME=1 \
+RAS_QUALIFIED_COMMIT="$current_commit" nohup "$@" \
     >>"$backend_log" 2>&1 </dev/null &
 
 attempt=0

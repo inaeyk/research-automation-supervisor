@@ -15,7 +15,10 @@ from pydantic import ValidationError
 
 from research_automation_supervisor.durable_state import canonical_json
 from research_automation_supervisor.errors import PhysicsBenchmarkScoringIntegrityError
-from research_automation_supervisor.physics_auditor_execution import run_physics_auditor
+from research_automation_supervisor.physics_auditor_execution import (
+    build_test_qualified_physics_auditor_codex,
+    run_physics_auditor,
+)
 from research_automation_supervisor.physics_benchmark_blindness import (
     BlindBenchmarkLaunchAuthority,
     PhysicsBlindFixtureCatalogV1,
@@ -295,6 +298,7 @@ def _run(
     (codex_home / "auth.json").write_text("{}\n", encoding="ascii")
     output = run_root / "pa3-output"
     pair = catalog.pair(case_id)
+    test_environment = {"CODEX_HOME": str(codex_home), "PATH": "/usr/bin:/bin"}
     run_physics_auditor(
         contract_path=workspace / "contract.yaml",
         execution_config_path=config,
@@ -303,7 +307,12 @@ def _run(
         oracle_evidence_root=evidence,
         output_directory=output,
         attempt_number=attempt_number,
-        environ={"CODEX_HOME": str(codex_home), "PATH": "/usr/bin:/bin"},
+        environ=test_environment,
+        test_qualified_codex=build_test_qualified_physics_auditor_codex(
+            fake,
+            codex_home,
+            environ=test_environment,
+        ),
         blindness_authority=BlindBenchmarkLaunchAuthority(
             catalog=catalog,
             pair=pair,

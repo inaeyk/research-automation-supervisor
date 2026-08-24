@@ -85,6 +85,25 @@ def test_direct_pass_uses_persistent_worker_fresh_auditor_and_equal_snapshots(
         assert human_file.read_bytes() not in artifact_bytes
 
 
+def test_worker_and_auditor_reverify_one_configured_codex_identity(
+    tmp_path: Path,
+) -> None:
+    spec, _, fake = create_workflow_tree(tmp_path)
+    verified: list[str] = []
+
+    result = run_substage(
+        spec,
+        runs_dir=tmp_path / "runs",
+        services=WorkflowServices(
+            codex_executable=str(fake),
+            codex_identity_verifier=verified.append,
+        ),
+    )
+
+    assert result.status == "completed"
+    assert verified == [str(fake.resolve()), str(fake.resolve())]
+
+
 def test_auditor_transport_failure_escalation_keeps_category_and_stderr_tail(
     tmp_path: Path,
 ) -> None:

@@ -11,21 +11,50 @@ command.
 
 On Windows with WSL available:
 
-1. An administrator performs the one-time Core Authority Service installation with
-   `scripts/install-core-authority-service.sh`, naming the ordinary operator account.
-   This creates the non-login `research-supervisor-core` identity, a service-only
-   authority store, and the authenticated local socket. No later campaign action
-   needs administrator authorization.
-2. Double-click **Research Supervisor** (`Research Supervisor.vbs`) in the qualified
+1. Outside this repository, the approved distribution authority installs the root-owned,
+   non-writable helper
+   `/usr/libexec/research-supervisor/install-protected-release`, its companion verifier,
+   and separately protected approved-release metadata. Their provenance must already be
+   established before administrator execution; a checkout cannot certify or install
+   them. Unprivileged checkout tooling may prepare only candidate data at the fixed
+   candidate location.
+2. The administrator runs only
+   `/usr/libexec/research-supervisor/install-protected-release OPERATOR`. The helper is
+   the first privileged code interpreted. It validates and copies exact opened candidate
+   bytes against the independently protected per-file approval into the fixed protected
+   release destination before any release-tree installer is executed. It then installs
+   the exact managed bytes at `/usr/bin/codex`, writes the protected exact-byte receipt,
+   and installs the Core Authority Service. The protected payloads use the approved
+   `run-protected-python.sh` boundary: a fixed `/usr/bin/python3`, `-I -B`, a minimal
+   explicit environment, the protected release root as CWD, and an absolute approved
+   Python entrypoint that selects only the protected release source plus the protected
+   system standard library and distribution site-packages. Isolated mode disables the
+   caller's user site; caller CWD, `PATH`, Python environment variables, user-site
+   packages, and startup hooks are not import or interpreter authority. No product
+   documentation supports executing source/release-tree shell code directly with
+   `sudo`. This
+   creates the non-login `research-supervisor-core` identity, service-only authority
+   store, and authenticated local socket. The operator signs out and back in once; no
+   later campaign action needs administrator authorization.
+3. Once, double-click `first-run-research-supervisor.cmd` to perform explicit canonical
+   credential-home initialization. Missing or tampered state on normal launch is never
+   recreated or mode-repaired.
+4. Double-click **Research Supervisor** (`Research Supervisor.vbs`) in the qualified
    project folder. It is a hidden-window Windows Script Host entry point; no terminal
    is opened. `first-run-research-supervisor.cmd` remains a one-time compatibility
    bootstrap only.
-3. The launcher locates the supported default WSL backend without asking for a distro name,
-   creates a managed environment below the user's local data directory, installs the
-   qualified package, waits for loopback readiness, and opens the local browser UI.
-4. Double-click **Research Supervisor** thereafter. It reuses an existing
+5. The launcher locates the supported default WSL backend without asking for a distro name,
+   verifies the passwd-derived path against the root-protected operator/home authority,
+   exports that exact path as `CODEX_HOME`, installs the qualified package, waits for
+   loopback readiness, and opens the local browser UI. Caller `CODEX_HOME`, HOME,
+   `XDG_DATA_HOME`, and production `DataRoot` cannot select another credential authority.
+6. Preview runs only fixed trusted system probes. If authentication is needed, choose
+   **Sign in**; qualified runner invokes `/usr/bin/codex login` with that exact managed
+   home and `HOME=/nonexistent`. Choose **Check Setup Again** after browser sign-in.
+7. Double-click **Research Supervisor** thereafter. It reuses an existing
    healthy backend and updates the managed installation only when the qualified source
-   commit changes.
+   commit changes. Reuse also requires the same hash-bound managed-home path; the launcher
+   does not silently switch credential authority.
 
 The scripts never switch the user's Git branch. If WSL, Python, or an OS-owned
 dependency needs administrator action, the launcher displays a Windows message and
@@ -232,13 +261,26 @@ the existing human-decision ingress.
 
 ## Environment bootstrap behavior
 
-The one-time administrator installer creates only the service identity, shared socket
-group, managed service environment, service-owned authority/snapshot roots, and systemd
-unit. The ordinary launcher creates user-owned UI data and its managed Python
-environment; it fails closed if the Core socket is absent or inaccessible. The backend
-then verifies Python/package identity, the Gitless reader, Codex
-version, Codex authentication, Bubblewrap, WSL/Linux backend, and atomic rename and
-hard-link filesystem capabilities. Preview performs only sterile identity inspection.
+The one-time product administrator installer admits only the fixed protected release
+manifest and exact opened artifact bytes. It stages/hash-checks those bytes, applies
+explicit fresh/idempotent/update rules, installs `/usr/bin/codex`, and writes a
+root-protected digest/version/release receipt; any pending or split generation fails
+closed. It then creates the service identity, shared socket group, managed service
+environment, service-owned authority/snapshot roots, systemd unit, and protected
+operator/canonical-home authority. It never uses PATH Codex, a mutable project root,
+caller hash/path authority, a downloader, or credentials. Explicit first-time setup
+creates one mode-`0700` `codex-home` and a mode-`0600`, single-link create-once binding
+at the passwd-derived canonical data root. Normal launch only verifies and never repairs
+that state. The exact path is propagated into Custodian, qualified runner,
+authentication, Worker, and Auditor processes. Credential files remain
+inside the operator-private directory, are not read or copied by Custodian, and are never
+sent to Core or the browser. The launcher fails
+closed if the Core socket is absent or inaccessible. The backend then verifies
+Python/package identity, the Gitless reader, the receipt-matched Codex bytes/version and
+protected canonical-home authentication, Bubblewrap, WSL/Linux backend, and atomic rename and
+hard-link filesystem capabilities. Preview executes only these fixed trusted probes and
+performs sterile repository identity inspection; arbitrary PATH programs are never
+executed.
 Repository intake never executes Git. Existing roots are opened component-by-component
 with no-follow flags. Under the selecting UID, Custodian serializes only HEAD, refs,
 packed refs, and object storage into an unlinked, fsynced, per-record-hashed regular-file
@@ -261,9 +303,11 @@ remain Core-owned and read-only. Post-snapshot Git receives only that workspace;
 request, bundle, manifest, or locator retains the original pathname as an operational
 input. The systemd service additionally makes `/usr/bin/git` and `/bin/git` inaccessible.
 
-Missing login, administrator permission, isolation, or filesystem capability produces
-an Action Needed card. The card states that the campaign has not started. Codex sign-in
-is launched only through the qualified runner; the Custodian does not invoke Codex.
+Missing managed Codex, managed-home binding, login, administrator permission, isolation,
+or filesystem capability produces an Action Needed card before Core creates any Start
+authority. The card states that the campaign has not started. The UI offers Sign in only
+when both the fixed executable and bound home are ready. Codex sign-in is launched only
+through the qualified runner; the Custodian does not invoke Codex.
 
 ## Recovery delegation and failure UX
 

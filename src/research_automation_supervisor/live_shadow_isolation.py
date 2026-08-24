@@ -729,16 +729,16 @@ def verify_projected_auditor_bubblewrap_command(
             "read-only",
             "--ignore-user-config",
             "--ignore-rules",
-            "--strict-config",
-            "--cd",
-            ISOLATED_WORKSPACE_PATH,
-            "--add-dir",
-            ISOLATED_AUDITOR_SCRATCH_PATH,
-            "--ephemeral",
-            "--output-schema",
-            ISOLATED_OUTPUT_SCHEMA_PATH,
-            "<PROMPT_FROM_STDIN>",
-        )
+                "--strict-config",
+                "--cd",
+                ISOLATED_WORKSPACE_PATH,
+                "--output-schema",
+                ISOLATED_OUTPUT_SCHEMA_PATH,
+                "--add-dir",
+                ISOLATED_AUDITOR_SCRATCH_PATH,
+                "--ephemeral",
+                "<PROMPT_FROM_STDIN>",
+            )
     )
     if tuple(expected) != command or any(
         item in command for item in ("--yolo", "danger-full-access")

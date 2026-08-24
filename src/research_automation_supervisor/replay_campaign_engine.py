@@ -119,6 +119,7 @@ class ReplayCampaignServices:
     """Injectable visible-campaign process boundaries for tests."""
 
     codex_executable: str | None = None
+    codex_identity_verifier: Callable[[str], None] | None = None
     supervisor_invoker: SupervisorInvoker | None = None
     workflow_services: WorkflowServices | None = None
     notification_invoker: NotificationInvoker | None = None
@@ -1478,6 +1479,8 @@ def _invoke_supervisor(
     resume_id: str | None,
 ) -> CodexRunResult:
     _assert_model_actions_open(context)
+    if context.services.codex_identity_verifier is not None:
+        context.services.codex_identity_verifier(context.codex_executable)
     runs = context.run_directory / "supervisor" / "codex"
     invoker = context.services.supervisor_invoker
     confidential = (
@@ -1765,8 +1768,17 @@ def _workflow_services(
 ) -> WorkflowServices:
     base = context.services.workflow_services or WorkflowServices(
         codex_executable=context.codex_executable,
+        codex_identity_verifier=context.services.codex_identity_verifier,
         environ=context.services.environ,
     )
+    if (
+        context.services.codex_identity_verifier is not None
+        and base.codex_identity_verifier is None
+    ):
+        base = replace(
+            base,
+            codex_identity_verifier=context.services.codex_identity_verifier,
+        )
 
     def guarded_codex_invoker(*args: Any, **kwargs: Any) -> CodexRunResult:
         _assert_model_actions_open(context)
@@ -2363,7 +2375,10 @@ def _resolve_campaign_codex(services: ReplayCampaignServices) -> str:
     if value is None and services.workflow_services is not None:
         value = services.workflow_services.codex_executable
     try:
-        return _resolve_codex_executable(value)
+        executable = _resolve_codex_executable(value)
+        if services.codex_identity_verifier is not None:
+            services.codex_identity_verifier(executable)
+        return executable
     except Exception as exc:
         raise ReplayCampaignDependencyError("Codex executable is required") from exc
 

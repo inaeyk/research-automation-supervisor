@@ -131,7 +131,7 @@ CanonicalPaths = Annotated[
 
 
 class PhysicsAuditorExecutableIdentityV1(PhysicsCanonicalModel):
-    """Optional hash-pinned trusted Codex CLI selected by the operator."""
+    """Legacy standalone pin; never executable authority for qualified execution."""
 
     path: str
     sha256: Sha256
@@ -146,7 +146,7 @@ class PhysicsAuditorExecutableIdentityV1(PhysicsCanonicalModel):
 
 
 class PhysicsAuditorExecutionConfigV1(PhysicsCanonicalModel):
-    """Strict operator-owned Codex CLI policy for one standalone audit."""
+    """Strict audit policy; executable identity is external protected authority."""
 
     schema_version: Literal[1]
     backend: Literal["codex_cli"]
@@ -709,7 +709,7 @@ def load_physics_auditor_execution_config(
 def validate_trusted_codex_executable(
     identity: PhysicsAuditorExecutableIdentityV1,
 ) -> Path:
-    """Verify an optional operator-pinned Codex executable without executing it."""
+    """Verify a legacy pin only for an explicitly injected non-production adapter."""
     path = Path(identity.path)
     try:
         absolute = Path(os.path.abspath(path))

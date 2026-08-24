@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from research_automation_supervisor.core_authority_client import CoreAuthorityClient
 from research_automation_supervisor.custodian_errors import (
+    CustodianEnvironmentError,
     QualifiedCampaignInputError,
     QualifiedCampaignStateError,
 )
@@ -49,6 +50,13 @@ from research_automation_supervisor.errors import (
     WorkflowError,
 )
 from research_automation_supervisor.gitless_repository import verify_operator_campaign_workspace
+from research_automation_supervisor.managed_codex import (
+    MANAGED_CODEX_EXECUTABLE,
+    ManagedCodexIdentity,
+    ManagedCodexSecurityError,
+    verified_managed_codex_home,
+    verify_managed_codex_installation,
+)
 from research_automation_supervisor.replay_campaign_engine import (
     ReplayCampaignServices,
     replay_campaign_status,
@@ -80,6 +88,7 @@ def start_qualified_launch(
     exchange_root: Path,
 ) -> OperatorCampaignProjectionV1:
     """Consume only core-frozen launch material, then enter unchanged PA-5C3."""
+    _verify_qualified_runtime_pair(str(MANAGED_CODEX_EXECUTABLE))
     material = core.consume_start_intent_for_qualified_launch(
         launch_intent_id,
         expected_campaign_public_id=expected_campaign_public_id,
@@ -96,9 +105,8 @@ def start_qualified_launch(
 
 def run_qualified_authentication() -> None:
     """Start the approved Codex authentication flow outside Custodian authority."""
-    executable = _trusted_system_program(Path("/usr/bin/codex"))
-    if executable is None:
-        raise QualifiedCampaignInputError("Codex is not installed in the managed environment")
+    identity = _verified_managed_codex_identity()
+    executable = identity.executable
     codex_home = _managed_codex_home()
     try:
         completed = subprocess.run(
@@ -120,46 +128,43 @@ def run_qualified_authentication() -> None:
 
 
 def _managed_codex_home() -> Path:
-    value = os.environ.get("CODEX_HOME")
-    if value is None or not Path(value).is_absolute():
-        raise QualifiedCampaignInputError("Managed Codex credential storage is unavailable")
     try:
-        path = Path(value)
-        resolved = path.resolve(strict=True)
-        status = path.lstat()
-        if (
-            path != resolved
-            or stat.S_ISLNK(status.st_mode)
-            or not stat.S_ISDIR(status.st_mode)
-            or status.st_uid != os.getuid()
-            or status.st_mode & 0o022
-        ):
-            raise OSError("unsafe Codex credential directory")
-        return resolved
-    except (OSError, RuntimeError) as exc:
+        return verified_managed_codex_home()
+    except CustodianEnvironmentError as exc:
         raise QualifiedCampaignInputError(
             "Managed Codex credential storage is unavailable"
         ) from exc
 
 
-def _trusted_system_program(path: Path) -> Path | None:
+def _verified_managed_codex_identity() -> ManagedCodexIdentity:
     try:
-        resolved = path.resolve(strict=True)
-        status = resolved.stat()
-        if (
-            not stat.S_ISREG(status.st_mode)
-            or status.st_uid != 0
-            or status.st_mode & 0o022
-            or not status.st_mode & 0o111
-        ):
-            return None
-        for parent in (resolved.parent, *resolved.parents):
-            parent_status = parent.stat()
-            if parent_status.st_uid != 0 or parent_status.st_mode & 0o022:
-                return None
-        return resolved
-    except (OSError, RuntimeError):
-        return None
+        return verify_managed_codex_installation()
+    except ManagedCodexSecurityError as exc:
+        raise QualifiedCampaignInputError(
+            "Managed Codex installation identity is unavailable"
+        ) from exc
+
+
+def _verify_qualified_runtime_pair(executable: str) -> None:
+    identity = _verified_managed_codex_identity()
+    if Path(executable) != identity.executable:
+        raise QualifiedCampaignInputError("Qualified Codex executable identity changed")
+    _managed_codex_home()
+
+
+def _qualified_replay_services(*, deterministic_token: str | None = None) -> ReplayCampaignServices:
+    identity = _verified_managed_codex_identity()
+    _managed_codex_home()
+    if deterministic_token is None:
+        return ReplayCampaignServices(
+            codex_executable=str(identity.executable),
+            codex_identity_verifier=_verify_qualified_runtime_pair,
+        )
+    return ReplayCampaignServices(
+        codex_executable=str(identity.executable),
+        codex_identity_verifier=_verify_qualified_runtime_pair,
+        token_factory=lambda: deterministic_token,
+    )
 
 
 class QualifiedCampaignLocatorV1(BaseModel):
@@ -217,7 +222,9 @@ def _start_qualified_bundle(
         )
         preparing = _preparing_projection(bundle)
         _persist_projection(authority, preparing)
-        services = ReplayCampaignServices(token_factory=lambda: bundle.bundle_sha256[:32])
+        services = _qualified_replay_services(
+            deterministic_token=bundle.bundle_sha256[:32]
+        )
         run_replay_campaign(manifest, runs_dir=authority / "runs", services=services)
         return qualified_campaign_status(
             authority_directory=authority,
@@ -343,7 +350,10 @@ def resume_qualified_campaign(
             _persist_projection(authority, projection)
             return projection
     try:
-        resume_replay_campaign(Path(locator.core_run_directory))
+        resume_replay_campaign(
+            Path(locator.core_run_directory),
+            services=_qualified_replay_services(),
+        )
     except (ReplayCampaignError, WorkflowError) as exc:
         _persist_failure(authority, exc)
     return qualified_campaign_status(authority_directory=authority, exchange_root=exchange_root)
@@ -411,7 +421,11 @@ def apply_qualified_human_response(
         decision_path,
         render_json_bytes({"schema_version": 1, "decision": decision, "note": note}),
     )
-    resume_replay_campaign(run_directory, decision_path=decision_path)
+    resume_replay_campaign(
+        run_directory,
+        decision_path=decision_path,
+        services=_qualified_replay_services(),
+    )
     return qualified_campaign_status(authority_directory=authority, exchange_root=exchange_root)
 
 

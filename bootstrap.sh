@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Developer bootstrap only. The qualified Windows/WSL product setup is the
+# administrator workflow documented in README.md; this script never installs
+# /usr/bin/codex and never prepares the product's managed CODEX_HOME.
+
 MIN_PYTHON="3.11"
 MIN_CODEX="0.144.0"
 
@@ -37,12 +41,15 @@ python -m pip install -e '.[dev]'
 
 if ! command -v codex >/dev/null 2>&1; then
   cat >&2 <<'EOF'
-Codex CLI is not installed. Install or update it with:
+Developer Codex CLI is not installed. Install or update it through your
+approved developer software process, then verify it with:
 
-  curl -fsSL https://chatgpt.com/codex/install.sh | sh
   hash -r
   codex --version
   codex login
+
+This does not satisfy the qualified Custodian setup. Do not link a user-local
+or NVM Codex into /usr/bin; use the one-time product administrator installer.
 EOF
   exit 3
 fi
@@ -71,6 +78,7 @@ Codex is not authenticated. Run:
   codex login status
 
 Choose ChatGPT sign-in rather than API-key authentication.
+This login is for developer commands only, not the qualified Custodian home.
 EOF
   exit 3
 fi

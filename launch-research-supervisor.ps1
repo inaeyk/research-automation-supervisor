@@ -58,6 +58,9 @@ try {
     $LinuxProjectRoot = Convert-ToWslPath $ProjectRoot "The trusted launcher folder"
     $LinuxDataRoot = ""
     if ($DataRoot) {
+        if (-not $AcceptanceScenario) {
+            throw "Qualified application data cannot be redirected."
+        }
         $LinuxDataRoot = Convert-ToWslPath $DataRoot "The application data folder"
     }
     $LinuxScenario = ""
@@ -67,6 +70,10 @@ try {
     $Bootstrap = "$LinuxProjectRoot/scripts/custodian-bootstrap.sh"
     $Result = @(& $WslExecutable --exec /bin/sh $Bootstrap $LinuxProjectRoot $Mode $ReadinessInstance $LinuxDataRoot $LinuxScenario $Port 2>&1)
     if ($LASTEXITCODE -ne 0) {
+        if ($LASTEXITCODE -eq 7) {
+            Show-SetupMessage "Research Supervisor storage needs attention" "What happened?`r`nThe managed Codex sign-in folder could not be prepared safely.`r`n`r`nWhat do you need from me?`r`nChoose OK and double-click Research Supervisor again. If this repeats, ask your administrator to check your WSL application-data folder.`r`n`r`nWhat happens next?`r`nNo campaign was started and no scientific state changed."
+            exit 7
+        }
         Show-SetupMessage "Research Supervisor needs attention" "What happened?`r`nResearch Supervisor could not start WSL.`r`n`r`nWhat do you need from me?`r`nChoose OK, make sure WSL is working, then double-click Research Supervisor again.`r`n`r`nWhat happens next?`r`nYour campaign remains safe. If it still does not open, ask your administrator for help.`r`nNo scientific campaign state changed."
         exit $LASTEXITCODE
     }

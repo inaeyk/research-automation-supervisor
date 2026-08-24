@@ -15,6 +15,10 @@ from research_automation_supervisor.core_authority_client import (
     UnixCoreAuthorityClient,
 )
 from research_automation_supervisor.errors import SupervisorError
+from research_automation_supervisor.managed_codex import (
+    verified_managed_codex_home,
+    verify_managed_codex_installation,
+)
 from research_automation_supervisor.qualified_campaign import (
     apply_qualified_human_response,
     export_qualified_campaign_bundle,
@@ -29,8 +33,6 @@ from research_automation_supervisor.qualified_campaign import (
 
 
 def main(argv: list[str] | None = None) -> int:
-    _seal_production_git_environment()
-    _establish_shared_workspace_umask()
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "operation",
@@ -55,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--destination", type=Path)
     try:
         args = parser.parse_args(argv)
+        _seal_production_git_environment()
+        _establish_shared_workspace_umask()
         if args.operation == "authenticate":
             run_qualified_authentication()
             _print_json({"authenticated": True})
@@ -150,11 +154,12 @@ def _establish_shared_workspace_umask() -> None:
 
 def _seal_production_git_environment() -> None:
     """Ignore host config; snapshot-local config is trusted-generated authority."""
-    preserved = {key: os.environ[key] for key in ("CODEX_HOME",) if key in os.environ}
+    verify_managed_codex_installation()
+    codex_home = verified_managed_codex_home()
     os.environ.clear()
     os.environ.update(
         {
-            **preserved,
+            "CODEX_HOME": str(codex_home),
             "PATH": "/usr/bin:/bin",
             "HOME": "/nonexistent",
             "XDG_CONFIG_HOME": "/nonexistent",

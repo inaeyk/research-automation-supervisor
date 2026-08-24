@@ -453,6 +453,7 @@ class WorkflowServices:
     """Injectable process and identity boundaries used by offline tests."""
 
     codex_executable: str | None = None
+    codex_identity_verifier: Callable[[str], None] | None = None
     codex_invoker: CodexInvoker = run_prepared_codex
     test_invoker: TestInvoker = run_test_attempt
     environ: Mapping[str, str] | None = None
@@ -1204,6 +1205,7 @@ def _handle_worker(context: _WorkflowContext) -> None:
             context.worker_schema,
         )
         try:
+            _verify_context_codex_identity(context)
             result = context.services.codex_invoker(
                 request,
                 runs_dir=stage1_parent,
@@ -1504,6 +1506,7 @@ def _handle_auditor(context: _WorkflowContext) -> None:
             context.auditor_schema,
         )
         try:
+            _verify_context_codex_identity(context)
             result = context.services.codex_invoker(
                 request,
                 runs_dir=stage1_parent,
@@ -4653,6 +4656,12 @@ def _resolve_codex_executable(value: str | None) -> str:
     if not resolved.is_file():
         raise WorkflowDependencyError("Codex executable is not a regular file")
     return str(resolved)
+
+
+def _verify_context_codex_identity(context: _WorkflowContext) -> None:
+    verifier = context.services.codex_identity_verifier
+    if verifier is not None:
+        verifier(context.codex_executable)
 
 
 def _read_json(path: Path) -> dict[str, Any]:

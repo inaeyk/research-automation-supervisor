@@ -9,7 +9,6 @@ supported campaign authority path.
 from __future__ import annotations
 
 import os
-import stat
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -21,6 +20,7 @@ from research_automation_supervisor.codex_models import (
 from research_automation_supervisor.gitless_repository import (
     verify_operator_campaign_workspace,
 )
+from research_automation_supervisor.managed_codex import verified_managed_codex_home
 
 _GATED_REQUEST_COMMANDS = frozenset({"run-codex", "validate-codex-request"})
 
@@ -105,29 +105,14 @@ def _fail_closed() -> NoReturn:
 
 def _seal_legacy_environment() -> None:
     """Remove ambient executable authority before importing the frozen CLI."""
-    preserved: dict[str, str] = {}
-    codex_home = os.environ.get("CODEX_HOME")
-    if codex_home is not None:
-        path = Path(codex_home)
-        try:
-            resolved = path.resolve(strict=True)
-            status = path.lstat()
-            if (
-                not path.is_absolute()
-                or path != resolved
-                or stat.S_ISLNK(status.st_mode)
-                or not stat.S_ISDIR(status.st_mode)
-                or status.st_uid != os.getuid()
-                or status.st_mode & 0o022
-            ):
-                raise OSError("unsafe Codex credential directory")
-            preserved["CODEX_HOME"] = str(resolved)
-        except (OSError, RuntimeError) as exc:
-            raise ValueError("managed Codex credential directory is unsafe") from exc
+    try:
+        resolved = verified_managed_codex_home()
+    except Exception as exc:
+        raise ValueError("managed Codex credential directory is unsafe") from exc
     os.environ.clear()
     os.environ.update(
         {
-            **preserved,
+            "CODEX_HOME": str(resolved),
             "PATH": "/usr/bin:/bin",
             "HOME": "/nonexistent",
             "XDG_CONFIG_HOME": "/nonexistent",

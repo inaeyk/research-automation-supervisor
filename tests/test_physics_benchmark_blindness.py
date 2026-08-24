@@ -30,6 +30,7 @@ from research_automation_supervisor.physics_auditor_execution import (
     _prepare_action,
     _prepare_projection_layout,
     _prepared_codex_request,
+    build_test_qualified_physics_auditor_codex,
     run_physics_auditor,
 )
 from research_automation_supervisor.physics_auditor_projection import (
@@ -870,6 +871,7 @@ def test_real_pa3_exec_verifies_exact_certificate_before_scripted_process_start(
         if name == "model_running":
             assert certificate_path.is_file()
 
+    test_environment = {"CODEX_HOME": str(auth_home), "PATH": "/usr/bin:/bin"}
     result = run_physics_auditor(
         contract_path=workspace / "contract.yaml",
         execution_config_path=config_path,
@@ -878,7 +880,12 @@ def test_real_pa3_exec_verifies_exact_certificate_before_scripted_process_start(
         oracle_evidence_root=evidence,
         output_directory=output,
         action_id="certified-launch-test",
-        environ={"CODEX_HOME": str(auth_home), "PATH": "/usr/bin:/bin"},
+        environ=test_environment,
+        test_qualified_codex=build_test_qualified_physics_auditor_codex(
+            fake,
+            auth_home,
+            environ=test_environment,
+        ),
         blindness_authority=BlindBenchmarkLaunchAuthority(
             catalog=catalog,
             pair=pair,

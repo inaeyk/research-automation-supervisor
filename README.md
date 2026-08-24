@@ -100,7 +100,9 @@ evaluator portable across arbitrary toolchains.
   scientific workflow in a native Windows process.
 - Python 3.11 or newer.
 - Git and a clean Git worktree for workflow execution.
-- Codex CLI 0.144.0 or newer for real Worker, Auditor, or Supervisor actions.
+- Codex CLI 0.144.0 or newer for real Worker, Auditor, or Supervisor actions. The
+  qualified Custodian product path additionally requires the administrator-installed,
+  root-owned `/usr/bin/codex`; a developer PATH installation is not substituted.
 - Project-specific compilers, libraries, or test tools required by your frozen
   acceptance commands.
 - Docker is not required. Bubblewrap is required for PA-2 Physics Oracle execution,
@@ -117,15 +119,60 @@ service.
 
 For an ordinary Windows user, no terminal or WSL distro selection is required:
 
-1. Place this qualified project folder on the Windows machine. An administrator performs
-   the one-time WSL Core Authority Service installation using
-   `scripts/install-core-authority-service.sh` for the ordinary operator account. This
-   authorization is not needed for later campaign use.
-2. Double-click **Research Supervisor** (`Research Supervisor.vbs`). The hidden-window
+1. The organization's distribution authority—not this repository—first installs the
+   privileged release helper at the fixed root-owned, non-writable
+   `/usr/libexec/research-supervisor/install-protected-release`, its companion verifier,
+   and the approved-release manifest at
+   `/usr/share/research-supervisor-release-authority/approved-release-v1.json`. Establishing
+   the provenance of those files before administrator execution is a qualification
+   prerequisite. A mutable checkout cannot install, approve, or certify this authority.
+2. An ordinary, unprivileged preparation process may place candidate release bytes at
+   `/var/tmp/research-supervisor-release-candidate`. Those bytes are data only. The
+   separately protected approval names every accepted relative path, mode, and SHA-256,
+   including the product installers, standalone Codex artifact, prebuilt wheel, and
+   offline wheelhouse. An operator manifest, self-hash, NVM/npm wrapper, or caller digest
+   has no authority.
+3. In WSL, the administrator invokes only the distribution-installed helper for the
+   ordinary operator account (replace only the account name):
+
+   ```bash
+   sudo /usr/libexec/research-supervisor/install-protected-release OPERATOR
+   ```
+
+   The helper is the first code interpreted under privilege. It safely opens the
+   untrusted candidate as data, copies the exact opened bytes into a root-owned temporary
+   tree while hashing them against the independently protected approval, verifies the
+   completed tree, atomically establishes the fixed
+   `/opt/research-supervisor-release`, records a protected receipt, and only then invokes
+   its now-protected product installer. The product installer accepts no project root,
+   artifact path, hash, destination, or network URL. No supported administrator command
+   runs an installer from a checkout. Before any privileged application import, each
+   protected payload changes to the protected release root and invokes only the fixed
+   `/usr/bin/python3` through the approved `run-protected-python.sh` launcher. That
+   launcher supplies a new minimal environment, uses Python `-I -B`, and executes the
+   absolute approved `protected-managed-codex-entry.py`; the entrypoint adds only the
+   protected release `src` ahead of the protected system standard library and
+   distribution site-packages. Isolated mode disables the caller's user site. Caller
+   CWD, `PATH`, `PYTHONPATH`, `PYTHONHOME`, startup/user-site configuration, `HOME`, and
+   other ambient Python state cannot select the interpreter or imported application. The Core
+   venv is likewise created with the fixed isolated system interpreter, and its
+   root-protected venv Python runs offline pip with isolated semantics and a minimal
+   environment. Incomplete generations fail closed and require explicit
+   distribution-authority recovery. The operator signs out and back in once so the
+   socket-group membership takes effect.
+4. Once, double-click `first-run-research-supervisor.cmd`. This explicit initialization
+   verifies the administrator-bound canonical passwd-derived application path and creates
+   its private `codex-home` plus create-once binding. Normal launch never recreates missing
+   or tampered binding state.
+5. Double-click **Research Supervisor** (`Research Supervisor.vbs`). The hidden-window
    Windows launcher finds the supported default WSL backend, creates a managed Python
-   environment, installs the local qualified package, waits for random-instance-bound
-   loopback readiness, and opens the Windows browser interface.
-3. For later use, double-click **Research Supervisor** again. An already-running
+   environment, verifies the protected exact Codex receipt and canonical home, waits for
+   random-instance-bound loopback readiness, and opens the Windows browser interface.
+6. In Preview, choose **Sign in** when requested. This launches only the exact
+   receipt-matched `/usr/bin/codex login` with the protected canonical `CODEX_HOME`; it
+   does not reuse `~/.codex`, an NVM login, an API key, another HOME, `XDG_DATA_HOME`, or
+   caller `CODEX_HOME`. Choose **Check Setup Again** after browser sign-in.
+7. For later use, double-click **Research Supervisor** again. An already-running
    healthy random-instance-bound backend is reused. The `.cmd` files remain only as
    first-run/legacy compatibility wrappers around this entry point.
 
@@ -360,8 +407,12 @@ model processes exist. See [security](docs/security.md) and the official
 
 - Approval prompts: this package uses fixed noninteractive role policy; an unexpected
   prompt usually indicates a Codex version/configuration mismatch. Run `doctor`.
-- Missing Codex: install/authenticate Codex CLI 0.144.0 or newer, or use only the
-  bundled non-model synthetic quick start.
+- Qualified Custodian missing Codex: ask an administrator to restage the approved fixed
+  release and rerun its one-time product installer. The approval manifest, not an
+  operator command-line SHA-256, names the permitted Codex identity.
+  An arbitrary PATH, NVM, npm, or user-local Codex is deliberately insufficient.
+- Developer commands missing Codex: install/authenticate a developer CLI through the
+  approved developer process, or use only the bundled non-model synthetic quick start.
 - Dirty worktree: commit/stash unrelated work or create a dedicated worktree. The
   engine intentionally rejects tracked or untracked baseline changes.
 - Acceptance-test ID mismatch: Supervisor/Auditor required-check IDs must exactly match

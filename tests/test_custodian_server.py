@@ -109,6 +109,7 @@ def test_zero_shell_http_acceptance_journey_and_progressive_disclosure(tmp_path:
         assert "invalidatePreview" in page
         assert "currentRequest.response_type==='free_text'" in page
         assert "data-signin" in page
+        assert "Check Setup Again" in page
         assert "Check or resume safely" in page
 
         preview = browser.post(

@@ -23,6 +23,8 @@ from research_automation_supervisor.errors import (
 )
 from research_automation_supervisor.physics_auditor_execution import (
     PhysicsAuditorCodexRun,
+    QualifiedPhysicsAuditorCodex,
+    build_test_qualified_physics_auditor_codex,
     resume_physics_auditor,
     run_physics_auditor,
     verify_physics_auditor_action,
@@ -130,6 +132,22 @@ def _pinned_config_for(tmp_path: Path, executable: Path) -> Path:
     path = tmp_path / "namespace-execution-config.json"
     path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
     return path
+
+
+def _test_qualified_codex(
+    tmp_path: Path,
+    executable: Path,
+    *,
+    environ: dict[str, str] | None = None,
+) -> QualifiedPhysicsAuditorCodex:
+    codex_home = tmp_path / "test-managed-codex-home"
+    codex_home.mkdir(exist_ok=True)
+    (codex_home / "auth.json").write_text("{}\n", encoding="ascii")
+    return build_test_qualified_physics_auditor_codex(
+        executable,
+        codex_home,
+        environ=environ,
+    )
 
 
 def _write_namespace_probe_codex(
@@ -338,6 +356,11 @@ def test_qualified_adapter_command_is_fresh_read_only_and_drops_outer_session(
     )
     evidence = _evidence(tmp_path, workspace)
 
+    outer_environment = {
+        **os.environ,
+        "CODEX_THREAD_ID": "outer-yolo-session",
+        "OPENAI_API_KEY": "must-not-persist",
+    }
     result = run_physics_auditor(
         contract_path=SYNTHETIC / "contract.yaml",
         execution_config_path=_pinned_fake_config(tmp_path),
@@ -345,11 +368,12 @@ def test_qualified_adapter_command_is_fresh_read_only_and_drops_outer_session(
         workspace=workspace,
         oracle_evidence_root=evidence,
         output_directory=tmp_path / "audit-output",
-        environ={
-            **os.environ,
-            "CODEX_THREAD_ID": "outer-yolo-session",
-            "OPENAI_API_KEY": "must-not-persist",
-        },
+        environ=outer_environment,
+        test_qualified_codex=_test_qualified_codex(
+            tmp_path,
+            FAKE_CODEX,
+            environ=outer_environment,
+        ),
     )
 
     assert result.routing_decision is not None
@@ -399,6 +423,13 @@ def test_production_namespace_exposes_only_projection_and_hides_host_authority(
     output = tmp_path / "audit-output"
     before = collect_physics_oracle_workspace_identity(workspace)
 
+    outer_environment = {
+        **os.environ,
+        "CODEX_THREAD_ID": "outer-yolo-session",
+        "OPENAI_API_KEY": "outer-provider-token",
+        "SSH_AUTH_SOCK": "/tmp/outer-agent",
+        "GIT_CONFIG_GLOBAL": "/tmp/outer-gitconfig",
+    }
     result = run_physics_auditor(
         contract_path=SYNTHETIC / "contract.yaml",
         execution_config_path=_pinned_config_for(tmp_path, fake),
@@ -406,13 +437,12 @@ def test_production_namespace_exposes_only_projection_and_hides_host_authority(
         workspace=workspace,
         oracle_evidence_root=evidence,
         output_directory=output,
-        environ={
-            **os.environ,
-            "CODEX_THREAD_ID": "outer-yolo-session",
-            "OPENAI_API_KEY": "outer-provider-token",
-            "SSH_AUTH_SOCK": "/tmp/outer-agent",
-            "GIT_CONFIG_GLOBAL": "/tmp/outer-gitconfig",
-        },
+        environ=outer_environment,
+        test_qualified_codex=_test_qualified_codex(
+            tmp_path,
+            fake,
+            environ=outer_environment,
+        ),
     )
 
     assert result.status == "routing_completed"
@@ -484,6 +514,7 @@ def test_missing_bubblewrap_capability_fails_closed_before_codex_process(
             workspace=workspace,
             oracle_evidence_root=evidence,
             output_directory=tmp_path / "audit-output",
+            test_qualified_codex=_test_qualified_codex(tmp_path, FAKE_CODEX),
         )
 
 
@@ -525,6 +556,7 @@ def test_model_command_naming_sealed_oracle_program_fails_closed(tmp_path: Path)
         workspace=workspace,
         oracle_evidence_root=evidence,
         output_directory=output,
+        test_qualified_codex=_test_qualified_codex(tmp_path, FAKE_CODEX),
     )
 
     assert result.status == "infrastructure_failure"

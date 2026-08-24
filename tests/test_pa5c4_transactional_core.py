@@ -15,6 +15,7 @@ import pytest
 import yaml
 from dulwich.repo import Repo
 
+import research_automation_supervisor.custodian_bootstrap as custodian_bootstrap_module
 import research_automation_supervisor.gitless_repository as gitless_repository_module
 import research_automation_supervisor.qualified_campaign as qualified_campaign_module
 import research_automation_supervisor.secure_cli as secure_cli_module
@@ -35,6 +36,10 @@ from research_automation_supervisor.gitless_repository import (
     _HttpsOnlyPoolManager,
     freeze_repository_import,
     inspect_requested_repository,
+)
+from research_automation_supervisor.managed_codex import (
+    ManagedCodexIdentity,
+    prepare_managed_codex_home,
 )
 from research_automation_supervisor.prelaunch_authority import (
     authoritative_start_count,
@@ -170,6 +175,7 @@ def test_pre_snapshot_production_path_attempts_no_process_execution(
 
 def test_pre_snapshot_bootstrap_never_executes_ambient_path_programs(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hostile = tmp_path / "hostile-path"
     hostile.mkdir()
@@ -182,13 +188,46 @@ def test_pre_snapshot_bootstrap_never_executes_ambient_path_programs(
     def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("pre-snapshot bootstrap attempted process execution")
 
+    monkeypatch.setattr(
+        custodian_bootstrap_module, "_trusted_system_executable", lambda _path: None
+    )
+    monkeypatch.setattr(
+        custodian_bootstrap_module, "_verified_managed_codex_identity", lambda: None
+    )
     report = inspect_environment(
         tmp_path / "data",
         runner=forbidden,  # type: ignore[arg-type]
         which=lambda name: str(hostile / name),
     )
     assert not report.ready
+    assert not report.codex_ready
+    assert not report.codex_authenticated
+    assert report.issues[0].code == "codex_unavailable"
     assert not marker.exists()
+
+
+def test_fake_login_runner_cannot_authenticate_without_managed_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_home = prepare_managed_codex_home(tmp_path / "data")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        custodian_bootstrap_module, "_verified_managed_codex_identity", lambda: None
+    )
+
+    def falsely_authenticated(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("injected login result must be unreachable")
+
+    report = inspect_environment(
+        tmp_path / "data",
+        runner=falsely_authenticated,  # type: ignore[arg-type]
+        which=lambda _name: "/hostile/path/codex",
+        allow_program_execution=True,
+    )
+    assert not report.ready
+    assert not report.codex_ready
+    assert not report.codex_authenticated
+    assert any(issue.code == "codex_unavailable" for issue in report.issues)
 
 
 def test_pre_snapshot_folder_picker_never_resolves_ambient_path(
@@ -214,13 +253,23 @@ def test_pre_snapshot_folder_picker_never_resolves_ambient_path(
 def test_qualified_authentication_uses_fixed_codex_and_managed_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    codex_home = prepare_managed_codex_home(tmp_path / "data")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    identity = ManagedCodexIdentity(
+        executable=Path("/usr/bin/codex"),
+        sha256="1" * 64,
+        version="0.144.0",
+        release_id="test-release",
+        device=1,
+        inode=1,
+    )
     monkeypatch.setattr(
         qualified_campaign_module,
-        "_trusted_system_program",
-        lambda _path: Path("/usr/bin/codex"),
+        "_verified_managed_codex_identity",
+        lambda: identity,
+    )
+    monkeypatch.setattr(
+        qualified_campaign_module, "_managed_codex_home", lambda: codex_home
     )
     observed: dict[str, object] = {}
 
@@ -237,6 +286,9 @@ def test_qualified_authentication_uses_fixed_codex_and_managed_home(
     assert isinstance(environment, dict)
     assert environment["CODEX_HOME"] == str(codex_home)
     assert environment["PATH"] == "/usr/bin:/bin"
+    assert qualified_campaign_module._qualified_replay_services().codex_executable == (
+        "/usr/bin/codex"
+    )
 
 
 @pytest.mark.parametrize(
@@ -299,11 +351,13 @@ def test_installed_legacy_cli_seals_path_and_cross_uid_git_ownership(
     original_environment = dict(os.environ)
     hostile = tmp_path / "hostile-bin"
     hostile.mkdir()
-    codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    codex_home = prepare_managed_codex_home(tmp_path / "data")
     try:
         monkeypatch.setenv("PATH", f"{hostile}:/usr/bin:/bin")
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setattr(
+            secure_cli_module, "verified_managed_codex_home", lambda: codex_home
+        )
         monkeypatch.setenv("OPENAI_API_KEY", "must-not-survive")
         secure_cli_module._seal_legacy_environment()
         assert os.environ == {

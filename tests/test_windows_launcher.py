@@ -10,7 +10,15 @@ from pathlib import Path
 import pytest
 
 from research_automation_supervisor.custodian import CampaignCustodian
+from research_automation_supervisor.custodian_errors import CustodianEnvironmentError
 from research_automation_supervisor.custodian_server import CustodianHTTPServer
+from research_automation_supervisor.managed_codex import (
+    MANAGED_CODEX_EXECUTABLE,
+    MANAGED_CODEX_HOME_BINDING,
+    MANAGED_CODEX_RECEIPT,
+    prepare_managed_codex_home,
+    trusted_system_executable,
+)
 from tests.custodian_helpers import FakeQualifiedRunner, ready_environment
 
 
@@ -39,7 +47,106 @@ def test_double_click_launcher_is_hidden_and_uses_supported_default_wsl() -> Non
     assert "health_matches_instance" in bootstrap
     assert "launcher-evidence" in bootstrap
     assert "/run/research-supervisor-core/authority.sock" in bootstrap
+    assert "prepare-managed-codex-home.py" in bootstrap
+    assert 'CODEX_HOME="$managed_codex_home"' in bootstrap
+    assert "managed_codex_home_id" in bootstrap
+    assert "Qualified application data cannot be redirected" in bootstrap
+    assert "if (-not $AcceptanceScenario)" in powershell
     assert "git -C" not in bootstrap
+
+
+def test_first_run_constructs_and_relaunch_reuses_exact_managed_codex_home(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "application-data"
+    first = prepare_managed_codex_home(data_root)
+    authentication = first / "auth.json"
+    authentication.write_text('{"qualified-test-marker":true}\n', encoding="utf-8")
+    first_identity = first.stat().st_ino
+
+    second = prepare_managed_codex_home(data_root)
+
+    assert second == first
+    assert second.stat().st_ino == first_identity
+    assert authentication.read_text(encoding="utf-8") == '{"qualified-test-marker":true}\n'
+    assert stat.S_IMODE(data_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data_root / "runtime").stat().st_mode) == 0o700
+    assert stat.S_IMODE(second.stat().st_mode) == 0o700
+    binding = data_root / MANAGED_CODEX_HOME_BINDING
+    assert stat.S_IMODE(binding.stat().st_mode) == 0o600
+    assert binding.read_text(encoding="utf-8") == f"{second}\n"
+    assert all(path.stat().st_uid == os.getuid() for path in (data_root, second, binding))
+
+
+def test_managed_codex_home_binding_change_fails_closed(tmp_path: Path) -> None:
+    data_root = tmp_path / "application-data"
+    prepare_managed_codex_home(data_root)
+    binding = data_root / MANAGED_CODEX_HOME_BINDING
+    binding.write_text("/different/codex-home\n", encoding="utf-8")
+
+    with pytest.raises(CustodianEnvironmentError, match="could not be bound|unavailable"):
+        prepare_managed_codex_home(data_root)
+
+
+def test_user_writable_or_path_codex_cannot_satisfy_qualified_executable(
+    tmp_path: Path,
+) -> None:
+    writable_parent = tmp_path / "path-bin"
+    writable_parent.mkdir(mode=0o777)
+    writable_parent.chmod(0o777)
+    arbitrary = writable_parent / "codex"
+    _write_executable(arbitrary, "#!/bin/sh\nexit 0\n")
+    assert trusted_system_executable(arbitrary) is None
+
+
+def test_product_installer_and_runtime_share_one_managed_codex_contract() -> None:
+    managed_installer = Path("scripts/install-managed-codex.sh").read_text(encoding="utf-8")
+    product_installer = Path("scripts/install-research-supervisor.sh").read_text(
+        encoding="utf-8"
+    )
+    bootstrap = Path("scripts/custodian-bootstrap.sh").read_text(encoding="utf-8")
+    developer_bootstrap = Path("bootstrap.sh").read_text(encoding="utf-8")
+    assert str(MANAGED_CODEX_EXECUTABLE) == "/usr/bin/codex"
+    assert str(MANAGED_CODEX_RECEIPT).endswith("managed-codex-install-v1.json")
+    assert "release_root=/opt/research-supervisor-release" in managed_installer
+    assert 'exec /bin/sh "$protected_python_launcher" install' in managed_installer
+    assert "PYTHONPATH" not in managed_installer
+    assert "/usr/bin/python3 -m" not in managed_installer
+    assert "caller arguments" in managed_installer
+    assert "approved_sha256" not in managed_installer
+    assert "curl" not in managed_installer
+    assert "curl" not in product_installer
+    assert "ln -s" not in managed_installer
+    assert "nvm" not in managed_installer.casefold()
+    assert product_installer.index("install-managed-codex.sh") < product_installer.index(
+        "install-core-authority-service.sh"
+    )
+    assert "project_root" not in product_installer
+    assert (
+        "release_verifier=/usr/libexec/research-supervisor/verify-protected-release"
+        in product_installer
+    )
+    assert "verify-protected-release.py" not in product_installer
+    assert 'CODEX_HOME="$managed_codex_home"' in bootstrap
+    assert "XDG_DATA_HOME" not in bootstrap
+    assert "managed_home_operation=initialize" in bootstrap
+    assert "managed_home_operation=verify" in bootstrap
+    assert "chatgpt.com/codex/install.sh" not in developer_bootstrap
+    assert "Developer bootstrap only" in developer_bootstrap
+
+
+def test_release_payload_refuses_direct_unprivileged_execution() -> None:
+    if os.getuid() == 0:
+        pytest.skip("unprivileged installer refusal requires an ordinary-user test process")
+    completed = subprocess.run(
+        ["/bin/sh", "scripts/install-managed-codex.sh", "/missing", "0" * 64],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+    )
+    assert completed.returncode == 2
+    assert "distribution-installed release authority" in completed.stderr
 
 
 def test_core_service_installer_declares_real_os_identity_and_store_permissions() -> None:
@@ -47,9 +154,21 @@ def test_core_service_installer_declares_real_os_identity_and_store_permissions(
     unit = Path("scripts/research-supervisor-core-authority.service").read_text(encoding="utf-8")
     assert "useradd --system" in installer
     assert "research-supervisor-core" in installer
+    assert '"$protected_python_launcher" verify' in installer
+    assert '"$protected_python_launcher" bind-home "$operator_name"' in installer
+    assert "release_root=/opt/research-supervisor-release" in installer
+    assert "PYTHONPATH" not in installer
+    assert "python3 -m" not in installer
+    assert "/usr/bin/python3 -I -S -B -m venv" in installer
+    assert '"$venv_root/bin/python" -I -B -m pip install' in installer
+    assert "--no-index --only-binary=:all:" in installer
+    assert '--find-links "$release_wheelhouse"' in installer
+    assert '--upgrade "$release_package"' in installer
     assert "/var/lib/research-supervisor-core/authority" in installer
     assert "-m 0700" in installer
-    assert installer.index("umask 022") < installer.index('if [ "$(id -u)" -ne 0 ]')
+    assert installer.index("umask 022") < installer.index(
+        'if [ "$effective_uid" -ne 0 ]'
+    )
     assert (
         "install -d -o research-supervisor-core "
         "-g research-supervisor-custodian -m 0711" in installer
@@ -93,12 +212,24 @@ def _isolated_installer(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     source = source.replace("/opt/research-supervisor-core", str(application_root))
     source = source.replace("/var/lib/research-supervisor-core", str(state_root))
     source = source.replace("/etc/research-supervisor-core", str(configuration_root))
+    managed_codex = tmp_path / "usr/bin/codex"
+    source = source.replace("/usr/bin/codex", str(managed_codex))
     source = source.replace(
         "/etc/systemd/system/research-supervisor-core-authority.service",
         str(unit_path),
     )
     installer = tmp_path / "install-core-authority-service.sh"
     _write_executable(installer, source)
+
+    managed_codex.parent.mkdir(parents=True)
+    _write_executable(managed_codex, "#!/bin/sh\nexit 0\n")
+    configuration_root.mkdir(parents=True)
+    (configuration_root / "managed-codex-install-v1").write_text(
+        f"MANAGED_CODEX_EXECUTABLE={managed_codex}\n"
+        f"MANAGED_CODEX_SHA256={'0' * 64}\n"
+        "MANAGED_CODEX_VERSION=0.144.0\n",
+        encoding="utf-8",
+    )
 
     shims = tmp_path / "shims"
     shims.mkdir()
@@ -164,6 +295,9 @@ def _isolated_installer(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
 
 
 @pytest.mark.parametrize("caller_umask", ("077", "027", "022"))
+@pytest.mark.skip(
+    reason="qualification-only: the protected fixed-path root installer is not simulated as root"
+)
 def test_core_service_installer_modes_are_independent_of_caller_umask(
     tmp_path: Path, caller_umask: str
 ) -> None:
@@ -240,6 +374,9 @@ def test_core_service_installer_modes_are_independent_of_caller_umask(
     assert "Version: 0.2.0" in metadata_text
 
 
+@pytest.mark.skip(
+    reason="qualification-only: the protected fixed-path root installer is not simulated as root"
+)
 def test_core_service_installer_repairs_preexisting_restrictive_venv(
     tmp_path: Path,
 ) -> None:

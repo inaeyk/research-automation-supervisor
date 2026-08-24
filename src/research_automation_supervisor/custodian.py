@@ -59,6 +59,7 @@ from research_automation_supervisor.custodian_models import (
     OperatorCampaignProjectionV1,
 )
 from research_automation_supervisor.durable_state import atomic_write_json, render_json_bytes
+from research_automation_supervisor.managed_codex import verified_managed_codex_home
 
 MAX_WIZARD_BODY_BYTES = 64 * 1024 * 1024
 _START_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{15,79}$")
@@ -475,10 +476,24 @@ class CampaignCustodian:
 
     def sign_in(self) -> int:
         """Launch authentication only through the qualified runner boundary."""
+        environment = self.environment()
+        prerequisite = next(
+            (
+                issue
+                for issue in environment.issues
+                if issue.code in {"codex_unavailable", "managed_codex_home_unavailable"}
+            ),
+            None,
+        )
+        if prerequisite is not None:
+            raise CustodianEnvironmentError(
+                f"{prerequisite.title}: {prerequisite.message}"
+            )
         return self.runner.launch_authentication(self.runner_logs / "authentication.log")
 
     def preview(self, submission: WizardSubmissionV1) -> CampaignPreviewV1:
         _validate_submission_text(submission)
+        environment = self.environment(snapshot_complete=True)
         repository = self.core.inspect_repository(
             submission.repository_kind,
             submission.repository_locator,
@@ -505,7 +520,7 @@ class CampaignCustodian:
             supporting_file_count=len(submission.supporting_files),
             profile_summary=_profile_summary(submission.requested_settings),
             editable_areas_summary=", ".join(submission.requested_settings.editable_areas),
-            environment=self.environment(),
+            environment=environment,
         )
 
     def start(self, preview_id: str, *, client_start_key: str) -> CustodianCampaignRecordV1:
@@ -517,6 +532,10 @@ class CampaignCustodian:
             raise CustodianInputError("Start request identity is invalid.")
         key_digest = hashlib.sha256(client_start_key.encode("ascii")).hexdigest()
         draft = self._load_preview(preview_id)
+        environment = self.environment(snapshot_complete=True)
+        if not environment.ready:
+            first = environment.issues[0]
+            raise CustodianEnvironmentError(f"{first.title}: {first.message}")
         launch_request = CampaignLaunchRequestV1(
             preview_id=preview_id,
             client_start_key_sha256=key_digest,
@@ -573,16 +592,6 @@ class CampaignCustodian:
             projection=projection,
         )
         self._persist_record(record)
-        environment = self.environment(snapshot_complete=True)
-        if not environment.ready:
-            blocked = record.model_copy(
-                update={
-                    "projection": _environment_blocked_projection(intent, environment),
-                    "runner_operation": "start",
-                }
-            )
-            self._persist_record(blocked)
-            return blocked
         pid = self.runner.launch_start(
             reference.launch_intent_id,
             campaign_id,
@@ -633,6 +642,10 @@ class CampaignCustodian:
         response_text: str,
         uploads: Sequence[tuple[str, bytes]] = (),
     ) -> CustodianCampaignRecordV1:
+        environment = self.environment(snapshot_complete=True)
+        if not environment.ready:
+            first = environment.issues[0]
+            raise CustodianEnvironmentError(f"{first.title}: {first.message}")
         record = self.get_record(campaign_public_id, refresh=True)
         request = self.request(campaign_public_id)
         if record.projection.active_request_sha256 != request.request_sha256:
@@ -1144,10 +1157,10 @@ def _pid_active(pid: int | None) -> bool:
 
 
 def _runner_environment() -> dict[str, str]:
+    codex_home = verified_managed_codex_home()
     allowed = {
         "PATH",
         "HOME",
-        "CODEX_HOME",
         "USER",
         "LOGNAME",
         "LANG",
@@ -1155,7 +1168,6 @@ def _runner_environment() -> dict[str, str]:
         "SHELL",
         "TMPDIR",
         "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
         "VIRTUAL_ENV",
         "WSL_DISTRO_NAME",
@@ -1164,6 +1176,7 @@ def _runner_environment() -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items() if key in allowed}
     environment.update(
         {
+            "CODEX_HOME": str(codex_home),
             "PATH": "/usr/bin:/bin",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": "/dev/null",

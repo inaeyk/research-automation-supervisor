@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import research_automation_supervisor.custodian_bootstrap as custodian_bootstrap_module
 import research_automation_supervisor.qualified_runner as qualified_runner_module
 from research_automation_supervisor.custodian import (
     CampaignCustodian,
@@ -15,7 +16,10 @@ from research_automation_supervisor.custodian import (
     WizardSubmissionV1,
     _runner_environment,
 )
-from research_automation_supervisor.custodian_errors import CustodianStateError
+from research_automation_supervisor.custodian_errors import (
+    CustodianEnvironmentError,
+    CustodianStateError,
+)
 from research_automation_supervisor.custodian_exchange import (
     prepare_operator_exchange,
     publish_human_action_request,
@@ -24,10 +28,10 @@ from research_automation_supervisor.custodian_models import (
     DurableStateAuthorityV1,
     EnvironmentIssueV1,
     EnvironmentReportV1,
-    FrozenInputFileV1,
     HumanActionOptionV1,
     HumanActionRequestV1,
 )
+from research_automation_supervisor.managed_codex import prepare_managed_codex_home
 from tests.custodian_helpers import (
     FakeQualifiedRunner,
     create_repository,
@@ -50,6 +54,28 @@ def submission(repository: Path) -> WizardSubmissionV1:
 def token_factory() -> object:
     values = iter(("a" * 24, "b" * 24, "c" * 24, "d" * 24))
     return lambda: next(values)
+
+
+def unavailable_environment() -> EnvironmentReportV1:
+    issue = EnvironmentIssueV1(
+        code="codex_unavailable",
+        title="Codex identity changed",
+        message="The campaign remains paused.",
+        action="request_admin",
+        campaign_not_started=True,
+    )
+    return EnvironmentReportV1(
+        ready=False,
+        backend="wsl",
+        managed_python_ready=True,
+        supervisor_package_ready=True,
+        git_ready=True,
+        codex_ready=False,
+        codex_authenticated=False,
+        isolation_ready=True,
+        filesystem_ready=True,
+        issues=(issue,),
+    )
 
 
 def _intent_object_path(authority: Path, intent_id: str) -> Path:
@@ -134,6 +160,11 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
     runner.current = projection(campaign_id, status="blocked")
     blocked = custodian.get_record(campaign_id, refresh=True)
     assert blocked.projection.status == "blocked"
+    custodian.environment_inspector = lambda _path: unavailable_environment()
+    still_blocked = custodian.continue_campaign(campaign_id)
+    assert still_blocked.projection.status == "blocked"
+    assert runner.resumed == 0
+    custodian.environment_inspector = lambda _path: ready_environment()
     custodian.continue_campaign(campaign_id)
     assert runner.resumed == 1
 
@@ -148,6 +179,15 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
     needs_input = custodian.get_record(campaign_id, refresh=True)
     assert needs_input.projection.status == "needs_input"
     assert custodian.request(campaign_id) == issued
+    custodian.environment_inspector = lambda _path: unavailable_environment()
+    with pytest.raises(CustodianEnvironmentError, match="Codex identity changed"):
+        custodian.respond(
+            campaign_id,
+            selected_option_id="continue_existing",
+            response_text="This response must not launch while setup is unsafe.",
+        )
+    assert runner.responded == 0
+    custodian.environment_inspector = lambda _path: ready_environment()
     custodian.respond(
         campaign_id,
         selected_option_id="continue_existing",
@@ -168,7 +208,7 @@ def test_zero_shell_service_journey_duplicate_start_restart_and_notifications(
     assert restarted.get_record(campaign_id, refresh=True).projection.status == "completed"
 
 
-def test_environment_blocked_start_remains_actionable_after_custodian_restart(
+def test_environment_blocked_start_fails_before_core_start_authority(
     tmp_path: Path,
 ) -> None:
     repository = create_repository(tmp_path)
@@ -204,21 +244,24 @@ def test_environment_blocked_start_remains_actionable_after_custodian_restart(
         tmp_path / "data",
         runner=runner,
         environment_inspector=environment,
-        token_factory=token_factory(),
+        token_factory=lambda: "e" * 24,
     )
     preview = custodian.preview(submission(repository))
-    blocked = custodian.start(preview.preview_id, client_start_key="start_restart_block")
-    assert blocked.projection.status == "blocked"
+    with pytest.raises(CustodianEnvironmentError, match="Setup needs attention"):
+        custodian.start(preview.preview_id, client_start_key="start_restart_block")
+    assert runner.core_root is not None
+    assert not runner.core_root.exists()
+    assert runner.started == 0
     restarted = CampaignCustodian(
         tmp_path / "data",
         runner=runner,
         environment_inspector=environment,
         token_factory=token_factory(),
     )
-    recovered = restarted.get_record(blocked.campaign_public_id, refresh=True)
-    assert recovered.projection.status == "blocked"
-    assert recovered.projection.action_title == "Setup needs attention"
-    assert recovered.runner_operation == "start"
+    second_preview = restarted.preview(submission(repository))
+    with pytest.raises(CustodianEnvironmentError, match="Setup needs attention"):
+        restarted.start(second_preview.preview_id, client_start_key="start_restart_again")
+    assert runner.core_root is not None and not runner.core_root.exists()
 
 
 def test_setup_failure_is_plain_language_and_does_not_launch_core(tmp_path: Path) -> None:
@@ -250,13 +293,46 @@ def test_setup_failure_is_plain_language_and_does_not_launch_core(tmp_path: Path
         token_factory=token_factory(),  # type: ignore[arg-type]
     )
     preview = custodian.preview(submission(repository))
-    record = custodian.start(preview.preview_id, client_start_key="start_abcdefghijklmnop")
-    assert record.projection.status == "blocked"
-    assert record.projection.action_title == "Codex needs authentication"
+    with pytest.raises(CustodianEnvironmentError, match="Codex needs authentication"):
+        custodian.start(preview.preview_id, client_start_key="start_abcdefghijklmnop")
     assert runner.started == 0
-    assert not Path(record.qualified_campaign_directory).exists()
+    assert runner.core_root is not None
+    assert not runner.core_root.exists()
     assert custodian.sign_in() == 910_004
     assert runner.authenticated == 1
+
+
+def test_missing_managed_codex_is_action_needed_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = create_repository(tmp_path)
+    data_root = tmp_path / "data"
+    codex_home = prepare_managed_codex_home(data_root)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("RAS_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr(
+        custodian_bootstrap_module, "_verified_managed_codex_identity", lambda: None
+    )
+    monkeypatch.setattr(
+        custodian_bootstrap_module, "verified_managed_codex_home", lambda: codex_home
+    )
+    runner = FakeQualifiedRunner()
+    custodian = CampaignCustodian(
+        data_root,
+        runner=runner,
+        token_factory=token_factory(),  # type: ignore[arg-type]
+    )
+
+    preview = custodian.preview(submission(repository))
+
+    assert not preview.environment.ready
+    issue = next(item for item in preview.environment.issues if item.code == "codex_unavailable")
+    assert issue.action == "request_admin"
+    assert issue.campaign_not_started
+    with pytest.raises(CustodianEnvironmentError, match="Codex needs setup"):
+        custodian.start(preview.preview_id, client_start_key="start_missing_codex")
+    assert runner.started == 0
+    assert runner.core_root is not None and not runner.core_root.exists()
 
 
 def test_custodian_source_has_no_campaign_authority_or_direct_model_surface() -> None:
@@ -285,13 +361,18 @@ def test_custodian_source_has_no_campaign_authority_or_direct_model_surface() ->
 
 
 def test_runner_environment_does_not_leak_unapproved_environment(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SCORER_ONLY_SECRET", "hidden")
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setenv("PATH", os.environ["PATH"])
-    codex_home = Path("/managed/codex-home")
+    codex_home = prepare_managed_codex_home(tmp_path / "data")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "research_automation_supervisor.custodian.verified_managed_codex_home",
+        lambda: codex_home,
+    )
     environment = _runner_environment()
     assert "SCORER_ONLY_SECRET" not in environment
     assert "OPENAI_API_KEY" not in environment
@@ -316,9 +397,12 @@ def test_qualified_runner_main_establishes_group_cooperative_workspace_umask(
 def test_authentication_runner_preserves_only_managed_codex_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    codex_home = prepare_managed_codex_home(tmp_path / "data")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "research_automation_supervisor.custodian.verified_managed_codex_home",
+        lambda: codex_home,
+    )
     observed: dict[str, object] = {}
 
     class Process:
@@ -375,7 +459,9 @@ def test_replaced_campaign_record_is_reconstructed_from_core(tmp_path: Path) -> 
     assert not record_path.is_symlink()
 
 
-def test_frozen_authority_substitution_before_launch_fails_closed(tmp_path: Path) -> None:
+def test_missing_prerequisite_cannot_create_authority_for_later_substitution(
+    tmp_path: Path,
+) -> None:
     repository = create_repository(tmp_path)
     runner = FakeQualifiedRunner()
     issue = EnvironmentIssueV1(
@@ -404,17 +490,10 @@ def test_frozen_authority_substitution_before_launch_fails_closed(tmp_path: Path
         token_factory=token_factory(),  # type: ignore[arg-type]
     )
     preview = custodian.preview(submission(repository))
-    record = custodian.start(preview.preview_id, client_start_key="start_abcdefghijklmnop")
+    with pytest.raises(CustodianEnvironmentError, match="Codex needs authentication"):
+        custodian.start(preview.preview_id, client_start_key="start_abcdefghijklmnop")
     assert runner.core_root is not None
-    object_path = _intent_object_path(runner.core_root, record.launch_intent_id)
-    altered = json.loads(object_path.read_text(encoding="utf-8"))
-    altered["research_contract"] = FrozenInputFileV1.from_bytes(
-        "contract.md", b"altered contract\n"
-    ).model_dump(mode="json")
-    object_path.unlink()
-    object_path.write_text(json.dumps(altered), encoding="utf-8")
-    with pytest.raises(CustodianStateError, match="Core campaign authority"):
-        custodian.continue_campaign(record.campaign_public_id)
+    assert not runner.core_root.exists()
     assert runner.started == 0
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,14 @@ from research_automation_supervisor.doctor import (
     _check_codex,
     subprocess_runner,
 )
+from research_automation_supervisor.managed_codex import (
+    ManagedCodexIdentity,
+    ManagedCodexSecurityError,
+    managed_codex_home_for_data_root,
+    trusted_system_executable,
+    verified_managed_codex_home,
+    verify_managed_codex_installation,
+)
 
 
 def inspect_environment(
@@ -31,25 +40,33 @@ def inspect_environment(
     allow_program_execution: bool = False,
 ) -> EnvironmentReportV1:
     """Create safe local directories and inspect every required launch capability."""
+    del which  # Qualified readiness never resolves executable authority from PATH.
     root = _prepare_data_root(data_root)
     # The public ``git_ready`` field is retained for schema compatibility.  Its
     # implementation is the imported Dulwich object reader, not a Git probe.
-    trusted_codex = _trusted_system_executable(Path("/usr/bin/codex"))
-    codex_path = (
-        str(trusted_codex)
-        if allow_program_execution and trusted_codex is not None
-        else (None if allow_program_execution else which("codex"))
-    )
+    trusted_codex = _verified_managed_codex_identity()
+    codex_path = str(trusted_codex.executable) if trusted_codex is not None else None
     codex = (
         _check_codex(runner, codex_path)
-        if allow_program_execution
+        if allow_program_execution and codex_path is not None
         else None
     )
+    expected_codex_home = managed_codex_home_for_data_root(root)
+    try:
+        managed_codex_home_ready = (
+            verified_managed_codex_home() == expected_codex_home
+        )
+    except CustodianEnvironmentError:
+        managed_codex_home_ready = False
     managed_python = sys.prefix != sys.base_prefix or os.environ.get("RAS_MANAGED_RUNTIME") == "1"
     package_ready = bool(__version__)
     git_ready = True
     codex_ready = codex_path is not None if codex is None else (
-        codex.present and codex.supported and codex.error is None
+        codex.present
+        and codex.supported
+        and codex.error is None
+        and trusted_codex is not None
+        and codex.version == trusted_codex.version
     )
     authenticated = False if codex is None else codex.authenticated is True
     bwrap = _trusted_system_executable(Path("/usr/bin/bwrap"))
@@ -98,7 +115,23 @@ def inspect_environment(
             EnvironmentIssueV1(
                 code="codex_unavailable",
                 title="Codex needs setup",
-                message="Install or update Codex through your approved software process.",
+                message=(
+                    "Ask your administrator to run the one-time Research Supervisor setup "
+                    "with an approved Codex artifact. The campaign has not started."
+                ),
+                action="request_admin",
+                campaign_not_started=True,
+            )
+        )
+    elif not managed_codex_home_ready:
+        issues.append(
+            EnvironmentIssueV1(
+                code="managed_codex_home_unavailable",
+                title="Managed Codex sign-in storage needs setup",
+                message=(
+                    "Close Research Supervisor and double-click it again. If this persists, "
+                    "ask your administrator for help. The campaign has not started."
+                ),
                 action="install_dependency",
                 campaign_not_started=True,
             )
@@ -146,6 +179,7 @@ def inspect_environment(
                 package_ready,
                 git_ready,
                 codex_ready,
+                managed_codex_home_ready,
                 authenticated,
                 isolation_ready,
                 filesystem_ready,
@@ -207,35 +241,29 @@ def _bubblewrap_ready(executable: str | None) -> bool:
 
 
 def _trusted_system_executable(path: Path) -> Path | None:
-    """Accept only a root-owned, non-writable absolute system program."""
+    """Compatibility wrapper around the shared qualified executable contract."""
+    return trusted_system_executable(path)
+
+
+def _verified_managed_codex_identity() -> ManagedCodexIdentity | None:
+    """Compatibility seam around the one installation identity verifier."""
     try:
-        resolved = path.resolve(strict=True)
-        status = resolved.stat()
-        if (
-            not resolved.is_file()
-            or status.st_uid != 0
-            or status.st_mode & 0o022
-            or not status.st_mode & 0o111
-        ):
-            return None
-        for parent in (resolved.parent, *resolved.parents):
-            parent_status = parent.stat()
-            if parent_status.st_uid != 0 or parent_status.st_mode & 0o022:
-                return None
-        return resolved
-    except (OSError, RuntimeError):
+        return verify_managed_codex_installation()
+    except ManagedCodexSecurityError:
         return None
 
 
 def _prepare_data_root(path: Path) -> Path:
     try:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        absolute = Path(os.path.abspath(path))
-        resolved = path.resolve(strict=True)
+        resolved = Path(os.path.abspath(path))
+        if resolved != path.resolve(strict=True) or path.is_symlink():
+            raise OSError("application data resolves elsewhere")
+        status = path.lstat()
+        if status.st_uid != os.getuid() or stat.S_IMODE(status.st_mode) != 0o700:
+            raise OSError("application data metadata is unsafe")
     except (OSError, RuntimeError, ValueError) as exc:
-        raise CustodianEnvironmentError("Campaign storage could not be prepared.") from exc
-    if absolute != resolved or resolved.is_symlink() or not resolved.is_dir():
-        raise CustodianEnvironmentError("Campaign storage must be a local regular directory.")
+        raise CustodianEnvironmentError("Application data is unsafe.") from exc
     for name in (
         "custodian-state",
         "operator-exchange",
