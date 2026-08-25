@@ -266,7 +266,7 @@ def _protected_release_layout(tmp_path: Path) -> ProtectedReleaseLayout:
                 b"\x7fELF-protected-code-mode-host-v1",
                 0o755,
             ),
-            "artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl": (
+            "artifacts/research_automation_supervisor-0.3.0-py3-none-any.whl": (
                 b"test-product-wheel\n",
                 0o644,
             ),

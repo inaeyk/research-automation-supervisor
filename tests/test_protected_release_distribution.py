@@ -397,7 +397,7 @@ def test_complete_candidate_manifest_and_bootstrap_authority_are_exact(
     expected_candidate_files = {
         "artifacts/codex",
         "artifacts/codex-code-mode-host",
-        "artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl",
+        "artifacts/research_automation_supervisor-0.3.0-py3-none-any.whl",
         "managed-codex-approval-v1.json",
         "scripts/install-research-supervisor.sh",
         "scripts/install-managed-codex.sh",
@@ -429,7 +429,7 @@ def test_complete_candidate_manifest_and_bootstrap_authority_are_exact(
 
     product_wheel = (
         prepared.candidate_root
-        / "artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl"
+        / "artifacts/research_automation_supervisor-0.3.0-py3-none-any.whl"
     )
     with zipfile.ZipFile(product_wheel) as archive:
         names = set(archive.namelist())

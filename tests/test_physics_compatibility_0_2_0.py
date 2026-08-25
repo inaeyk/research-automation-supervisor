@@ -280,7 +280,7 @@ def test_ordinary_0_2_0_workflow_transition_sequence_is_unchanged(
     assert actual == _json("ordinary_transition_sequence.json")
 
 
-def test_existing_cli_version_and_nonphysics_validation_remain_unchanged(
+def test_current_cli_version_and_nonphysics_validation_are_available(
     tmp_path: Path,
 ) -> None:
     specification, _, _ = create_workflow_tree(tmp_path)
@@ -288,9 +288,9 @@ def test_existing_cli_version_and_nonphysics_validation_remain_unchanged(
     version = RUNNER.invoke(app, ["--version"])
     validation = RUNNER.invoke(app, ["validate-substage", str(specification), "--json"])
 
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.3.0"
     assert version.exit_code == 0
-    assert version.stdout == "0.2.0\n"
+    assert version.stdout == "0.3.0\n"
     assert validation.exit_code == 0
     payload = json.loads(validation.stdout)
     assert payload["substage_id"] == "minimal-substage"

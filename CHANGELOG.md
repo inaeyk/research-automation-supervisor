@@ -1,88 +1,22 @@
 # Changelog
 
-## Unreleased — PA-5C4-U
-
-- Qualify the real zero-shell Windows operator journey with the production VBS →
-  PowerShell → WSL → browser → Custodian → Core seams, actual default-browser opening,
-  full browser and Custodian process restarts, the real WSL failure dialog, visible
-  completion notification, Human Action evidence/choice/note/file response, final
-  reports, and bundle export. Add strict self-hashed `UXAcceptanceEvidenceV1` candidate,
-  process, transcript, screenshot, notification, and export bindings.
-- Keep an environment-blocked Start actionable across a Custodian restart and make
-  every pause answer what happened, what the operator must do, and what happens next.
-
-- Add a low-privilege Campaign Custodian with a loopback-only progressive-disclosure
-  browser UI, strict self-hashed campaign bundles, create-once operator exchange,
-  qualified human-response ingress, verified result/export projection, browser
-  notifications, automatic repository worktrees, managed-environment diagnostics,
-  and double-click Windows/WSL launchers.
-- Keep campaign creation, PA-5A recovery, human decision application, durable status
-  verification, and completion authority behind a process-isolated qualified-runner
-  allowlist. Existing PA-5A/PA-5C1/PA-5C2/PA-5C3 scientific and review code is
-  unchanged.
-- Close Custodian Start authority with a dedicated-identity Core Authority Service,
-  strict authenticated Unix-socket schemas, full-request atomic single assignment,
-  SQLite WAL/FULL transaction authority, descriptor-bound Dulwich repository import,
-  absent/building/complete snapshot transactions, database-based card reconstruction,
-  complete Git-callsite inventory, and immutable launch-intent-only runner ingress.
-  Neither Custodian nor Core can execute Git before snapshot completion; the installed
-  CLI gates retained legacy Git diagnostics on a Core-signed Ed25519 workspace binding.
-  Binding verification needs no operator access to the private snapshot/object store, and
-  committed-Start retries query Core before touching the original repository. The installed
-  runner still rejects arbitrary `start --bundle` pathnames. Private operator repositories
-  cross the UID boundary as hashed, unlinked regular-file transfers; HTTPS redirects are
-  denied, and derived Git control metadata remains Core-owned read-only.
-- Preserve service `RestrictSUIDSGID` hardening while delegating mutable workspaces through
-  an installer-provisioned Core/shared-group SGID anchor and a qualified-runner umask of
-  0007. Upgrade installs explicitly restart the service so installed bytes and source
-  qualification cannot diverge.
-
 All notable user-facing changes are recorded here. This project follows semantic
 versioning while it remains pre-1.0.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-24
+
 ### Added
 
-- Physics Auditor PA-1 model-free foundations: strict standalone version-1 physics
-  task contracts and untrusted audit reports, closed evidence references, canonical
-  serialization/hashes, and an authoritative pure deterministic verdict router.
-- Read-only `validate-physics-contract` and `validate-physics-audit` commands. No
-  Physics Auditor model execution or workflow integration is available yet.
-- Public synthetic physics fixtures plus frozen 0.2.0 compatibility fixtures for
-  persisted models, journals, service injection, schemas, hashes, transitions, and
-  existing CLI behavior.
-- Physics Auditor PA-2 model-free oracle execution: strict operator-owned catalogs,
-  fixed hash-pinned Python intents, shell-free bounded execution, credential-free
-  environments, fail-closed Bubblewrap network namespaces, read-only Git workspaces,
-  scratch manifests, canonical completion proofs, and isolated deterministic recovery.
-- Model-free `run-physics-oracle` developer/qualification command. Physics Auditor
-  model execution and normal-workflow integration still do not exist.
-- PA-5C1 blind benchmark-fixture preparation with physically separate
-  auditor-visible and scorer-only roots, paired neutral synthetic fixtures, exact GL
-  source-blob verification, generic raw-measurement oracles, pre-launch blindness
-  certificates, and detached exact-manifest human-review authority. This stage does
-  not run a Physics Auditor benchmark or GL pilot.
-- PA-5C1-T closes the technical blindness boundary with bytes-only, subject-neutral
-  Bubblewrap execution for generic raw oracles and an exact PA-3 launch manifest that
-  is embedded in the blindness certificate and reconstructed immediately before exec.
-- PA-5C2 exact benchmark scoring with a self-hashed expected-run manifest, exact
-  expected/observed identity-set equality, independent PA-2/PA-3 and blindness-proof
-  re-verification, complete PA-5C1 launch-certificate binding, certified scorer-root
-  catalog/receipt resolution, proof-to-report semantic binding, and separate category,
-  severity, route, evidence, clean-case, malformed-report, and infrastructure metrics.
-- Physics Oracle Git diff inspection now uses a private copy of the sealed Git index,
-  preventing read-only Git from refreshing authoritative `.git/index` stat-cache bytes
-  while retaining raw-index and staged-manifest checks before and after collection.
-
-### Preserved
-
-- Package version 0.2.0, schema-version-1 ordinary workflow/campaign behavior,
-  Codex-specific persisted action proof, existing journal semantic forms, and the
-  authoritative historical campaign record remain unchanged.
-- Physics Auditor benchmark orchestration, real model sessions, and PA-1 through
-  PA-5A semantics remain unchanged. PA-5C2 adds scoring only; PA-5C1 fixture, receipt,
-  blindness, oracle-isolation, and launch authority are unchanged.
+- Zero-shell Windows/WSL Custodian workflow from double-click launch through verified
+  results and export.
+- Protected managed Codex installation with one canonical `CODEX_HOME`.
+- Persistent Worker plus fresh, independent Auditor workflow.
+- Systemd/cgroup containment with bounded, fail-closed recovery.
+- Exact authoritative token-usage accounting from runtime completion receipts.
+- Protected-release/bootstrap installation with offline, hash-bound artifacts.
+- Verified fresh R0 end-to-end completion across the qualified production path.
 
 ## [0.2.0] - 2026-07-31
 

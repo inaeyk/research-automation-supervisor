@@ -51,7 +51,7 @@ _MANDATORY_RELEASE_FILES = frozenset(
     {
         PurePosixPath("artifacts/codex"),
         PurePosixPath(
-            "artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl"
+            "artifacts/research_automation_supervisor-0.3.0-py3-none-any.whl"
         ),
         PurePosixPath("managed-codex-approval-v1.json"),
         PurePosixPath("scripts/install-research-supervisor.sh"),

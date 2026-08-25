@@ -75,8 +75,9 @@ report](docs/validation/physics_auditor_pa4.md).
 
 ## Current status
 
-Version `0.2.0` is the first package-ready release. The deterministic workflow and
-visible-only campaign/candidate split are qualified. The completed
+Version `0.3.0` is the initial post-R0 release. The zero-shell Custodian workflow,
+protected managed Codex installation, contained Worker/Auditor execution, bounded
+recovery, and exact usage accounting are qualified. The completed
 `gl-five-visible-campaign-v1` candidate passed the original historical functional
 replay for all five tasks: hidden acceptance 5/5, visible acceptance 5/5, and
 changed-path scope 5/5. Exact historical identity was 0/5.
@@ -218,7 +219,7 @@ python3 -m venv ".venv"
 Wheel installation after a local build:
 
 ```bash
-python3 -m pip install "dist/research_automation_supervisor-0.2.0-py3-none-any.whl"
+python3 -m pip install "dist/research_automation_supervisor-0.3.0-py3-none-any.whl"
 research-supervisor --version
 research-supervisor doctor
 ```

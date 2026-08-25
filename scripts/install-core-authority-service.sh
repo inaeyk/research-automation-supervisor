@@ -85,7 +85,7 @@ usermod -a -G research-supervisor-custodian research-supervisor-core
 
 install -d -o root -g root -m 0755 /opt/research-supervisor-core
 venv_root=/opt/research-supervisor-core/venv
-release_package=$release_root/artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl
+release_package=$release_root/artifacts/research_automation_supervisor-0.3.0-py3-none-any.whl
 release_wheelhouse=$release_root/wheelhouse
 if [ ! -f "$release_package" ] || [ -L "$release_package" ] || \
    [ ! -d "$release_wheelhouse" ] || [ -L "$release_wheelhouse" ]; then
