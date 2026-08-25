@@ -20,6 +20,7 @@ from research_automation_supervisor.prelaunch_authority import (
     create_start_intent,
     get_start_intent,
     list_operator_campaigns,
+    resume_start_snapshot,
     verify_start_intent,
 )
 from research_automation_supervisor.safe_git import inspect_requested_repository
@@ -148,6 +149,10 @@ class FakeQualifiedRunner:
     def list_operator_campaigns(self) -> tuple[CampaignLaunchSummaryV1, ...]:
         assert self.core_root is not None
         return list_operator_campaigns(self.core_root)
+
+    def resume_start_snapshot(self, launch_intent_id: str) -> CampaignLaunchSummaryV1:
+        assert self.core_root is not None and self.snapshot_root is not None
+        return resume_start_snapshot(self.core_root, self.snapshot_root, launch_intent_id)
 
     def verify_start_intent(
         self,

@@ -212,18 +212,27 @@ def receipt_from_jsonl(
     known_malformed_event_count: int = 0,
     prior_cumulative_usage: CodexTurnUsageV1 | None = None,
     require_prior_cumulative_usage: bool = False,
+    per_turn_usage: bool = False,
 ) -> CodexUsageReceiptV1:
-    """Derive exact deltas from cumulative snapshots; ambiguity fails closed."""
+    """Derive exact usage from authoritative completion events."""
     source, events, thread_ids, usages, reasons = _parse_event_usage(event_log)
     if known_malformed_event_count:
         reasons.add("malformed_jsonl")
-    if require_prior_cumulative_usage and prior_cumulative_usage is None:
+    if (
+        not per_turn_usage
+        and require_prior_cumulative_usage
+        and prior_cumulative_usage is None
+    ):
         reasons.add("missing_prior_cumulative_usage")
 
     complete = not reasons
     if complete:
         try:
-            deltas = _cumulative_deltas(usages, prior=prior_cumulative_usage)
+            deltas = (
+                tuple(usages)
+                if per_turn_usage
+                else _cumulative_deltas(usages, prior=prior_cumulative_usage)
+            )
         except ValueError:
             reasons.add("non_monotonic_or_changed_usage_counters")
             complete = False

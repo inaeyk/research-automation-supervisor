@@ -241,7 +241,7 @@ def create_start_intent(
         crash_injector=inject,
     )
     snapshot_plan = plan_sanitized_snapshot(
-        imported, python_executable=os.path.realpath(sys.executable)
+        imported, python_executable=sys.executable
     )
     campaign_mac = hmac.new(
         secret,
@@ -635,7 +635,7 @@ def _ensure_snapshot(
                 imported,
                 plan,
                 snapshot_root=snapshots,
-                python_executable=os.path.realpath(sys.executable),
+                python_executable=sys.executable,
                 crash_injector=inject,
             )
             completed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")

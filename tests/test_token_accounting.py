@@ -188,6 +188,37 @@ def test_cumulative_counter_decrease_fails_closed(tmp_path: Path) -> None:
     assert receipt.combined_tokens == 0
 
 
+def test_resumed_per_turn_usage_is_not_compared_with_the_prior_turn(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    _write_events(
+        path,
+        _event("thread.started", thread_id="thread-1"),
+        _event("turn.completed", usage=_usage(15_920, 13_056, 317, 35)),
+    )
+
+    receipt = receipt_from_jsonl(
+        path,
+        binding=_binding("supervisor-r001", "supervisor", repair_or_retry=True),
+        model="gpt-5.6-sol",
+        codex_cli_version="codex-cli 0.149.1",
+        prior_cumulative_usage=CodexTurnUsageV1.model_validate(
+            _usage(45_091, 28_160, 785, 460)
+        ),
+        require_prior_cumulative_usage=True,
+        per_turn_usage=True,
+    )
+
+    assert receipt.complete is True
+    assert receipt.incomplete_reasons == ()
+    assert receipt.input_tokens == 15_920
+    assert receipt.cached_input_tokens == 13_056
+    assert receipt.output_tokens == 317
+    assert receipt.reasoning_output_tokens == 35
+    assert receipt.combined_tokens == 16_237
+
+
 @pytest.mark.parametrize(
     ("lines", "known_malformed", "reason"),
     [

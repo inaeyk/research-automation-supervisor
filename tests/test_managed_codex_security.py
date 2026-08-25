@@ -37,6 +37,7 @@ from research_automation_supervisor.managed_codex import (
 )
 from research_automation_supervisor.managed_codex_installer import (
     ARTIFACT_RELATIVE_PATH,
+    CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH,
     ManagedCodexInstallerLayout,
     _qualification_installer_layout,
     install_managed_codex,
@@ -54,6 +55,7 @@ from research_automation_supervisor.protected_release import (
     PROTECTED_RELEASE_INSTALLER,
     PROTECTED_RELEASE_RECEIPT,
     PROTECTED_RELEASE_ROOT,
+    PROTECTED_RELEASE_VERIFIER,
     ProtectedReleaseLayout,
     ProtectedReleaseSecurityError,
     install_approved_release,
@@ -75,24 +77,32 @@ def _write(path: Path, content: bytes, mode: int) -> None:
 def _approval(
     artifact: bytes,
     *,
+    code_mode_host_artifact: bytes | None = b"\x7fELF-qualified-code-mode-host-v1",
     release_id: str = "codex-test-v1",
     version: str = "0.144.0",
     update_from: str | None = None,
 ) -> bytes:
-    return (
-        json.dumps(
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "release_id": release_id,
+        "artifact": str(ARTIFACT_RELATIVE_PATH),
+        "sha256": hashlib.sha256(artifact).hexdigest(),
+        "version": version,
+        "update_from_sha256": update_from,
+    }
+    if code_mode_host_artifact is not None:
+        value.update(
             {
-                "schema_version": 1,
-                "release_id": release_id,
-                "artifact": str(ARTIFACT_RELATIVE_PATH),
-                "sha256": hashlib.sha256(artifact).hexdigest(),
-                "version": version,
-                "update_from_sha256": update_from,
-            },
-            sort_keys=True,
+                "schema_version": 2,
+                "code_mode_host_artifact": str(
+                    CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH
+                ),
+                "code_mode_host_sha256": hashlib.sha256(
+                    code_mode_host_artifact
+                ).hexdigest(),
+            }
         )
-        + "\n"
-    ).encode("ascii")
+    return (json.dumps(value, sort_keys=True) + "\n").encode("ascii")
 
 
 def _installer_layout(
@@ -102,17 +112,22 @@ def _installer_layout(
     release_id: str = "codex-test-v1",
     version: str = "0.144.0",
     update_from: str | None = None,
+    code_mode_host_artifact: bytes | None = b"\x7fELF-qualified-code-mode-host-v1",
 ) -> ManagedCodexInstallerLayout:
     tmp_path.mkdir(parents=True, exist_ok=True)
     tmp_path.chmod(0o700)
     release = _mkdir(tmp_path / "release")
     artifact_path = _mkdir(release / "artifacts") / "codex"
+    code_mode_host_artifact_path = artifact_path.with_name("codex-code-mode-host")
     approval_path = release / "managed-codex-approval-v1.json"
     _write(artifact_path, artifact, 0o755)
+    if code_mode_host_artifact is not None:
+        _write(code_mode_host_artifact_path, code_mode_host_artifact, 0o755)
     _write(
         approval_path,
         _approval(
             artifact,
+            code_mode_host_artifact=code_mode_host_artifact,
             release_id=release_id,
             version=version,
             update_from=update_from,
@@ -122,11 +137,16 @@ def _installer_layout(
 
     system = _mkdir(tmp_path / "system", 0o700)
     executable = _mkdir(system / "usr/bin") / "codex"
+    code_mode_host = executable.with_name("codex-code-mode-host")
     receipt_root = _mkdir(system / "etc/research-supervisor-core")
     pending = receipt_root / "managed-codex-install-pending-v1.json"
     contract = ManagedCodexContract(
         executable=executable,
+        code_mode_host=code_mode_host,
         receipt=receipt_root / "managed-codex-install-v1.json",
+        code_mode_host_receipt=(
+            receipt_root / "managed-codex-code-mode-host-install-v1.json"
+        ),
         pending_receipt=pending,
         executable_trust_root=system,
         receipt_trust_root=system,
@@ -138,6 +158,7 @@ def _installer_layout(
         release_trust_root=tmp_path,
         approval=approval_path,
         artifact=artifact_path,
+        code_mode_host_artifact=code_mode_host_artifact_path,
         installation=contract,
         pending_receipt=pending,
         authority_uid=os.getuid(),
@@ -153,11 +174,13 @@ def _replace_approval(
     version: str,
     update_from: str | None,
 ) -> None:
+    code_mode_host_artifact = layout.code_mode_host_artifact.read_bytes()
     _write(layout.artifact, artifact, 0o755)
     _write(
         layout.approval,
         _approval(
             artifact,
+            code_mode_host_artifact=code_mode_host_artifact,
             release_id=release_id,
             version=version,
             update_from=update_from,
@@ -197,6 +220,8 @@ def _protected_release_layout(tmp_path: Path) -> ProtectedReleaseLayout:
     authority_root = _mkdir(tmp_path / "distribution-authority", 0o700)
     authority = _mkdir(authority_root / "bin") / "install-protected-release"
     _write(authority, b"distribution-provisioned-helper\n", 0o755)
+    verifier = authority.with_name("verify-protected-release")
+    _write(verifier, b"distribution-provisioned-verifier\n", 0o755)
     approval_root = _mkdir(tmp_path / "approval-authority", 0o700)
     candidate = _mkdir(tmp_path / "candidate", 0o700)
     release_parent = _mkdir(tmp_path / "protected-destination", 0o700)
@@ -207,6 +232,7 @@ def _protected_release_layout(tmp_path: Path) -> ProtectedReleaseLayout:
     )
     managed_approval = _approval(
         codex_artifact,
+        code_mode_host_artifact=b"\x7fELF-protected-code-mode-host-v1",
         release_id="codex-protected-v1",
         version=protected_python_version,
     )
@@ -216,6 +242,7 @@ def _protected_release_layout(tmp_path: Path) -> ProtectedReleaseLayout:
         "scripts/install-core-authority-service.sh",
         "scripts/run-protected-python.sh",
         "scripts/protected-managed-codex-entry.py",
+        "scripts/research-supervisor-core-authority.service",
         "src/research_automation_supervisor/__init__.py",
         "src/research_automation_supervisor/errors.py",
         "src/research_automation_supervisor/custodian_errors.py",
@@ -226,14 +253,28 @@ def _protected_release_layout(tmp_path: Path) -> ProtectedReleaseLayout:
     approved_files = {
         relative: (
             Path(relative).read_bytes(),
-            0o755 if relative.startswith("scripts/") else 0o644,
+            0o755
+            if relative.startswith("scripts/") and not relative.endswith(".service")
+            else 0o644,
         )
         for relative in release_sources
     }
     approved_files.update(
         {
             "artifacts/codex": (codex_artifact, 0o755),
+            "artifacts/codex-code-mode-host": (
+                b"\x7fELF-protected-code-mode-host-v1",
+                0o755,
+            ),
+            "artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl": (
+                b"test-product-wheel\n",
+                0o644,
+            ),
             "managed-codex-approval-v1.json": (managed_approval, 0o644),
+            "wheelhouse/test_dependency-1.0-py3-none-any.whl": (
+                b"test-dependency-wheel\n",
+                0o644,
+            ),
         }
     )
     manifest_files: list[dict[str, str]] = []
@@ -266,6 +307,7 @@ def _protected_release_layout(tmp_path: Path) -> ProtectedReleaseLayout:
     )
     return ProtectedReleaseLayout(
         authority_executable=authority,
+        verifier_executable=verifier,
         approval=approval,
         candidate_root=candidate,
         release_root=release_parent / "research-supervisor-release",
@@ -367,6 +409,100 @@ def test_simulated_fresh_install_runtime_verification_and_identical_reinstall(
     assert stat.S_IMODE(layout.installation.executable.stat().st_mode) == 0o755
     assert stat.S_IMODE(layout.installation.receipt.stat().st_mode) == 0o644
     assert not layout.pending_receipt.exists()
+
+
+def test_existing_managed_codex_identity_is_unchanged_when_companion_is_added(
+    tmp_path: Path,
+) -> None:
+    artifact = b"\x7fELF-qualified-codex-v1"
+    companion = b"\x7fELF-qualified-code-mode-host-v1"
+    layout = _installer_layout(
+        tmp_path,
+        artifact,
+        code_mode_host_artifact=None,
+    )
+    installed = install_managed_codex(
+        layout,
+        version_probe=lambda _path: "0.144.0",
+    )
+    receipt_before = layout.installation.receipt.read_bytes()
+    identity_before = verify_managed_codex_installation(layout.installation)
+
+    _write(layout.code_mode_host_artifact, companion, 0o755)
+    _write(
+        layout.approval,
+        _approval(artifact, code_mode_host_artifact=companion),
+        0o644,
+    )
+    completed = install_managed_codex(
+        layout,
+        version_probe=lambda _path: pytest.fail("unchanged Codex must not be probed"),
+    )
+    identity_after = verify_managed_codex_installation(
+        layout.installation,
+        require_code_mode_host=True,
+    )
+    companion_receipt = json.loads(
+        layout.installation.code_mode_host_receipt.read_text(encoding="ascii")
+    )
+
+    assert completed.disposition == "companion_installed"
+    assert completed.identity == installed.identity == identity_before == identity_after
+    assert layout.installation.receipt.read_bytes() == receipt_before
+    assert companion_receipt == {
+        "schema_version": 1,
+        "executable": str(layout.installation.code_mode_host),
+        "sha256": hashlib.sha256(companion).hexdigest(),
+        "managed_codex_executable": str(identity_before.executable),
+        "managed_codex_sha256": identity_before.sha256,
+        "release_id": identity_before.release_id,
+    }
+    assert stat.S_IMODE(layout.installation.code_mode_host.stat().st_mode) == 0o755
+    assert (
+        stat.S_IMODE(layout.installation.code_mode_host_receipt.stat().st_mode)
+        == 0o644
+    )
+
+
+def test_missing_companion_fails_only_when_code_mode_host_is_required(
+    tmp_path: Path,
+) -> None:
+    layout = _installer_layout(tmp_path, b"\x7fELF-qualified-codex-v1")
+    installed = install_managed_codex(
+        layout,
+        version_probe=lambda _path: "0.144.0",
+    )
+    layout.installation.code_mode_host.unlink()
+
+    direct_tool_identity = verify_managed_codex_installation(layout.installation)
+    assert direct_tool_identity == installed.identity
+    with pytest.raises(ManagedCodexSecurityError, match="unavailable"):
+        verify_managed_codex_installation(
+            layout.installation,
+            require_code_mode_host=True,
+        )
+
+
+def test_tampered_companion_is_rejected_when_code_mode_host_is_required(
+    tmp_path: Path,
+) -> None:
+    layout = _installer_layout(tmp_path, b"\x7fELF-qualified-codex-v1")
+    installed = install_managed_codex(
+        layout,
+        version_probe=lambda _path: "0.144.0",
+    )
+    _write(
+        layout.installation.code_mode_host,
+        b"\x7fELF-substituted-code-mode-host",
+        0o755,
+    )
+
+    assert verify_managed_codex_installation(layout.installation) == installed.identity
+    with pytest.raises(ManagedCodexSecurityError, match="does not match"):
+        verify_managed_codex_installation(
+            layout.installation,
+            require_code_mode_host=True,
+        )
 
 
 def test_root_owned_looking_substitution_and_receipt_failures_are_rejected(
@@ -831,6 +967,9 @@ def test_production_privileged_entrypoint_and_authorities_are_fixed() -> None:
         "/usr/libexec/research-supervisor/install-protected-release"
     ) == PROTECTED_RELEASE_INSTALLER
     assert Path(
+        "/usr/libexec/research-supervisor/verify-protected-release"
+    ) == PROTECTED_RELEASE_VERIFIER
+    assert Path(
         "/usr/share/research-supervisor-release-authority/approved-release-v1.json"
     ) == PROTECTED_RELEASE_APPROVAL
     assert Path(
@@ -959,6 +1098,11 @@ def test_sign_in_and_replay_services_receive_one_verified_pair(
         qualified_campaign_module,
         "_verified_managed_codex_identity",
         lambda: identity,
+    )
+    monkeypatch.setattr(
+        managed_codex_module,
+        "PRODUCTION_MANAGED_CODEX_CONTRACT",
+        layout.installation,
     )
     monkeypatch.setattr(qualified_campaign_module, "_managed_codex_home", lambda: home)
 

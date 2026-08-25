@@ -80,6 +80,12 @@ if [ "$launch_mode" = first-run ] || [ "$current_commit" != "$installed_commit" 
     mv "$stamp_tmp" "$install_stamp"
 fi
 
+lifecycle_lock=$runtime_root/custodian-launch.lock
+: >"$lifecycle_lock"
+chmod 600 "$lifecycle_lock"
+exec 9>"$lifecycle_lock"
+/usr/bin/flock -x 9
+
 health_matches_any() {
     "$managed_venv/bin/python" -c 'import json,sys,urllib.request; value=json.load(urllib.request.urlopen(sys.argv[1]+"api/health",timeout=1)); instance=value.get("readiness_instance"); raise SystemExit(0 if value.get("application")=="Research Automation Supervisor" and value.get("qualified_commit")==sys.argv[2] and value.get("managed_codex_home_id")==sys.argv[3] and isinstance(instance,str) and len(instance)==64 else 1)' "$url" "$current_commit" "$managed_codex_home_id" >/dev/null 2>&1
 }
@@ -105,14 +111,6 @@ if health_matches_any; then
     exit 0
 fi
 
-old_pid=$("$managed_venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1],encoding="utf-8")); pid=value.get("pid"); print(pid if isinstance(pid,int) and pid>1 else "")' "$readiness" 2>/dev/null || true)
-if [ -n "$old_pid" ] && [ -r "/proc/$old_pid/cmdline" ]; then
-    old_command=$(tr '\000' ' ' <"/proc/$old_pid/cmdline")
-    case "$old_command" in
-        *research-supervisor-custodian*) kill -TERM "$old_pid" 2>/dev/null || true ;;
-    esac
-fi
-
 if [ -n "$acceptance_scenario" ]; then
     acceptance_backend=$project_root/tests/pa5c4_acceptance_backend.py
     if [ ! -f "$acceptance_backend" ] || [ ! -f "$acceptance_scenario" ]; then
@@ -131,9 +129,16 @@ else
         --data-dir "$data_root" --host 127.0.0.1 --port "$port" \
         --readiness-instance "$readiness_instance" --core-socket "$core_socket"
 fi
-CODEX_HOME="$managed_codex_home" RAS_MANAGED_RUNTIME=1 \
-RAS_QUALIFIED_COMMIT="$current_commit" nohup "$@" \
-    >>"$backend_log" 2>&1 </dev/null &
+if ! "$managed_venv/bin/python" -I -m \
+    research_automation_supervisor.custodian_lifecycle \
+    --data-root "$data_root" \
+    --working-directory "$project_root" \
+    --backend-log "$backend_log" \
+    --codex-home "$managed_codex_home" \
+    --qualified-commit "$current_commit" \
+    -- "$@"; then
+    exit 4
+fi
 
 attempt=0
 while [ "$attempt" -lt 120 ]; do

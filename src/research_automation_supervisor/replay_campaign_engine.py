@@ -56,6 +56,11 @@ from research_automation_supervisor.live_shadow_engine import (
     _prepare_artifact_set,
     _snapshot_checkpoint,
 )
+from research_automation_supervisor.process_enforcement import (
+    PROCESS_TERMINATION_EVIDENCE_FILENAME,
+    ProcessEnforcementPolicyV1,
+    load_process_termination_evidence,
+)
 from research_automation_supervisor.redaction import redact_json, redact_text
 from research_automation_supervisor.replay_campaign_models import (
     PendingHumanDecision,
@@ -124,6 +129,7 @@ class ReplayCampaignServices:
     workflow_services: WorkflowServices | None = None
     notification_invoker: NotificationInvoker | None = None
     environ: Mapping[str, str] | None = None
+    process_enforcement_policy: ProcessEnforcementPolicyV1 | None = None
     token_factory: Callable[[], str] = lambda: secrets.token_hex(16)
     utc_now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
@@ -778,6 +784,15 @@ def _resume_stored_continuation(
         raise ReplayCampaignStateError(
             "stored human continuation has no exact paused boundary"
         )
+    if (
+        observed.status == "failed"
+        and observed.pause_reason == "workflow_state_invariant_failed"
+        and boundary == "worker_continuation"
+    ):
+        return resume_prompt_source_substage(
+            stage2_run,
+            services=services,
+        )
     if observed.status in _ACTIVE_WORKFLOW_STATUSES and _post_audit_recovery_started(
         stage2_run,
         boundary,
@@ -887,6 +902,7 @@ def _validate_campaign_prompt_source_pause(
         matching_unlaunched_intent = _matching_unlaunched_supervisor_intent(
             context.run_directory,
             stage2_run,
+            context.state.campaign_id,
             task_id,
             expected_source,
         )
@@ -933,6 +949,7 @@ def _validate_campaign_prompt_source_pause(
 def _matching_unlaunched_supervisor_intent(
     run_directory: Path,
     stage2_run: Path,
+    campaign_id: str,
     task_id: str,
     boundary: str,
 ) -> bool:
@@ -948,9 +965,17 @@ def _matching_unlaunched_supervisor_intent(
         action_id = request.get("action_id")
         if (
             isinstance(action_id, str)
-            and not (
-                run_directory / "supervisor" / "codex" / action_id
-            ).exists()
+            and (
+                not (
+                    run_directory / "supervisor" / "codex" / action_id
+                ).exists()
+                or _sealed_supervisor_prelaunch_failure(
+                    run_directory,
+                    action_id,
+                    campaign_id,
+                    task_id,
+                )
+            )
         ):
             unlaunched.append(request)
     if len(unlaunched) != 1:
@@ -967,10 +992,15 @@ def _matching_unlaunched_supervisor_intent(
     if not escalation_paths:
         return False
     escalation = _read_json(escalation_paths[-1])
+    artifact = run_directory / "supervisor" / "codex" / action_id
+    expected_failure = (
+        ("supervisor_transport_failure", "launch_failed")
+        if artifact.exists()
+        else ("supervisor_adapter_not_started", "not_started")
+    )
     if (
-        escalation.get("prompt_source_failure_category")
-        != "supervisor_adapter_not_started"
-        or escalation.get("prompt_source_adapter_status") != "not_started"
+        escalation.get("prompt_source_failure_category") != expected_failure[0]
+        or escalation.get("prompt_source_adapter_status") != expected_failure[1]
     ):
         return False
     campaign_entries = _read_campaign_journal(run_directory)
@@ -983,6 +1013,66 @@ def _matching_unlaunched_supervisor_intent(
         and entry["artifact_hashes"].get(str(request_path))
         == sha256_regular_file(request_path)
         for entry in campaign_entries
+    )
+
+
+def _sealed_supervisor_prelaunch_failure(
+    run_directory: Path,
+    action_id: str,
+    campaign_id: str,
+    task_id: str,
+) -> bool:
+    """Accept only a hash-sealed adapter failure that launched no process."""
+    artifact = run_directory / "supervisor" / "codex" / action_id
+    try:
+        completion = _read_json(artifact / "stage2-completion.json")
+        metadata = _read_json(artifact / "metadata.json")
+        result = CodexRunResult.model_validate(_read_json(artifact / "result.json"))
+        receipt_path = artifact / "usage-receipt.json"
+        events_path = artifact / "events.jsonl"
+        receipt = load_verified_receipt(receipt_path, event_log=events_path)
+        termination = load_process_termination_evidence(
+            artifact / PROCESS_TERMINATION_EVIDENCE_FILENAME
+        )
+        hashes = completion.get("artifact_hashes")
+        if not isinstance(hashes, dict):
+            return False
+        for path in (
+            artifact / "metadata.json",
+            artifact / "result.json",
+            receipt_path,
+            events_path,
+            artifact / PROCESS_TERMINATION_EVIDENCE_FILENAME,
+        ):
+            if hashes.get(str(path)) != sha256_regular_file(path):
+                return False
+    except (OSError, ValueError, ValidationError):
+        return False
+    return (
+        completion.get("run_id") == action_id
+        and completion.get("role") == "supervisor"
+        and completion.get("result_status") == "launch_failed"
+        and result.run_id == action_id
+        and result.status == "launch_failed"
+        and result.artifact_directory == str(artifact)
+        and result.event_count == 0
+        and metadata.get("run_id") == action_id
+        and metadata.get("role") == "supervisor"
+        and metadata.get("process_launched") is False
+        and metadata.get("launch_error_present") is True
+        and metadata.get("valid_event_count") == 0
+        and receipt.campaign_id == campaign_id
+        and receipt.task_id == task_id
+        and receipt.action_id == action_id
+        and receipt.role == "supervisor"
+        and receipt.complete is False
+        and receipt.completed_turn_count == 0
+        and receipt.event_count == 0
+        and termination.action_id == action_id
+        and termination.phase == "termination_failed"
+        and termination.invocation_id is None
+        and termination.control_group is None
+        and termination.process_identity is None
     )
 
 
@@ -1513,6 +1603,7 @@ def _invoke_supervisor(
         skip_git_repo_check=True,
         confidential_fragments=confidential,
         rejected_confidential_fragments=(),
+        process_enforcement_policy=context.services.process_enforcement_policy,
     )
 
 
@@ -1782,6 +1873,11 @@ def _workflow_services(
 
     def guarded_codex_invoker(*args: Any, **kwargs: Any) -> CodexRunResult:
         _assert_model_actions_open(context)
+        if context.services.process_enforcement_policy is not None:
+            kwargs["process_enforcement_policy"] = (
+                context.services.process_enforcement_policy
+            )
+            kwargs["containment_backend"] = base.containment_backend
         return base.codex_invoker(*args, **kwargs)
 
     token = _stage2_token(context, source.task)

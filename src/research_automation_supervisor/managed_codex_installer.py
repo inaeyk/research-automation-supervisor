@@ -21,20 +21,24 @@ from research_automation_supervisor.doctor import subprocess_runner
 from research_automation_supervisor.managed_codex import (
     MANAGED_DATA_ROOT_RELATIVE,
     MINIMUM_MANAGED_CODEX_VERSION,
+    ManagedCodexCodeModeHostIdentity,
     ManagedCodexContract,
     ManagedCodexHomeAuthority,
     ManagedCodexHomeAuthorityContract,
     ManagedCodexIdentity,
     ManagedCodexSecurityError,
     load_managed_codex_home_authority,
+    render_managed_codex_code_mode_host_receipt,
     render_managed_codex_home_authority,
     render_managed_codex_receipt,
+    verify_managed_codex_code_mode_host,
     verify_managed_codex_installation,
 )
 
 PROTECTED_RELEASE_ROOT = Path("/opt/research-supervisor-release")
 APPROVAL_RELATIVE_PATH = Path("managed-codex-approval-v1.json")
 ARTIFACT_RELATIVE_PATH = Path("artifacts/codex")
+CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH = Path("artifacts/codex-code-mode-host")
 PENDING_RECEIPT_NAME = "managed-codex-install-pending-v1.json"
 _QUALIFICATION_STATE_NAME = ".managed-codex-main-qualification"
 
@@ -51,6 +55,7 @@ class ManagedCodexApproval:
     sha256: str
     version: str
     update_from_sha256: str | None
+    code_mode_host_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,7 @@ class ManagedCodexInstallerLayout:
     release_trust_root: Path
     approval: Path
     artifact: Path
+    code_mode_host_artifact: Path
     installation: ManagedCodexContract
     pending_receipt: Path
     authority_uid: int
@@ -69,7 +75,7 @@ class ManagedCodexInstallerLayout:
 
 @dataclass(frozen=True)
 class ManagedCodexInstallResult:
-    disposition: Literal["installed", "unchanged", "updated"]
+    disposition: Literal["installed", "unchanged", "updated", "companion_installed"]
     identity: ManagedCodexIdentity
 
 
@@ -85,6 +91,9 @@ def production_installer_layout() -> ManagedCodexInstallerLayout:
         release_trust_root=Path("/"),
         approval=PROTECTED_RELEASE_ROOT / APPROVAL_RELATIVE_PATH,
         artifact=PROTECTED_RELEASE_ROOT / ARTIFACT_RELATIVE_PATH,
+        code_mode_host_artifact=(
+            PROTECTED_RELEASE_ROOT / CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH
+        ),
         installation=installation,
         pending_receipt=installation.pending_receipt,
         authority_uid=0,
@@ -104,11 +113,16 @@ def _qualification_installer_layout(
     state_root = resolved_release.parent / _QUALIFICATION_STATE_NAME
     system_root = state_root / "system"
     executable = system_root / "usr/bin/codex"
+    code_mode_host = system_root / "usr/bin/codex-code-mode-host"
     receipt_root = system_root / "etc/research-supervisor-core"
     pending_receipt = receipt_root / PENDING_RECEIPT_NAME
     installation = ManagedCodexContract(
         executable=executable,
+        code_mode_host=code_mode_host,
         receipt=receipt_root / "managed-codex-install-v1.json",
+        code_mode_host_receipt=(
+            receipt_root / "managed-codex-code-mode-host-install-v1.json"
+        ),
         pending_receipt=pending_receipt,
         executable_trust_root=state_root,
         receipt_trust_root=state_root,
@@ -120,6 +134,9 @@ def _qualification_installer_layout(
         release_trust_root=resolved_release.parent,
         approval=resolved_release / APPROVAL_RELATIVE_PATH,
         artifact=resolved_release / ARTIFACT_RELATIVE_PATH,
+        code_mode_host_artifact=(
+            resolved_release / CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH
+        ),
         installation=installation,
         pending_receipt=pending_receipt,
         authority_uid=os.geteuid(),
@@ -156,6 +173,12 @@ def verify_protected_release_tree(layout: ManagedCodexInstallerLayout) -> None:
         raise ManagedCodexSecurityError("approval path is not fixed by the release contract")
     if layout.artifact != layout.release_root / ARTIFACT_RELATIVE_PATH:
         raise ManagedCodexSecurityError("artifact path is not fixed by the release contract")
+    if layout.code_mode_host_artifact != (
+        layout.release_root / CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH
+    ):
+        raise ManagedCodexSecurityError(
+            "code-mode host artifact path is not fixed by the release contract"
+        )
 
 
 def load_managed_codex_approval(
@@ -174,23 +197,45 @@ def load_managed_codex_approval(
         value = json.loads(content.decode("ascii"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ManagedCodexSecurityError("managed Codex approval is malformed") from exc
-    if not isinstance(value, dict) or set(value) != {
-        "schema_version",
-        "release_id",
-        "artifact",
-        "sha256",
-        "version",
-        "update_from_sha256",
-    }:
+    versioned_keys = {
+        1: {
+            "schema_version",
+            "release_id",
+            "artifact",
+            "sha256",
+            "version",
+            "update_from_sha256",
+        },
+        2: {
+            "schema_version",
+            "release_id",
+            "artifact",
+            "sha256",
+            "version",
+            "update_from_sha256",
+            "code_mode_host_artifact",
+            "code_mode_host_sha256",
+        },
+    }
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    expected_keys = (
+        versioned_keys.get(schema_version) if isinstance(schema_version, int) else None
+    )
+    if not isinstance(value, dict) or set(value) != expected_keys:
         raise ManagedCodexSecurityError("managed Codex approval schema is invalid")
     release_id = value.get("release_id")
     digest = value.get("sha256")
     version = value.get("version")
     update_from = value.get("update_from_sha256")
-    if value.get("schema_version") != 1 or value.get("artifact") != str(
-        ARTIFACT_RELATIVE_PATH
-    ):
+    code_mode_host_digest = value.get("code_mode_host_sha256")
+    if value.get("artifact") != str(ARTIFACT_RELATIVE_PATH):
         raise ManagedCodexSecurityError("managed Codex approval artifact is invalid")
+    if schema_version == 2 and value.get("code_mode_host_artifact") != str(
+        CODE_MODE_HOST_ARTIFACT_RELATIVE_PATH
+    ):
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host approval artifact is invalid"
+        )
     if not isinstance(release_id, str) or _RELEASE_ID.fullmatch(release_id) is None:
         raise ManagedCodexSecurityError("managed Codex approval release is invalid")
     if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
@@ -205,7 +250,21 @@ def load_managed_codex_approval(
         raise ManagedCodexSecurityError("managed Codex update authority is invalid")
     if update_from == digest:
         raise ManagedCodexSecurityError("managed Codex update authority is self-referential")
-    return ManagedCodexApproval(release_id, digest, version, update_from)
+    if schema_version == 2 and (
+        not isinstance(code_mode_host_digest, str)
+        or _SHA256.fullmatch(code_mode_host_digest) is None
+        or code_mode_host_digest == digest
+    ):
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host approval digest is invalid"
+        )
+    return ManagedCodexApproval(
+        release_id,
+        digest,
+        version,
+        update_from,
+        code_mode_host_digest if isinstance(code_mode_host_digest, str) else None,
+    )
 
 
 def install_managed_codex(
@@ -214,7 +273,7 @@ def install_managed_codex(
     version_probe: VersionProbe,
     fault_injector: FaultInjector | None = None,
 ) -> ManagedCodexInstallResult:
-    """Install exact opened artifact bytes under explicit lifecycle rules."""
+    """Install the exact managed Codex pair under one fail-closed transaction."""
     approval = load_managed_codex_approval(layout)
     _validate_destination_directories(layout)
     if _lexists(layout.pending_receipt):
@@ -223,40 +282,102 @@ def install_managed_codex(
         )
     target_exists = _lexists(layout.installation.executable)
     receipt_exists = _lexists(layout.installation.receipt)
+    host_target_exists = _lexists(layout.installation.code_mode_host)
+    host_receipt_exists = _lexists(layout.installation.code_mode_host_receipt)
     existing: ManagedCodexIdentity | None = None
-    disposition: Literal["installed", "unchanged", "updated"]
+    main_needs_install = False
+    host_needs_install = False
+    disposition: Literal["installed", "unchanged", "updated", "companion_installed"]
     if target_exists != receipt_exists:
         raise ManagedCodexSecurityError(
             "managed Codex destination and receipt are an incomplete generation"
         )
+    if host_target_exists != host_receipt_exists:
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host destination and receipt are an incomplete generation"
+        )
+    if not target_exists and host_target_exists:
+        raise ManagedCodexSecurityError(
+            "managed Codex destination and code-mode host are an incomplete generation"
+        )
     if target_exists:
         existing = verify_managed_codex_installation(layout.installation)
         if existing.sha256 == approval.sha256:
-            if existing.version != approval.version:
+            if (
+                existing.version != approval.version
+                or existing.release_id != approval.release_id
+            ):
                 raise ManagedCodexSecurityError(
-                    "approved digest has inconsistent version authority"
+                    "approved digest has inconsistent release authority"
                 )
-            return ManagedCodexInstallResult("unchanged", existing)
-        if approval.update_from_sha256 != existing.sha256:
-            raise ManagedCodexSecurityError(
-                "a different installed identity lacks explicit update authority"
-            )
-        disposition = "updated"
+        else:
+            if approval.update_from_sha256 != existing.sha256:
+                raise ManagedCodexSecurityError(
+                    "a different installed identity lacks explicit update authority"
+                )
+            main_needs_install = True
     else:
         if approval.update_from_sha256 is not None:
             raise ManagedCodexSecurityError(
                 "update approval cannot initialize an absent managed installation"
             )
-        disposition = "installed"
+        main_needs_install = True
 
-    staged = _stage_approved_artifact(layout, approval)
+    if approval.code_mode_host_sha256 is not None:
+        if existing is not None and host_target_exists:
+            host_identity = verify_managed_codex_code_mode_host(
+                existing, layout.installation
+            )
+            if (
+                not main_needs_install
+                and host_identity.sha256 != approval.code_mode_host_sha256
+            ):
+                raise ManagedCodexSecurityError(
+                    "a different code-mode host lacks explicit update authority"
+                )
+            host_needs_install = (
+                main_needs_install
+                or host_identity.sha256 != approval.code_mode_host_sha256
+            )
+        else:
+            host_needs_install = True
+
+    if not main_needs_install and not host_needs_install:
+        assert existing is not None
+        return ManagedCodexInstallResult("unchanged", existing)
+    if existing is None:
+        disposition = "installed"
+    elif main_needs_install:
+        disposition = "updated"
+    else:
+        disposition = "companion_installed"
+
+    staged_main: Path | None = None
+    staged_host: Path | None = None
     pending_written = False
     try:
-        observed_version = version_probe(staged)
-        if observed_version != approval.version:
-            raise ManagedCodexSecurityError(
-                "staged Codex version does not match protected approval"
+        if main_needs_install:
+            staged_main = _stage_approved_artifact(
+                layout,
+                source=layout.artifact,
+                destination=layout.installation.executable,
+                expected_sha256=approval.sha256,
+                label="Codex",
             )
+        if host_needs_install and approval.code_mode_host_sha256 is not None:
+            staged_host = _stage_approved_artifact(
+                layout,
+                source=layout.code_mode_host_artifact,
+                destination=layout.installation.code_mode_host,
+                expected_sha256=approval.code_mode_host_sha256,
+                label="Codex code-mode host",
+            )
+        if staged_main is not None:
+            observed_version = version_probe(staged_main)
+            if observed_version != approval.version:
+                raise ManagedCodexSecurityError(
+                    "staged Codex version does not match protected approval"
+                )
         if fault_injector is not None:
             fault_injector("staged")
         pending = _render_json(
@@ -266,6 +387,7 @@ def install_managed_codex(
                 "sha256": approval.sha256,
                 "version": approval.version,
                 "previous_sha256": None if existing is None else existing.sha256,
+                "code_mode_host_sha256": approval.code_mode_host_sha256,
             }
         )
         _atomic_write_protected(
@@ -278,11 +400,19 @@ def install_managed_codex(
         pending_written = True
         if fault_injector is not None:
             fault_injector("pending_recorded")
-        os.replace(staged, layout.installation.executable)
-        _fsync_directory(layout.installation.executable.parent)
-        if fault_injector is not None:
-            fault_injector("executable_replaced")
-        provisional = ManagedCodexIdentity(
+        if staged_main is not None:
+            os.replace(staged_main, layout.installation.executable)
+            staged_main = None
+            _fsync_directory(layout.installation.executable.parent)
+            if fault_injector is not None:
+                fault_injector("executable_replaced")
+        if staged_host is not None:
+            os.replace(staged_host, layout.installation.code_mode_host)
+            staged_host = None
+            _fsync_directory(layout.installation.code_mode_host.parent)
+            if fault_injector is not None:
+                fault_injector("code_mode_host_replaced")
+        provisional = existing or ManagedCodexIdentity(
             executable=layout.installation.executable,
             sha256=approval.sha256,
             version=approval.version,
@@ -290,23 +420,53 @@ def install_managed_codex(
             device=0,
             inode=0,
         )
-        _atomic_write_protected(
-            layout.installation.receipt,
-            render_managed_codex_receipt(provisional),
-            mode=0o644,
-            owner_uid=layout.authority_uid,
-            owner_gid=layout.authority_gid,
-        )
+        if main_needs_install:
+            provisional = ManagedCodexIdentity(
+                executable=layout.installation.executable,
+                sha256=approval.sha256,
+                version=approval.version,
+                release_id=approval.release_id,
+                device=0,
+                inode=0,
+            )
+            _atomic_write_protected(
+                layout.installation.receipt,
+                render_managed_codex_receipt(provisional),
+                mode=0o644,
+                owner_uid=layout.authority_uid,
+                owner_gid=layout.authority_gid,
+            )
+        if approval.code_mode_host_sha256 is not None:
+            host_provisional = ManagedCodexCodeModeHostIdentity(
+                executable=layout.installation.code_mode_host,
+                sha256=approval.code_mode_host_sha256,
+                managed_codex_executable=layout.installation.executable,
+                managed_codex_sha256=approval.sha256,
+                release_id=approval.release_id,
+                device=0,
+                inode=0,
+            )
+            _atomic_write_protected(
+                layout.installation.code_mode_host_receipt,
+                render_managed_codex_code_mode_host_receipt(host_provisional),
+                mode=0o644,
+                owner_uid=layout.authority_uid,
+                owner_gid=layout.authority_gid,
+            )
         if fault_injector is not None:
             fault_injector("receipt_replaced")
         layout.pending_receipt.unlink()
         pending_written = False
         _fsync_directory(layout.pending_receipt.parent)
-        identity = verify_managed_codex_installation(layout.installation)
+        identity = verify_managed_codex_installation(
+            layout.installation,
+            require_code_mode_host=approval.code_mode_host_sha256 is not None,
+        )
         return ManagedCodexInstallResult(disposition, identity)
     finally:
-        if _lexists(staged):
-            staged.unlink()
+        for staged in (staged_main, staged_host):
+            if staged is not None and _lexists(staged):
+                staged.unlink()
         if pending_written:
             _fsync_directory(layout.pending_receipt.parent)
 
@@ -374,14 +534,18 @@ def bind_managed_codex_home_authority(
 
 def _stage_approved_artifact(
     layout: ManagedCodexInstallerLayout,
-    approval: ManagedCodexApproval,
+    *,
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+    label: str,
 ) -> Path:
     source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    source = os.open(layout.artifact, source_flags)
+    source_descriptor = os.open(source, source_flags)
     staged_descriptor = -1
     staged_path: Path | None = None
     try:
-        before = os.fstat(source)
+        before = os.fstat(source_descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_uid != layout.authority_uid
@@ -389,35 +553,37 @@ def _stage_approved_artifact(
             or stat.S_IMODE(before.st_mode) != 0o755
             or before.st_nlink != 1
         ):
-            raise ManagedCodexSecurityError("approved Codex artifact metadata is unsafe")
+            raise ManagedCodexSecurityError(f"approved {label} artifact metadata is unsafe")
         staged_descriptor, name = tempfile.mkstemp(
-            prefix=".research-supervisor-codex.",
-            dir=layout.installation.executable.parent,
+            prefix=f".research-supervisor-{destination.name}.",
+            dir=destination.parent,
         )
         staged_path = Path(name)
         digest = hashlib.sha256()
         prefix = b""
         while True:
-            block = os.read(source, 1024 * 1024)
+            block = os.read(source_descriptor, 1024 * 1024)
             if not block:
                 break
             if not prefix:
                 prefix = block[:4]
             digest.update(block)
             _write_all(staged_descriptor, block)
-        after = os.fstat(source)
-        current = layout.artifact.lstat()
+        after = os.fstat(source_descriptor)
+        current = source.lstat()
         if prefix != b"\x7fELF":
-            raise ManagedCodexSecurityError("approved Codex artifact is not standalone ELF")
-        if digest.hexdigest() != approval.sha256:
+            raise ManagedCodexSecurityError(f"approved {label} artifact is not standalone ELF")
+        if digest.hexdigest() != expected_sha256:
             raise ManagedCodexSecurityError(
-                "staged Codex bytes do not match protected approval"
+                f"staged {label} bytes do not match protected approval"
             )
         if _stable_stat(before) != _stable_stat(after) or (
             before.st_dev,
             before.st_ino,
         ) != (current.st_dev, current.st_ino):
-            raise ManagedCodexSecurityError("approved artifact changed while being copied")
+            raise ManagedCodexSecurityError(
+                f"approved {label} artifact changed while being copied"
+            )
         os.fchmod(staged_descriptor, 0o755)
         os.fsync(staged_descriptor)
         staged_status = os.fstat(staged_descriptor)
@@ -427,10 +593,10 @@ def _stage_approved_artifact(
             or stat.S_IMODE(staged_status.st_mode) != 0o755
             or staged_status.st_nlink != 1
         ):
-            raise ManagedCodexSecurityError("managed Codex staging metadata is unsafe")
+            raise ManagedCodexSecurityError(f"managed {label} staging metadata is unsafe")
         return staged_path
     finally:
-        os.close(source)
+        os.close(source_descriptor)
         if staged_descriptor >= 0:
             os.close(staged_descriptor)
         if sys.exc_info()[0] is not None and staged_path is not None and _lexists(staged_path):
@@ -438,6 +604,16 @@ def _stage_approved_artifact(
 
 
 def _validate_destination_directories(layout: ManagedCodexInstallerLayout) -> None:
+    if layout.installation.code_mode_host != layout.installation.executable.with_name(
+        "codex-code-mode-host"
+    ):
+        raise ManagedCodexSecurityError("managed Codex code-mode host path is not fixed")
+    if layout.installation.code_mode_host_receipt.parent != (
+        layout.installation.receipt.parent
+    ):
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host receipt location is not fixed"
+        )
     _validate_anchored_path(
         layout.installation.executable.parent,
         layout.installation.executable_trust_root,
@@ -658,8 +834,12 @@ def main(
                 )
             return 0
         if arguments == ["verify"]:
-            identity = verify_managed_codex_installation()
-            print(f"Managed Codex {identity.version} identity verified.")
+            identity = verify_managed_codex_installation(
+                require_code_mode_host=True
+            )
+            print(
+                f"Managed Codex {identity.version} and code-mode host identities verified."
+            )
             return 0
         if len(arguments) == 2 and arguments[0] == "bind-home":
             authority = bind_managed_codex_home_authority(arguments[1])

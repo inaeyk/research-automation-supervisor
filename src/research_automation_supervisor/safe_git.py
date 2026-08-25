@@ -150,7 +150,7 @@ def _bound_workspace(path: Path) -> Path:
             or binding_status.st_mode & 0o022
             or stat.S_ISLNK(campaign_status.st_mode)
             or not stat.S_ISDIR(campaign_status.st_mode)
-            or campaign_status.st_mode & 0o022
+            or stat.S_IMODE(campaign_status.st_mode) != 0o3770
         ):
             raise OSError("workspace binding is unsafe")
         verify_operator_campaign_workspace(candidate)

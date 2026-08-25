@@ -16,8 +16,12 @@ from typing import Any
 from research_automation_supervisor.custodian_errors import CustodianEnvironmentError
 
 MANAGED_CODEX_EXECUTABLE = Path("/usr/bin/codex")
+MANAGED_CODEX_CODE_MODE_HOST = Path("/usr/bin/codex-code-mode-host")
 MANAGED_CODEX_RECEIPT = Path(
     "/etc/research-supervisor-core/managed-codex-install-v1.json"
+)
+MANAGED_CODEX_CODE_MODE_HOST_RECEIPT = Path(
+    "/etc/research-supervisor-core/managed-codex-code-mode-host-install-v1.json"
 )
 MANAGED_CODEX_HOME_AUTHORITY = Path(
     "/etc/research-supervisor-core/managed-codex-home-v1.json"
@@ -41,7 +45,9 @@ class ManagedCodexContract:
     """Paths and ownership authority for one installation contract."""
 
     executable: Path = MANAGED_CODEX_EXECUTABLE
+    code_mode_host: Path = MANAGED_CODEX_CODE_MODE_HOST
     receipt: Path = MANAGED_CODEX_RECEIPT
+    code_mode_host_receipt: Path = MANAGED_CODEX_CODE_MODE_HOST_RECEIPT
     pending_receipt: Path = Path(
         "/etc/research-supervisor-core/managed-codex-install-pending-v1.json"
     )
@@ -58,6 +64,19 @@ class ManagedCodexIdentity:
     executable: Path
     sha256: str
     version: str
+    release_id: str
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class ManagedCodexCodeModeHostIdentity:
+    """Exact companion identity bound to one unchanged managed-Codex identity."""
+
+    executable: Path
+    sha256: str
+    managed_codex_executable: Path
+    managed_codex_sha256: str
     release_id: str
     device: int
     inode: int
@@ -113,8 +132,10 @@ def trusted_system_executable(path: Path) -> Path | None:
 
 def verify_managed_codex_installation(
     contract: ManagedCodexContract | None = None,
+    *,
+    require_code_mode_host: bool = False,
 ) -> ManagedCodexIdentity:
-    """Verify protected receipt authority and the exact installed executable bytes."""
+    """Verify managed Codex and, when required, its exact native companion."""
     contract = contract or PRODUCTION_MANAGED_CODEX_CONTRACT
     if os.path.lexists(contract.pending_receipt):
         raise ManagedCodexSecurityError("managed Codex installation is incomplete")
@@ -167,11 +188,75 @@ def verify_managed_codex_installation(
         raise ManagedCodexSecurityError(
             "managed Codex executable does not match its approved receipt"
         )
-    return ManagedCodexIdentity(
+    identity = ManagedCodexIdentity(
         executable=contract.executable,
         sha256=digest,
         version=version,
         release_id=release_id,
+        device=executable_status.st_dev,
+        inode=executable_status.st_ino,
+    )
+    if require_code_mode_host:
+        verify_managed_codex_code_mode_host(identity, contract)
+    return identity
+
+
+def verify_managed_codex_code_mode_host(
+    identity: ManagedCodexIdentity,
+    contract: ManagedCodexContract | None = None,
+) -> ManagedCodexCodeModeHostIdentity:
+    """Verify the fixed companion and its binding to the managed Codex release."""
+    contract = contract or PRODUCTION_MANAGED_CODEX_CONTRACT
+    receipt_bytes, _ = _read_protected_regular(
+        contract.code_mode_host_receipt,
+        trust_root=contract.receipt_trust_root,
+        owner_uid=contract.authority_uid,
+        owner_gid=contract.authority_gid,
+        required_mode=0o644,
+        maximum_bytes=16 * 1024,
+    )
+    try:
+        value = json.loads(receipt_bytes.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host receipt is malformed"
+        ) from exc
+    expected = {
+        "schema_version": 1,
+        "executable": str(contract.code_mode_host),
+        "sha256": value.get("sha256") if isinstance(value, dict) else None,
+        "managed_codex_executable": str(identity.executable),
+        "managed_codex_sha256": identity.sha256,
+        "release_id": identity.release_id,
+    }
+    digest = value.get("sha256") if isinstance(value, dict) else None
+    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host receipt digest is invalid"
+        )
+    expected["sha256"] = digest
+    if value != expected:
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host receipt binding is invalid"
+        )
+    executable_bytes, executable_status = _read_protected_regular(
+        contract.code_mode_host,
+        trust_root=contract.executable_trust_root,
+        owner_uid=contract.authority_uid,
+        owner_gid=contract.authority_gid,
+        required_mode=0o755,
+        maximum_bytes=None,
+    )
+    if hashlib.sha256(executable_bytes).hexdigest() != digest:
+        raise ManagedCodexSecurityError(
+            "managed Codex code-mode host does not match its approved receipt"
+        )
+    return ManagedCodexCodeModeHostIdentity(
+        executable=contract.code_mode_host,
+        sha256=digest,
+        managed_codex_executable=identity.executable,
+        managed_codex_sha256=identity.sha256,
+        release_id=identity.release_id,
         device=executable_status.st_dev,
         inode=executable_status.st_ino,
     )
@@ -193,6 +278,22 @@ def render_managed_codex_receipt(identity: ManagedCodexIdentity) -> bytes:
             "executable": str(identity.executable),
             "sha256": identity.sha256,
             "version": identity.version,
+            "release_id": identity.release_id,
+        }
+    )
+
+
+def render_managed_codex_code_mode_host_receipt(
+    identity: ManagedCodexCodeModeHostIdentity,
+) -> bytes:
+    """Render the exact companion-to-managed-Codex release binding."""
+    return _render_json(
+        {
+            "schema_version": 1,
+            "executable": str(identity.executable),
+            "sha256": identity.sha256,
+            "managed_codex_executable": str(identity.managed_codex_executable),
+            "managed_codex_sha256": identity.managed_codex_sha256,
             "release_id": identity.release_id,
         }
     )

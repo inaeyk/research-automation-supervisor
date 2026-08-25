@@ -948,6 +948,8 @@ def _verify_codex_command(
         "sandbox_workspace_write.network_access=false",
         "-c",
         "features.skill_mcp_dependency_install=false",
+        "-c",
+        "features.code_mode_host=true",
     ]
     profile = CONTEXT_ECONOMY_PROFILES[request.brevity_profile]
     override = request.context_economy_override
@@ -1035,10 +1037,35 @@ def _verify_codex_command(
         ]
     expected.append("<PROMPT_FROM_STDIN>")
     expected = [durable_context_config_item(item) for item in expected]
-    if metadata.command != tuple(expected):
+    if not _matches_current_or_legacy_direct_tool_policy(
+        metadata.command,
+        tuple(expected),
+    ):
         raise WorkflowStateError("Codex command does not preserve the exact frozen policy")
     if "--last" in metadata.command or "--all" in metadata.command:
         raise WorkflowStateError("Codex command used forbidden recency-based resume")
+
+
+def _matches_current_or_legacy_direct_tool_policy(
+    observed: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> bool:
+    """Accept only exact sealed code-mode-host policy epochs during recovery."""
+    if observed == expected:
+        return True
+    previous = list(expected)
+    try:
+        value_index = previous.index("features.code_mode_host=true")
+    except ValueError:
+        return False
+    if value_index == 0 or previous[value_index - 1] != "-c":
+        return False
+    previous[value_index] = "features.code_mode_host=false"
+    if observed == tuple(previous):
+        return True
+    pre_direct_tool = list(previous)
+    del pre_direct_tool[value_index - 1 : value_index + 1]
+    return observed == tuple(pre_direct_tool)
 
 
 def _parse_events(

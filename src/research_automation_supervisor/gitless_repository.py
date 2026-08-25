@@ -596,16 +596,32 @@ def materialize_campaign_workspace(
             raise QualifiedCampaignStateError(
                 "workspace staging did not inherit the installer-owned shared group"
             )
-        _copy_mutable_workspace(snapshot / "repository", temporary / "repository")
-        _verify_workspace_identity(temporary / "repository", plan)
-        _verify_trusted_control_directory(temporary / "repository")
+        previous_umask = os.umask(0o007)
+        try:
+            staged_campaign = temporary / "campaign"
+            staged_campaign.mkdir(mode=0o1770)
+        finally:
+            os.umask(previous_umask)
+        staged_status = staged_campaign.lstat()
+        if (
+            stat.S_IMODE(staged_status.st_mode) != 0o3770
+            or staged_status.st_uid != workspace_root_status.st_uid
+            or staged_status.st_gid != workspace_root_status.st_gid
+        ):
+            raise QualifiedCampaignStateError(
+                "campaign root did not inherit setgid authority"
+            )
+        staged_repository = staged_campaign / "repository"
+        _copy_mutable_workspace(snapshot / "repository", staged_repository)
+        _verify_workspace_identity(staged_repository, plan)
+        _verify_trusted_control_directory(staged_repository)
         _write_new_file(
-            temporary / "snapshot-binding-v1.json", expected_binding, mode=0o440
+            staged_campaign / "snapshot-binding-v1.json", expected_binding, mode=0o440
         )
-        os.chmod(temporary, 0o750)
-        _fsync_tree(temporary)
-        os.replace(temporary, campaign)
+        _fsync_tree(staged_campaign)
+        os.replace(staged_campaign, campaign)
         fsync_directory(workspaces)
+        temporary.rmdir()
         _verify_workspace_identity(repository, plan)
         _verify_trusted_control_directory(repository)
         return repository
@@ -1882,7 +1898,6 @@ def _verify_core_owned_workspace_capability(
         (root, "directory", 0o027),
         (root / "workspaces", "directory", 0o027),
         (binding, "file", 0o022),
-        (campaign, "directory", 0o022),
         (control, "directory", 0o022),
     ):
         status = path.lstat()
@@ -1894,6 +1909,15 @@ def _verify_core_owned_workspace_capability(
             or (kind == "directory" and not stat.S_ISDIR(status.st_mode))
         ):
             raise OSError("workspace capability is not Core-owned")
+    campaign_status = campaign.lstat()
+    if (
+        stat.S_ISLNK(campaign_status.st_mode)
+        or not stat.S_ISDIR(campaign_status.st_mode)
+        or campaign_status.st_uid != expected_uid
+        or campaign_status.st_gid != root.lstat().st_gid
+        or stat.S_IMODE(campaign_status.st_mode) != 0o3770
+    ):
+        raise OSError("qualified campaign root is not safely delegated")
     repository_status = repository.lstat()
     if (
         stat.S_ISLNK(repository_status.st_mode)

@@ -61,6 +61,7 @@ from research_automation_supervisor.process_enforcement import (
     SystemdUserCgroupV2Backend,
     file_sha256,
     inspect_owned_process_group,
+    load_process_termination_evidence,
     new_action_unit_name,
     process_start_ticks,
     write_process_termination_evidence,
@@ -81,6 +82,7 @@ from research_automation_supervisor.systemd_launch_helper import (
 from research_automation_supervisor.token_accounting import (
     CodexTurnUsageV1,
     CodexUsageBindingV1,
+    CodexUsageReceiptV1,
     aggregate_task_receipts,
     cumulative_usage_from_jsonl,
     load_verified_receipt,
@@ -195,7 +197,34 @@ def _refresh_usage_ledger(
             continue
         receipt_path = Path(current) / "usage-receipt.json"
         event_log = Path(current) / "events.jsonl"
-        receipts.append(load_verified_receipt(receipt_path, event_log=event_log))
+        receipt = load_verified_receipt(receipt_path, event_log=event_log)
+        if _sealed_prelaunch_receipt(receipt_path, event_log, receipt):
+            continue
+        if receipt.incomplete_reasons == (
+            "non_monotonic_or_changed_usage_counters",
+        ):
+            recovered = receipt_from_jsonl(
+                event_log,
+                binding=CodexUsageBindingV1(
+                    campaign_id=receipt.campaign_id,
+                    task_id=receipt.task_id,
+                    action_id=receipt.action_id,
+                    role=receipt.role,
+                    repair_or_retry=receipt.repair_or_retry,
+                ),
+                model=receipt.model,
+                codex_cli_version=receipt.codex_cli_version,
+                per_turn_usage=True,
+            )
+            if recovered.complete:
+                write_receipt(
+                    destination.parent
+                    / "recovered-usage-receipts"
+                    / f"{receipt.receipt_id}.json",
+                    recovered,
+                )
+                receipt = recovered
+        receipts.append(receipt)
     ledger = aggregate_task_receipts(
         receipts,
         campaign_id=binding.campaign_id,
@@ -208,6 +237,70 @@ def _refresh_usage_ledger(
         task_id="*",
     )
     write_ledger(destination.parent / "campaign-token-ledger.json", campaign_ledger)
+
+
+def _sealed_prelaunch_receipt(
+    receipt_path: Path,
+    event_log: Path,
+    receipt: CodexUsageReceiptV1,
+) -> bool:
+    """Prove an incomplete receipt belongs to an action that launched no model."""
+    if receipt.incomplete_reasons != (
+        "missing_or_ambiguous_thread_id",
+        "missing_turn_completed_event",
+    ):
+        return False
+    if receipt.event_count != 0 or receipt.completed_turn_count != 0:
+        return False
+
+    directory = receipt_path.parent
+    paths = {
+        "events": event_log,
+        "metadata": directory / "metadata.json",
+        "process": directory / PROCESS_TERMINATION_EVIDENCE_FILENAME,
+        "receipt": receipt_path,
+        "result": directory / "result.json",
+    }
+    completion_path = directory / "stage2-completion.json"
+    try:
+        if any(path.is_symlink() or not path.is_file() for path in paths.values()):
+            return False
+        if completion_path.is_symlink() or not completion_path.is_file():
+            return False
+        completion = json.loads(completion_path.read_bytes())
+        artifact_hashes = completion["artifact_hashes"]
+        if any(
+            artifact_hashes.get(str(path)) != file_sha256(path)
+            for path in paths.values()
+        ):
+            return False
+        metadata = json.loads(paths["metadata"].read_bytes())
+        result = CodexRunResult.model_validate_json(paths["result"].read_bytes())
+        termination = load_process_termination_evidence(paths["process"])
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+    return bool(
+        completion.get("run_id") == receipt.action_id
+        and completion.get("role")
+        == {"coding_auditor": "auditor"}.get(receipt.role, receipt.role)
+        and completion.get("result_status") == "launch_failed"
+        and result.run_id == receipt.action_id
+        and result.status == "launch_failed"
+        and result.event_count == 0
+        and metadata.get("run_id") == receipt.action_id
+        and metadata.get("process_enforcement_enabled") is True
+        and metadata.get("process_launched") is False
+        and metadata.get("launch_error_present") is True
+        and metadata.get("valid_event_count") == 0
+        and metadata.get("usage_receipt_id") == receipt.receipt_id
+        and metadata.get("usage_complete") is False
+        and termination.action_id == receipt.action_id
+        and termination.phase == "termination_failed"
+        and termination.invocation_id is None
+        and termination.control_group is None
+        and termination.process_identity is None
+    )
 
 
 def _prior_cumulative_usage_for_thread(
@@ -725,23 +818,13 @@ def run_prepared_codex(
         prepared,
         resume_thread_id=resume_thread_id,
     )
-    prior_cumulative_usage = (
-        _prior_cumulative_usage_for_thread(
-            prepared.usage_ledger_root or resolved_runs_dir,
-            current_event_log=event_path,
-            thread_id=resume_thread_id,
-        )
-        if resume_thread_id is not None
-        else None
-    )
     usage_receipt = receipt_from_jsonl(
         event_path,
         binding=usage_binding,
         model=prepared.request.model,
         codex_cli_version=codex_version,
         known_malformed_event_count=len(event_processor.malformed_hashes),
-        prior_cumulative_usage=prior_cumulative_usage,
-        require_prior_cumulative_usage=resume_thread_id is not None,
+        per_turn_usage=True,
     )
     usage_receipt_path = artifact_directory / "usage-receipt.json"
     write_receipt(usage_receipt_path, usage_receipt)
@@ -953,6 +1036,8 @@ def build_codex_command(
             "sandbox_workspace_write.network_access=false",
             "-c",
             "features.skill_mcp_dependency_install=false",
+            "-c",
+            "features.code_mode_host=true",
             *context_config,
             "--sandbox",
             prepared.policy.sandbox,
@@ -987,6 +1072,8 @@ def build_codex_command(
             "sandbox_workspace_write.network_access=false",
             "-c",
             "features.skill_mcp_dependency_install=false",
+            "-c",
+            "features.code_mode_host=true",
             *context_config,
             "--sandbox",
             prepared.policy.sandbox,
@@ -1103,7 +1190,9 @@ def _run_systemd_contained_process(
         process = subprocess.Popen(
             list(launch_command),
             cwd=cwd,
-            env=dict(environment),
+            env=dict(
+                getattr(backend, "control_environment", environment)
+            ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

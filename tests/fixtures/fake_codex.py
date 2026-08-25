@@ -99,6 +99,7 @@ def _validate_stage2_policy(arguments: list[str], configuration: dict[str, objec
         ("-c", 'web_search="disabled"'),
         ("-c", "sandbox_workspace_write.network_access=false"),
         ("-c", "features.skill_mcp_dependency_install=false"),
+        ("-c", "features.code_mode_host=true"),
     )
     for option, value in required_pairs:
         if not any(
@@ -125,6 +126,14 @@ def _validate_stage2_policy(arguments: list[str], configuration: dict[str, objec
             if item == "--skip-git-repo-check"
         ] != [exec_index + 1]:
             return "Stage 4 requires one correctly placed --skip-git-repo-check"
+    return None
+
+
+def _config_value(arguments: list[str], key: str) -> str | None:
+    prefix = f"{key}="
+    for index, item in enumerate(arguments[:-1]):
+        if item == "-c" and arguments[index + 1].startswith(prefix):
+            return arguments[index + 1][len(prefix) :]
     return None
 
 
@@ -174,6 +183,68 @@ def main() -> int:
         )
         return 1
     arguments = sys.argv[1:]
+    if (
+        configuration.get("simulate_code_mode_host_router")
+        and _config_value(arguments, "features.code_mode_host") != "true"
+    ):
+        blocked = json.dumps(
+            {
+                "assumptions": [],
+                "changed_files": [],
+                "questions": [],
+                "schema_version": 1,
+                "status": "blocked",
+                "summary": "code-mode host is disabled",
+            },
+            sort_keys=True,
+        )
+        configuration.update(
+            {
+                "stdout_lines": [
+                    json.dumps({"thread_id": "thread-code-mode", "type": "thread.started"}),
+                    json.dumps(
+                        {
+                            "item": {
+                                "id": "item_0",
+                                "message": (
+                                    "Code Mode is unavailable because code-mode host is "
+                                    "disabled. Code mode will fail closed; enable "
+                                    "`features.code_mode_host` and install "
+                                    "`codex-code-mode-host`."
+                                ),
+                                "type": "error",
+                            },
+                            "type": "item.completed",
+                        }
+                    ),
+                    json.dumps({"type": "turn.started"}),
+                    json.dumps(
+                        {
+                            "item": {
+                                "id": "item_1",
+                                "text": blocked,
+                                "type": "agent_message",
+                            },
+                            "type": "item.completed",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {
+                                "cached_input_tokens": 0,
+                                "input_tokens": 1,
+                                "output_tokens": 1,
+                                "reasoning_output_tokens": 0,
+                            },
+                        }
+                    ),
+                ],
+                "stderr": "error=code-mode host is disabled",
+                "final": blocked,
+                "exit_code": 0,
+            }
+        )
     if "resume" in arguments:
         resume_index = arguments.index("resume")
         resumed_thread = arguments[resume_index + 1]

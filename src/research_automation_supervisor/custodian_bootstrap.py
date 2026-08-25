@@ -248,7 +248,7 @@ def _trusted_system_executable(path: Path) -> Path | None:
 def _verified_managed_codex_identity() -> ManagedCodexIdentity | None:
     """Compatibility seam around the one installation identity verifier."""
     try:
-        return verify_managed_codex_installation()
+        return verify_managed_codex_installation(require_code_mode_host=True)
     except ManagedCodexSecurityError:
         return None
 

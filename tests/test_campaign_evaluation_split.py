@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -16,7 +17,10 @@ import research_automation_supervisor.offline_evaluation_package as package_buil
 import research_automation_supervisor.offline_replay_evaluator as offline_evaluator
 import research_automation_supervisor.replay_campaign_sources as campaign_sources
 import research_automation_supervisor.workflow_models as workflow_models
-from research_automation_supervisor.errors import ReplayCampaignInputError
+from research_automation_supervisor.errors import (
+    ReplayCampaignInputError,
+    ReplayCampaignStateError,
+)
 from research_automation_supervisor.offline_replay_evaluator import (
     OfflineEvaluationError,
     evaluate_historical_replay,
@@ -37,7 +41,12 @@ from tests.test_replay_campaign import (
     create_campaign,
     supervisor_action,
 )
-from tests.workflow_helpers import auditor_result, codex_response, worker_result
+from tests.workflow_helpers import (
+    auditor_result,
+    codex_response,
+    initialize_repository,
+    worker_result,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -531,6 +540,132 @@ def test_candidate_rebuild_uses_terminal_snapshot_not_live_workspace(
     assert (
         rebuilt / "tasks/replay-task-1/changed-files/src/ready.txt"
     ).read_text(encoding="utf-8") == "ready\n"
+
+
+def test_candidate_source_provenance_qualifies_cross_uid_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "repository"
+    workspace.mkdir()
+    (workspace / "source.txt").write_text("baseline\n", encoding="utf-8")
+    initialize_repository(workspace)
+    commit = subprocess.run(
+        ("git", "-C", str(workspace), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    expected_tree = subprocess.run(
+        ("git", "-C", str(workspace), "rev-parse", "HEAD^{tree}"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    git_environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+        "LANG": "C.UTF-8",
+    }
+    rejected = subprocess.run(
+        ("git", "--no-pager", "-C", str(workspace), "rev-parse", "HEAD^{tree}"),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=git_environment,
+    )
+    assert rejected.returncode != 0
+    assert "dubious ownership" in rejected.stderr
+
+    real_run = subprocess.run
+
+    def assume_different_owner(
+        command: Any,
+        **kwargs: Any,
+    ) -> Any:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        kwargs["env"] = {
+            **environment,
+            "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+        }
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", assume_different_owner)
+
+    assert candidate_export._git_value(
+        workspace,
+        ("rev-parse", f"{commit}^{{tree}}"),
+    ) == expected_tree
+
+
+def test_provenance_failure_recovers_existing_terminal_task_without_model_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [
+            [
+                codex_response("worker", WORKER_ONE_UUID, worker_result()),
+                codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+            ]
+        ],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ]
+    )
+    services = campaign_services(fake, supervisor, [])
+    real_git_value = candidate_export._git_value
+
+    def reject_provenance(
+        _workspace: Path,
+        _arguments: object,
+    ) -> str:
+        raise ReplayCampaignStateError("candidate source provenance is invalid")
+
+    monkeypatch.setattr(candidate_export, "_git_value", reject_provenance)
+    with pytest.raises(
+        ReplayCampaignStateError,
+        match="candidate source provenance is invalid",
+    ):
+        run_replay_campaign(
+            manifest,
+            runs_dir=tmp_path / "runs",
+            services=services,
+        )
+    run = next((tmp_path / "runs").iterdir())
+    interrupted = replay_campaign_status(run)
+    model_calls = len(supervisor.resume_ids)
+
+    assert interrupted.status == "running"
+    assert interrupted.completed_task_ids == ()
+    assert (
+        run
+        / "tasks/replay-task-1"
+        / candidate_export.TASK_INPUT_STAGING_NAME
+    ).is_dir()
+
+    monkeypatch.setattr(candidate_export, "_git_value", real_git_value)
+    completed = resume_replay_campaign(run, services=services)
+
+    assert completed.status == "completed"
+    assert completed.completed_task_ids == ("replay-task-1",)
+    assert len(supervisor.resume_ids) == model_calls
+    assert (run / "final-candidate/candidate-manifest.json").is_file()
+    assert not (
+        run
+        / "tasks/replay-task-1"
+        / candidate_export.TASK_INPUT_STAGING_NAME
+    ).exists()
 
 
 @pytest.mark.parametrize(

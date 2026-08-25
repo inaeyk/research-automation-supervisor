@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import research_automation_supervisor.workflow_integrity as workflow_integrity
 from research_automation_supervisor.codex_adapter import run_prepared_codex
 from research_automation_supervisor.errors import WorkflowInputError, WorkflowLockError
 from research_automation_supervisor.git_evidence import record_git_baseline
@@ -193,6 +194,41 @@ def test_checkpoint_pass_returns_frozen_checkpoint_exit_state(tmp_path: Path) ->
     assert substage_status(run_directory) == result
     with pytest.raises(WorkflowInputError):
         resume_substage(run_directory, services=services(fake))
+
+
+def test_recovery_accepts_only_exact_pre_direct_tool_command() -> None:
+    current = (
+        "/usr/bin/codex",
+        "-c",
+        "features.skill_mcp_dependency_install=false",
+        "-c",
+        "features.code_mode_host=true",
+        "--sandbox",
+        "workspace-write",
+    )
+    previous = current[:4] + ("features.code_mode_host=false",) + current[5:]
+    legacy = current[:3] + current[5:]
+
+    assert workflow_integrity._matches_current_or_legacy_direct_tool_policy(
+        current,
+        current,
+    )
+    assert workflow_integrity._matches_current_or_legacy_direct_tool_policy(
+        previous,
+        current,
+    )
+    assert workflow_integrity._matches_current_or_legacy_direct_tool_policy(
+        legacy,
+        current,
+    )
+    assert not workflow_integrity._matches_current_or_legacy_direct_tool_policy(
+        legacy + ("--search",),
+        current,
+    )
+    assert not workflow_integrity._matches_current_or_legacy_direct_tool_policy(
+        current[:4] + ("features.code_mode_host=maybe",) + current[5:],
+        current,
+    )
 
 
 def test_failed_fixed_test_repairs_on_exact_worker_thread_then_audits(tmp_path: Path) -> None:

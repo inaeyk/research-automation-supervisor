@@ -32,6 +32,9 @@ def test_double_click_launcher_is_hidden_and_uses_supported_default_wsl() -> Non
     vbs = Path("Research Supervisor.vbs").read_text(encoding="utf-8")
     powershell = Path("launch-research-supervisor.ps1").read_text(encoding="utf-8")
     bootstrap = Path("scripts/custodian-bootstrap.sh").read_text(encoding="utf-8")
+    lifecycle = Path(
+        "src/research_automation_supervisor/custodian_lifecycle.py"
+    ).read_text(encoding="utf-8")
     assert "shell.Run(command, 0, True)" in vbs
     assert "launch-research-supervisor.ps1" in vbs
     assert "--list --quiet" in powershell
@@ -48,7 +51,7 @@ def test_double_click_launcher_is_hidden_and_uses_supported_default_wsl() -> Non
     assert "launcher-evidence" in bootstrap
     assert "/run/research-supervisor-core/authority.sock" in bootstrap
     assert "prepare-managed-codex-home.py" in bootstrap
-    assert 'CODEX_HOME="$managed_codex_home"' in bootstrap
+    assert '"--setenv=CODEX_HOME={home}"' in lifecycle
     assert "managed_codex_home_id" in bootstrap
     assert "Qualified application data cannot be redirected" in bootstrap
     assert "if (-not $AcceptanceScenario)" in powershell
@@ -105,6 +108,9 @@ def test_product_installer_and_runtime_share_one_managed_codex_contract() -> Non
         encoding="utf-8"
     )
     bootstrap = Path("scripts/custodian-bootstrap.sh").read_text(encoding="utf-8")
+    lifecycle = Path(
+        "src/research_automation_supervisor/custodian_lifecycle.py"
+    ).read_text(encoding="utf-8")
     developer_bootstrap = Path("bootstrap.sh").read_text(encoding="utf-8")
     assert str(MANAGED_CODEX_EXECUTABLE) == "/usr/bin/codex"
     assert str(MANAGED_CODEX_RECEIPT).endswith("managed-codex-install-v1.json")
@@ -127,7 +133,7 @@ def test_product_installer_and_runtime_share_one_managed_codex_contract() -> Non
         in product_installer
     )
     assert "verify-protected-release.py" not in product_installer
-    assert 'CODEX_HOME="$managed_codex_home"' in bootstrap
+    assert '"--setenv=CODEX_HOME={home}"' in lifecycle
     assert "XDG_DATA_HOME" not in bootstrap
     assert "managed_home_operation=initialize" in bootstrap
     assert "managed_home_operation=verify" in bootstrap

@@ -1,8 +1,13 @@
+#!/usr/bin/python3 -I
 """Protected release installation contract for the externally trusted bootstrap.
 
 The callable functions are packaged into a distribution-owned helper at the fixed
 ``PROTECTED_RELEASE_INSTALLER`` path.  Running this module from a source checkout is
 not a privileged installation path and cannot establish bootstrap provenance.
+
+The file is deliberately standard-library-only.  Unprivileged release preparation
+copies its exact bytes to both fixed authority executables; direct execution dispatches
+by the installed basename only after an administrator has installed and approved it.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -25,6 +31,9 @@ PROTECTED_RELEASE_VERIFIER = Path(
 )
 PROTECTED_RELEASE_APPROVAL = Path(
     "/usr/share/research-supervisor-release-authority/approved-release-v1.json"
+)
+PROTECTED_RELEASE_UPDATE_APPROVAL = Path(
+    "/usr/share/research-supervisor-release-authority/approved-release-update-v1.json"
 )
 PROTECTED_RELEASE_CANDIDATE = Path(
     "/var/tmp/research-supervisor-release-candidate"
@@ -40,11 +49,17 @@ _MAXIMUM_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAXIMUM_RELEASE_FILES = 4096
 _MANDATORY_RELEASE_FILES = frozenset(
     {
+        PurePosixPath("artifacts/codex"),
+        PurePosixPath(
+            "artifacts/research_automation_supervisor-0.2.0-py3-none-any.whl"
+        ),
+        PurePosixPath("managed-codex-approval-v1.json"),
         PurePosixPath("scripts/install-research-supervisor.sh"),
         PurePosixPath("scripts/install-managed-codex.sh"),
         PurePosixPath("scripts/install-core-authority-service.sh"),
         PurePosixPath("scripts/run-protected-python.sh"),
         PurePosixPath("scripts/protected-managed-codex-entry.py"),
+        PurePosixPath("scripts/research-supervisor-core-authority.service"),
         PurePosixPath("src/research_automation_supervisor/__init__.py"),
         PurePosixPath("src/research_automation_supervisor/custodian_errors.py"),
         PurePosixPath("src/research_automation_supervisor/doctor.py"),
@@ -54,6 +69,9 @@ _MANDATORY_RELEASE_FILES = frozenset(
             "src/research_automation_supervisor/managed_codex_installer.py"
         ),
     }
+)
+_CODE_MODE_HOST_RELEASE_FILES = frozenset(
+    {PurePosixPath("artifacts/codex-code-mode-host")}
 )
 
 
@@ -77,6 +95,7 @@ class ApprovedRelease:
     release_id: str
     files: tuple[ApprovedReleaseFile, ...]
     manifest_sha256: str
+    update_from_manifest_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -84,7 +103,9 @@ class ProtectedReleaseLayout:
     """Fixed production layout with explicit overrides for unprivileged simulation."""
 
     authority_executable: Path = PROTECTED_RELEASE_INSTALLER
+    verifier_executable: Path = PROTECTED_RELEASE_VERIFIER
     approval: Path = PROTECTED_RELEASE_APPROVAL
+    update_approval: Path = PROTECTED_RELEASE_UPDATE_APPROVAL
     candidate_root: Path = PROTECTED_RELEASE_CANDIDATE
     release_root: Path = PROTECTED_RELEASE_ROOT
     receipt: Path = PROTECTED_RELEASE_RECEIPT
@@ -100,7 +121,7 @@ class ProtectedReleaseLayout:
 class ProtectedReleaseInstallResult:
     """Deterministic result from the simulated or real protected boundary."""
 
-    disposition: Literal["installed", "unchanged"]
+    disposition: Literal["installed", "unchanged", "updated"]
     release_id: str
     manifest_sha256: str
     release_root: Path
@@ -109,11 +130,18 @@ class ProtectedReleaseInstallResult:
 PRODUCTION_PROTECTED_RELEASE_LAYOUT = ProtectedReleaseLayout()
 
 
-def load_approved_release(layout: ProtectedReleaseLayout) -> ApprovedRelease:
+def load_approved_release(
+    layout: ProtectedReleaseLayout,
+    *,
+    approval_path: Path | None = None,
+) -> ApprovedRelease:
     """Load release identity only from separately protected approval metadata."""
     _validate_production_authority_selection(layout)
+    selected_approval = layout.approval if approval_path is None else approval_path
+    if selected_approval not in {layout.approval, layout.update_approval}:
+        raise ProtectedReleaseSecurityError("protected release approval selection is not fixed")
     raw = _read_protected_file(
-        layout.approval,
+        selected_approval,
         trust_root=layout.approval_trust_root,
         owner_uid=layout.authority_uid,
         owner_gid=layout.authority_gid,
@@ -124,18 +152,34 @@ def load_approved_release(layout: ProtectedReleaseLayout) -> ApprovedRelease:
         value: Any = json.loads(raw.decode("ascii"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProtectedReleaseSecurityError("protected release approval is malformed") from exc
-    if not isinstance(value, dict) or set(value) != {
-        "schema_version",
-        "release_id",
-        "files",
-    }:
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    versioned_keys = {
+        1: {"schema_version", "release_id", "files"},
+        2: {
+            "schema_version",
+            "release_id",
+            "files",
+            "update_from_manifest_sha256",
+        },
+    }
+    expected_keys = (
+        versioned_keys.get(schema_version) if isinstance(schema_version, int) else None
+    )
+    if not isinstance(value, dict) or set(value) != expected_keys:
         raise ProtectedReleaseSecurityError("protected release approval schema is invalid")
     release_id = value.get("release_id")
     raw_files = value.get("files")
-    if value.get("schema_version") != 1 or not isinstance(release_id, str):
+    update_from = value.get("update_from_manifest_sha256")
+    if not isinstance(release_id, str):
         raise ProtectedReleaseSecurityError("protected release approval identity is invalid")
     if _RELEASE_ID.fullmatch(release_id) is None:
         raise ProtectedReleaseSecurityError("protected release approval identity is invalid")
+    if update_from is not None and (
+        not isinstance(update_from, str) or _SHA256.fullmatch(update_from) is None
+    ):
+        raise ProtectedReleaseSecurityError(
+            "protected release update authority is invalid"
+        )
     if (
         not isinstance(raw_files, list)
         or not raw_files
@@ -174,10 +218,19 @@ def load_approved_release(layout: ProtectedReleaseLayout) -> ApprovedRelease:
         )
     if not _MANDATORY_RELEASE_FILES.issubset(seen):
         raise ProtectedReleaseSecurityError("protected release entrypoint approval is incomplete")
+    if schema_version == 2 and not _CODE_MODE_HOST_RELEASE_FILES.issubset(seen):
+        raise ProtectedReleaseSecurityError(
+            "protected release code-mode host approval is incomplete"
+        )
+    if not any(
+        path.parts[0] == "wheelhouse" and path.suffix == ".whl" for path in seen
+    ):
+        raise ProtectedReleaseSecurityError("protected release wheelhouse approval is incomplete")
     return ApprovedRelease(
         release_id=release_id,
         files=tuple(sorted(files, key=lambda item: item.path.as_posix())),
         manifest_sha256=hashlib.sha256(raw).hexdigest(),
+        update_from_manifest_sha256=update_from,
     )
 
 
@@ -186,6 +239,7 @@ def install_approved_release(
 ) -> ProtectedReleaseInstallResult:
     """Copy exact approved candidate bytes into the fixed protected destination."""
     approval = load_approved_release(layout)
+    _verify_candidate_tree(layout.candidate_root, approval)
     _validate_protected_directory(
         layout.release_root.parent,
         trust_root=layout.release_trust_root,
@@ -219,27 +273,14 @@ def install_approved_release(
             approval.manifest_sha256,
             layout.release_root,
         )
-
-    candidate_descriptor = _open_candidate_root(layout.candidate_root)
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=".research-supervisor-release.",
-            dir=layout.release_root.parent,
+    if approval.update_from_manifest_sha256 is not None:
+        raise ProtectedReleaseSecurityError(
+            "protected release update approval cannot initialize an absent installation"
         )
-    )
+
+    staging = _stage_approved_candidate(layout, approval)
     installed = False
     try:
-        os.chmod(staging, 0o755)
-        os.chown(staging, layout.authority_uid, layout.authority_gid)
-        for approved in approval.files:
-            _copy_approved_candidate_file(
-                candidate_descriptor,
-                staging,
-                approved,
-                owner_uid=layout.authority_uid,
-                owner_gid=layout.authority_gid,
-            )
-        _verify_release_tree(staging, approval, layout.authority_uid, layout.authority_gid)
         if os.path.lexists(layout.release_root):
             raise ProtectedReleaseSecurityError("protected release destination changed")
         os.rename(staging, layout.release_root)
@@ -254,8 +295,56 @@ def install_approved_release(
             layout.release_root,
         )
     finally:
-        os.close(candidate_descriptor)
         if not installed and os.path.lexists(staging):
+            _remove_staging_tree(staging)
+
+
+def update_approved_release(
+    layout: ProtectedReleaseLayout = PRODUCTION_PROTECTED_RELEASE_LAYOUT,
+) -> ProtectedReleaseInstallResult:
+    """Replace one exact installed release through separately protected update data."""
+    current = verify_installed_release(layout)
+    approval = load_approved_release(
+        layout,
+        approval_path=layout.update_approval,
+    )
+    if (
+        approval.release_id != current.release_id
+        or approval.update_from_manifest_sha256 != current.manifest_sha256
+        or approval.manifest_sha256 == current.manifest_sha256
+    ):
+        raise ProtectedReleaseSecurityError(
+            "protected release update authority does not match the installed identity"
+        )
+    _verify_candidate_tree(layout.candidate_root, approval)
+    staging = _stage_approved_candidate(layout, approval)
+    previous = Path(
+        tempfile.mkdtemp(
+            prefix=".research-supervisor-release.previous.",
+            dir=layout.release_root.parent,
+        )
+    )
+    previous.rmdir()
+    replaced = False
+    try:
+        os.rename(layout.release_root, previous)
+        os.rename(staging, layout.release_root)
+        replaced = True
+        _fsync_directory(layout.release_root.parent)
+        _write_protected_receipt(layout, approval)
+        _promote_update_approval(layout)
+        verified = verify_installed_release(layout)
+        _remove_staging_tree(previous)
+        layout.update_approval.unlink()
+        _fsync_directory(layout.update_approval.parent)
+        return ProtectedReleaseInstallResult(
+            "updated",
+            verified.release_id,
+            verified.manifest_sha256,
+            verified.release_root,
+        )
+    finally:
+        if not replaced and os.path.lexists(staging):
             _remove_staging_tree(staging)
 
 
@@ -298,6 +387,61 @@ def verify_installed_release(
     )
 
 
+def _stage_approved_candidate(
+    layout: ProtectedReleaseLayout,
+    approval: ApprovedRelease,
+) -> Path:
+    candidate_descriptor = _open_candidate_root(layout.candidate_root)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=".research-supervisor-release.",
+            dir=layout.release_root.parent,
+        )
+    )
+    try:
+        os.chmod(staging, 0o755)
+        os.chown(staging, layout.authority_uid, layout.authority_gid)
+        for approved in approval.files:
+            _copy_approved_candidate_file(
+                candidate_descriptor,
+                staging,
+                approved,
+                owner_uid=layout.authority_uid,
+                owner_gid=layout.authority_gid,
+            )
+        _verify_release_tree(
+            staging,
+            approval,
+            layout.authority_uid,
+            layout.authority_gid,
+        )
+        return staging
+    except BaseException:
+        if os.path.lexists(staging):
+            _remove_staging_tree(staging)
+        raise
+    finally:
+        os.close(candidate_descriptor)
+
+
+def _promote_update_approval(layout: ProtectedReleaseLayout) -> None:
+    raw = _read_protected_file(
+        layout.update_approval,
+        trust_root=layout.approval_trust_root,
+        owner_uid=layout.authority_uid,
+        owner_gid=layout.authority_gid,
+        mode=0o644,
+        maximum_bytes=_MAXIMUM_MANIFEST_BYTES,
+    )
+    _atomic_write_protected_bytes(
+        layout.approval,
+        raw,
+        owner_uid=layout.authority_uid,
+        owner_gid=layout.authority_gid,
+        mode=0o644,
+    )
+
+
 def _validate_production_authority_selection(layout: ProtectedReleaseLayout) -> None:
     if (
         layout == PRODUCTION_PROTECTED_RELEASE_LAYOUT
@@ -312,6 +456,60 @@ def _validate_production_authority_selection(layout: ProtectedReleaseLayout) -> 
         mode=0o755,
         maximum_bytes=None,
     )
+    _read_protected_file(
+        layout.verifier_executable,
+        trust_root=layout.authority_trust_root,
+        owner_uid=layout.authority_uid,
+        owner_gid=layout.authority_gid,
+        mode=0o755,
+        maximum_bytes=None,
+    )
+
+
+def _verify_candidate_tree(root: Path, approval: ApprovedRelease) -> None:
+    """Reject any missing, extra, linked, mistyped, or mode-mismatched input data."""
+    expected = {item.path.as_posix(): item for item in approval.files}
+    observed: set[str] = set()
+    try:
+        root_status = root.lstat()
+        if not stat.S_ISDIR(root_status.st_mode) or stat.S_ISLNK(root_status.st_mode):
+            raise ProtectedReleaseSecurityError("release candidate data root is unsafe")
+        for directory, directories, files in os.walk(root, followlinks=False):
+            parent = Path(directory)
+            for name in directories:
+                child = parent / name
+                status = child.lstat()
+                if (
+                    not stat.S_ISDIR(status.st_mode)
+                    or stat.S_ISLNK(status.st_mode)
+                    or stat.S_IMODE(status.st_mode) != 0o755
+                ):
+                    raise ProtectedReleaseSecurityError(
+                        "release candidate directory metadata is unsafe"
+                    )
+            for name in files:
+                child = parent / name
+                relative = child.relative_to(root).as_posix()
+                approved = expected.get(relative)
+                if approved is None:
+                    raise ProtectedReleaseSecurityError(
+                        "release candidate contains unapproved data"
+                    )
+                status = child.lstat()
+                if (
+                    not stat.S_ISREG(status.st_mode)
+                    or stat.S_ISLNK(status.st_mode)
+                    or status.st_nlink != 1
+                    or stat.S_IMODE(status.st_mode) != approved.mode
+                ):
+                    raise ProtectedReleaseSecurityError(
+                        "release candidate file metadata is unsafe"
+                    )
+                observed.add(relative)
+    except OSError as exc:
+        raise ProtectedReleaseSecurityError("release candidate data is unavailable") from exc
+    if observed != set(expected):
+        raise ProtectedReleaseSecurityError("release candidate is incomplete")
 
 
 def _open_candidate_root(path: Path) -> int:
@@ -474,20 +672,37 @@ def _write_protected_receipt(
             "release_root": str(layout.release_root),
         }
     )
+    _atomic_write_protected_bytes(
+        layout.receipt,
+        raw,
+        owner_uid=layout.authority_uid,
+        owner_gid=layout.authority_gid,
+        mode=0o644,
+    )
+
+
+def _atomic_write_protected_bytes(
+    path: Path,
+    raw: bytes,
+    *,
+    owner_uid: int,
+    owner_gid: int,
+    mode: int,
+) -> None:
     descriptor, temporary_text = tempfile.mkstemp(
-        prefix=".installed-release.",
-        dir=layout.receipt.parent,
+        prefix=f".{path.name}.",
+        dir=path.parent,
     )
     temporary = Path(temporary_text)
     try:
-        os.fchmod(descriptor, 0o644)
-        os.fchown(descriptor, layout.authority_uid, layout.authority_gid)
+        os.fchmod(descriptor, mode)
+        os.fchown(descriptor, owner_uid, owner_gid)
         _write_all(descriptor, raw)
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
-        os.replace(temporary, layout.receipt)
-        _fsync_directory(layout.receipt.parent)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -626,3 +841,80 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _installed_authority_main(argv: list[str] | None = None) -> int:
+    """Dispatch only fixed installed authority basenames under real root privilege."""
+    arguments = sys.argv[1:] if argv is None else argv
+    executable = Path(sys.argv[0])
+    try:
+        selected = executable.resolve(strict=True)
+    except OSError:
+        print("ERROR: protected release authority is unavailable", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print(
+            "ERROR: protected release authority requires administrator authorization",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        if selected == PROTECTED_RELEASE_VERIFIER:
+            if executable != PROTECTED_RELEASE_VERIFIER or executable.is_symlink():
+                raise ProtectedReleaseSecurityError(
+                    "protected release verifier selection is not fixed"
+                )
+            if arguments:
+                raise ProtectedReleaseSecurityError(
+                    "protected release verifier accepts no caller arguments"
+                )
+            verified = verify_installed_release()
+            print(
+                json.dumps(
+                    {
+                        "disposition": verified.disposition,
+                        "manifest_sha256": verified.manifest_sha256,
+                        "release_id": verified.release_id,
+                        "release_root": str(verified.release_root),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if selected != PROTECTED_RELEASE_INSTALLER:
+            raise ProtectedReleaseSecurityError(
+                "privileged release authority is outside the fixed distribution path"
+            )
+        if executable != PROTECTED_RELEASE_INSTALLER or executable.is_symlink():
+            raise ProtectedReleaseSecurityError(
+                "protected release installer selection is not fixed"
+            )
+        updating = len(arguments) == 2 and arguments[0] == "--update"
+        if (
+            (not updating and len(arguments) != 1)
+            or not arguments
+            or not arguments[-1]
+        ):
+            raise ProtectedReleaseSecurityError(
+                "one fixed install/update operation and ordinary operator are required"
+            )
+        operator_name = arguments[-1]
+        if updating:
+            update_approved_release()
+        else:
+            install_approved_release()
+        os.execv(
+            "/bin/sh",
+            [
+                "/bin/sh",
+                str(PROTECTED_RELEASE_ROOT / "scripts/install-research-supervisor.sh"),
+                operator_name,
+            ],
+        )
+    except (OSError, ProtectedReleaseSecurityError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_installed_authority_main())

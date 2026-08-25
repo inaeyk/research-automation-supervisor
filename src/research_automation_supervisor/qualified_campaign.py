@@ -57,6 +57,9 @@ from research_automation_supervisor.managed_codex import (
     verified_managed_codex_home,
     verify_managed_codex_installation,
 )
+from research_automation_supervisor.process_enforcement import (
+    ProcessEnforcementPolicyV1,
+)
 from research_automation_supervisor.replay_campaign_engine import (
     ReplayCampaignServices,
     replay_campaign_status,
@@ -146,7 +149,12 @@ def _verified_managed_codex_identity() -> ManagedCodexIdentity:
 
 
 def _verify_qualified_runtime_pair(executable: str) -> None:
-    identity = _verified_managed_codex_identity()
+    try:
+        identity = verify_managed_codex_installation(require_code_mode_host=True)
+    except ManagedCodexSecurityError as exc:
+        raise QualifiedCampaignInputError(
+            "Managed Codex code-mode host identity is unavailable"
+        ) from exc
     if Path(executable) != identity.executable:
         raise QualifiedCampaignInputError("Qualified Codex executable identity changed")
     _managed_codex_home()
@@ -159,10 +167,12 @@ def _qualified_replay_services(*, deterministic_token: str | None = None) -> Rep
         return ReplayCampaignServices(
             codex_executable=str(identity.executable),
             codex_identity_verifier=_verify_qualified_runtime_pair,
+            process_enforcement_policy=ProcessEnforcementPolicyV1(),
         )
     return ReplayCampaignServices(
         codex_executable=str(identity.executable),
         codex_identity_verifier=_verify_qualified_runtime_pair,
+        process_enforcement_policy=ProcessEnforcementPolicyV1(),
         token_factory=lambda: deterministic_token,
     )
 
@@ -188,6 +198,7 @@ def _start_qualified_bundle(
 ) -> OperatorCampaignProjectionV1:
     """Internal bundle ingress; the installed runner never exposes a pathname."""
     authority = _authority_path(authority_directory)
+    retrying_prelaunch = False
     if authority.exists():
         existing = load_campaign_input_bundle(authority / BUNDLE_FILE)
         if (
@@ -195,18 +206,26 @@ def _start_qualified_bundle(
             or existing.bundle_sha256 != bundle.bundle_sha256
         ):
             raise QualifiedCampaignInputError("existing campaign Start binding was substituted")
-        return qualified_campaign_status(
-            authority_directory=authority,
-            exchange_root=exchange_root,
-        )
+        if (authority / "qualified-locator-v1.json").exists():
+            return qualified_campaign_status(
+                authority_directory=authority,
+                exchange_root=exchange_root,
+            )
+        _verify_retryable_prelaunch_failure(authority, bundle)
+        retrying_prelaunch = True
+    else:
+        try:
+            authority.mkdir(parents=True, exist_ok=False, mode=0o700)
+        except OSError as exc:
+            raise QualifiedCampaignInputError(
+                "qualified campaign directory could not be created"
+            ) from exc
     try:
-        authority.mkdir(parents=True, exist_ok=False, mode=0o700)
-    except OSError as exc:
-        raise QualifiedCampaignInputError(
-            "qualified campaign directory could not be created"
-        ) from exc
-    try:
-        _write_once(authority / BUNDLE_FILE, render_json_bytes(bundle.model_dump(mode="json")))
+        if not retrying_prelaunch:
+            _write_once(
+                authority / BUNDLE_FILE,
+                render_json_bytes(bundle.model_dump(mode="json")),
+            )
         manifest = _materialize_visible_authority(bundle, authority)
         run_directory = _expected_run_directory(bundle, authority)
         locator = QualifiedCampaignLocatorV1(
@@ -226,6 +245,7 @@ def _start_qualified_bundle(
             deterministic_token=bundle.bundle_sha256[:32]
         )
         run_replay_campaign(manifest, runs_dir=authority / "runs", services=services)
+        (authority / FAILURE_FILE).unlink(missing_ok=True)
         return qualified_campaign_status(
             authority_directory=authority,
             exchange_root=exchange_root,
@@ -310,6 +330,12 @@ def resume_qualified_campaign(
     """Delegate interrupted child recovery to PA-5A, then resume the outer campaign."""
     authority = _existing_authority_path(authority_directory)
     bundle = load_campaign_input_bundle(authority / BUNDLE_FILE)
+    if not (authority / "qualified-locator-v1.json").exists():
+        return _start_qualified_bundle(
+            bundle,
+            authority_directory=authority,
+            exchange_root=exchange_root,
+        )
     locator = _load_locator(authority, bundle)
     state = replay_campaign_status(Path(locator.core_run_directory))
     if state.status == "human_paused":
@@ -668,6 +694,10 @@ def _acceptance_profile(bundle: CampaignInputBundleV1, workspace: Path) -> str:
         (workspace / name).is_file() for name in ("pyproject.toml", "pytest.ini", "setup.cfg")
     ):
         return "python_pytest"
+    if (workspace / "tests").is_dir() and any(
+        path.is_file() for path in (workspace / "tests").rglob("test_*.py")
+    ):
+        return "python_bare"
     return "repository_integrity"
 
 
@@ -1265,6 +1295,47 @@ def _load_failure(authority: Path) -> tuple[str, str] | None:
     if not isinstance(code, str) or not isinstance(message, str):
         raise QualifiedCampaignStateError("qualified failure record is invalid")
     return code, message
+
+
+def _verify_retryable_prelaunch_failure(
+    authority: Path,
+    bundle: CampaignInputBundleV1,
+) -> None:
+    """Allow one exact retry before visible authority or workflow state existed."""
+    failure = _load_failure(authority)
+    if failure is None or failure[0] != "PermissionError":
+        raise QualifiedCampaignStateError(
+            "qualified campaign Start is incomplete and not safely retryable"
+        )
+    expected = {BUNDLE_FILE, FAILURE_FILE}
+    try:
+        entries = tuple(authority.iterdir())
+    except OSError as exc:
+        raise QualifiedCampaignStateError(
+            "qualified campaign Start retry state is unavailable"
+        ) from exc
+    if {path.name for path in entries} != expected or any(
+        path.is_symlink() for path in entries
+    ):
+        raise QualifiedCampaignStateError(
+            "qualified campaign Start retry state is inconsistent"
+        )
+    visible = Path(bundle.repository.prepared_workspace).parent
+    try:
+        visible_status = visible.lstat()
+    except OSError as exc:
+        raise QualifiedCampaignStateError(
+            "qualified visible authority is unavailable for safe retry"
+        ) from exc
+    if (
+        stat.S_ISLNK(visible_status.st_mode)
+        or not stat.S_ISDIR(visible_status.st_mode)
+        or (visible / ".research-supervisor-control").exists()
+        or (visible / "campaign.json").exists()
+    ):
+        raise QualifiedCampaignStateError(
+            "qualified visible authority is not empty for safe retry"
+        )
 
 
 def _read_regular_file(path: Path, label: str, *, max_bytes: int) -> bytes:

@@ -119,19 +119,25 @@ service.
 
 For an ordinary Windows user, no terminal or WSL distro selection is required:
 
-1. The organization's distribution authority—not this repository—first installs the
-   privileged release helper at the fixed root-owned, non-writable
+1. The organization's distribution authority first reviews the unprivileged output
+   of `scripts/prepare-protected-release.py` using the procedure in
+   `docs/protected_release_bootstrap.md`. The generated files are not authority merely
+   because they exist. Using only fixed trusted `/usr/bin/install`, the administrator
+   installs the approved privileged release helper at the fixed root-owned, non-writable
    `/usr/libexec/research-supervisor/install-protected-release`, its companion verifier,
    and the approved-release manifest at
    `/usr/share/research-supervisor-release-authority/approved-release-v1.json`. Establishing
-   the provenance of those files before administrator execution is a qualification
-   prerequisite. A mutable checkout cannot install, approve, or certify this authority.
+   and rechecking the exact hashes of those protected copies before executing either new
+   helper is a qualification prerequisite. A mutable checkout cannot approve or certify
+   this authority, and no checkout script is executed with administrator privilege.
 2. An ordinary, unprivileged preparation process may place candidate release bytes at
    `/var/tmp/research-supervisor-release-candidate`. Those bytes are data only. The
    separately protected approval names every accepted relative path, mode, and SHA-256,
-   including the product installers, standalone Codex artifact, prebuilt wheel, and
-   offline wheelhouse. An operator manifest, self-hash, NVM/npm wrapper, or caller digest
-   has no authority.
+   including the product installers, standalone Codex artifact, matching
+   `codex-code-mode-host` artifact, prebuilt wheel, and offline wheelhouse. The fixed
+   production destinations are `/usr/bin/codex` and
+   `/usr/bin/codex-code-mode-host`; an operator manifest, self-hash, NVM/npm wrapper,
+   caller path, or caller digest has no authority.
 3. In WSL, the administrator invokes only the distribution-installed helper for the
    ordinary operator account (replace only the account name):
 

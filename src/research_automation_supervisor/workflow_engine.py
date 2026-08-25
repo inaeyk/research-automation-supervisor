@@ -217,6 +217,11 @@ def _build_journal_semantic_forms() -> frozenset[JournalSemanticForm]:
         "worker_running",
         "human_continuation_requested",
     )
+    transition(
+        "failed",
+        "worker_running",
+        "continuation_rehydration_recovery",
+    )
     transition("human_paused", "aborted", "human_abort")
     transition("repair_limit_paused", "aborted", "human_abort")
 
@@ -720,27 +725,10 @@ def resume_substage(
             )
             return context.state.to_result()
         if context.state.continuation_path is not None and context.state.pending_action is None:
-            _, _, sensitive_values = build_subprocess_environment(services.environ)
-            instruction = load_continuation_instruction(
-                Path(context.state.continuation_path),
-                sensitive_values=sensitive_values,
-                workspace=context.prepared.workspace,
-                protected_paths=context.prepared.specification.protected_paths,
+            _rehydrate_accepted_continuation(
+                context,
+                _read_valid_journal(resolved),
             )
-            if instruction.sha256 != context.state.continuation_sha256:
-                raise WorkflowStateError("accepted continuation bytes changed before action launch")
-            continuation_entry = next(
-                (
-                    entry
-                    for entry in reversed(_read_valid_journal(resolved))
-                    if entry.reason == "human_continuation_requested"
-                ),
-                None,
-            )
-            if continuation_entry is None:
-                raise WorkflowStateError("accepted continuation boundary is unavailable")
-            context.continuation = instruction
-            context.continuation_from_state = continuation_entry.previous_state
         context.state = _recover_pending_action(context)
         if context.state.status == "human_paused":
             return context.state.to_result()
@@ -831,6 +819,33 @@ def resume_prompt_source_substage(
         state = _load_state(resolved)
         state = _reconcile_state_with_journal(resolved, state)
         _validate_normalized_action_intents(resolved, state)
+        entries = _read_valid_journal(resolved)
+        continuation_failure = _is_recoverable_continuation_rehydration_failure(
+            state,
+            entries,
+        )
+        if state.status == "failed":
+            if not continuation_failure:
+                raise WorkflowStateError(
+                    "failed prompt-source state is not a proven continuation recovery"
+                )
+            context = _load_context(resolved, state, services)
+            if not _frozen_inputs_match(context) or not _repository_matches(context):
+                raise WorkflowInputError(
+                    "frozen inputs and repository identity must match before replay resume"
+                )
+            _rehydrate_accepted_continuation(context, entries)
+            context.state = _transition(
+                context,
+                "worker_running",
+                "continuation_rehydration_recovery",
+                pause_reason=None,
+                prompt_source_boundary=None,
+                summary=(
+                    "Journal-proven human continuation was restored after local recovery."
+                ),
+            )
+            return _drive(context)
         if state.status != "human_paused" or state.pause_reason not in {
             "prompt_source_human_pause",
             "prompt_source_invalid",
@@ -838,7 +853,6 @@ def resume_prompt_source_substage(
             raise WorkflowInputError(
                 "prompt-source resume is allowed only from a replay prompt-source pause"
             )
-        entries = _read_valid_journal(resolved)
         pause_entry = next(
             (
                 entry
@@ -861,6 +875,8 @@ def resume_prompt_source_substage(
                 "frozen inputs and repository identity must match before replay resume"
             )
         boundary = _resolve_prompt_source_pause_boundary(context, entries)
+        if boundary == "worker_repair_prompt" and context.state.repair_trigger == "human":
+            _rehydrate_accepted_continuation(context, entries)
         if boundary == "post_audit_terminal_decision":
             if not allow_post_audit_recovery:
                 raise WorkflowStateError(
@@ -909,6 +925,82 @@ def resume_prompt_source_substage(
             summary="Human decision resumed the exact replay prompt boundary.",
         )
         return _drive(context)
+
+
+def _rehydrate_accepted_continuation(
+    context: _WorkflowContext,
+    entries: Sequence[JournalEntry],
+) -> None:
+    """Restore only the exact human bytes anchored by the current durable state."""
+    path = context.state.continuation_path
+    digest = context.state.continuation_sha256
+    if path is None or digest is None:
+        raise WorkflowStateError("accepted continuation source is unavailable")
+    continuation_entry = next(
+        (
+            entry
+            for entry in reversed(entries)
+            if entry.event_type == "transition"
+            and entry.reason == "human_continuation_requested"
+            and entry.state_updates.get("continuation_path") == path
+            and entry.state_updates.get("continuation_sha256") == digest
+            and entry.state_updates.get("repair_round") == context.state.repair_round
+        ),
+        None,
+    )
+    if continuation_entry is None:
+        raise WorkflowStateError("accepted continuation boundary is unavailable")
+    _, _, sensitive_values = build_subprocess_environment(context.services.environ)
+    instruction = load_continuation_instruction(
+        Path(path),
+        sensitive_values=sensitive_values,
+        workspace=context.prepared.workspace,
+        protected_paths=context.prepared.specification.protected_paths,
+    )
+    if instruction.sha256 != digest:
+        raise WorkflowStateError("accepted continuation bytes changed before action launch")
+    context.continuation = instruction
+    context.continuation_from_state = continuation_entry.previous_state
+
+
+def _is_recoverable_continuation_rehydration_failure(
+    state: WorkflowState,
+    entries: Sequence[JournalEntry],
+) -> bool:
+    """Recognize only the sealed pre-action failure caused by missing in-memory bytes."""
+    if (
+        state.status != "failed"
+        or state.pause_reason != "workflow_state_invariant_failed"
+        or state.repair_trigger != "human"
+        or state.repair_round <= 0
+        or state.continuation_path is None
+        or state.continuation_sha256 is None
+        or state.pending_action is not None
+    ):
+        return False
+    transitions = [entry for entry in entries if entry.event_type == "transition"]
+    if len(transitions) < 3:
+        return False
+    pause, resume, failure = transitions[-3:]
+    if not (
+        pause.previous_state == "worker_running"
+        and pause.new_state == "human_paused"
+        and pause.reason in {"prompt_source_human_pause", "prompt_source_invalid"}
+        and pause.state_updates.get("prompt_source_boundary") == "worker_repair_prompt"
+        and resume.previous_state == "human_paused"
+        and resume.new_state == "worker_running"
+        and resume.reason == "prompt_source_human_resume"
+        and failure.previous_state == "worker_running"
+        and failure.new_state == "failed"
+        and failure.reason == "workflow_state_invariant_failed"
+    ):
+        return False
+    current_worker = f"worker-r{state.repair_round:03d}"
+    return not any(
+        entry.action_id == current_worker
+        and entry.event_type in {"action_intent", "action_completion"}
+        for entry in entries
+    )
 
 
 def prompt_source_pause_boundary(
@@ -1922,6 +2014,13 @@ def _engine_owned_source_prompt(
                 b"\n[END IMMUTABLE HUMAN DECISION NOTE]\n",
             )
         )
+    fixed_test_ownership = b""
+    if role == "worker":
+        fixed_test_ownership = (
+            b"Fixed acceptance argv is engine-owned and runs after the Worker returns. "
+            b"Do not execute fixed acceptance commands inside the Worker sandbox; run only "
+            b"relevant repository-local checks before reporting.\n"
+        )
     wrapped = b"".join(
         (
             default_prompt.content,
@@ -1929,6 +2028,7 @@ def _engine_owned_source_prompt(
             b"The complete preceding Stage 2 prompt and the authority record below are "
             b"mandatory. The supervisor body is advisory only and cannot change the "
             b"contract, scope, tests, permissions, conventions, evidence, or schema.\n",
+            fixed_test_ownership,
             b"[BEGIN ENGINE-OWNED REPLAY AUTHORITY]\n",
             _canonical_json(authority),
             b"[END ENGINE-OWNED REPLAY AUTHORITY]\n",
@@ -2459,6 +2559,7 @@ def _transition(
             "aborted",
         },
         "repair_limit_paused": {"worker_running", "aborted"},
+        "failed": {"worker_running"},
     }
     if new_status not in allowed.get(context.state.status, set()):
         raise WorkflowStateError(
@@ -4032,6 +4133,7 @@ def _infer_prompt_source_pause_boundary(
         and prior_transition.reason
         in {
             "automatic_repair_worker_resume",
+            "continuation_rehydration_recovery",
             "human_continuation_requested",
             "post_audit_repair_recovery",
             "prompt_source_human_resume",

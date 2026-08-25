@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from research_automation_supervisor.codex_adapter import (
     STDERR_LIMIT_BYTES,
     STDOUT_LIMIT_BYTES,
     AdapterLimits,
+    _refresh_usage_ledger,
     build_codex_command,
     execute_codex_request,
     run_prepared_codex,
@@ -40,7 +42,14 @@ from research_automation_supervisor.execution_budget import ExecutionBudgetPolic
 from research_automation_supervisor.execution_budget_enforcement import (
     LiveExecutionBudgetControllerV1,
 )
+from research_automation_supervisor.process_enforcement import ProcessEnforcementPolicyV1
 from research_automation_supervisor.redaction import redact_text
+from research_automation_supervisor.token_accounting import (
+    CodexTurnUsageV1,
+    CodexUsageBindingV1,
+    receipt_from_jsonl,
+    write_receipt,
+)
 
 FAKE_CODEX = (Path(__file__).parent / "fixtures" / "fake_codex.py").resolve()
 ARTIFACT_NAMES = {
@@ -268,6 +277,8 @@ def test_exact_process_construction_and_prompt_stdin(
     assert 'web_search="disabled"' in argv
     assert "sandbox_workspace_write.network_access=false" in argv
     assert "features.skill_mcp_dependency_install=false" in argv
+    assert "features.code_mode_host=true" in argv
+    assert "features.code_mode_host=false" not in argv
     assert argv[argv.index("--sandbox") + 1] == sandbox
     exec_index = argv.index("exec")
     assert argv.index("--ask-for-approval") < exec_index
@@ -291,6 +302,66 @@ def test_exact_process_construction_and_prompt_stdin(
         "danger-full-access",
     ):
         assert forbidden not in argv
+
+
+def test_code_mode_host_regression_fails_closed_only_for_old_disabled_policy(
+    tmp_path: Path,
+) -> None:
+    prepared = prepared_request(tmp_path, "worker")
+    completed = {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 20,
+            "cached_input_tokens": 5,
+            "output_tokens": 2,
+            "reasoning_output_tokens": 1,
+        },
+    }
+    configure(
+        prepared,
+        simulate_code_mode_host_router=True,
+        stdout_lines=[
+            json.dumps({"thread_id": "thread-code-mode", "type": "thread.started"}),
+            json.dumps(completed),
+        ],
+        final="completed",
+    )
+
+    disabled_final = tmp_path / "disabled-final.md"
+    disabled_command = build_codex_command(
+        prepared,
+        str(FAKE_CODEX),
+        disabled_final,
+    )
+    host_index = disabled_command.index("features.code_mode_host=true")
+    disabled_command[host_index] = "features.code_mode_host=false"
+    disabled = subprocess.run(
+        disabled_command,
+        input=prepared.prompt_bytes,
+        cwd=prepared.workspace,
+        env=fake_environment(),
+        capture_output=True,
+        check=False,
+    )
+
+    assert disabled.returncode == 0
+    assert b"Code Mode is unavailable because code-mode host is disabled" in disabled.stdout
+    assert disabled.stderr == b"error=code-mode host is disabled"
+    assert json.loads(disabled_final.read_text(encoding="utf-8"))["status"] == "blocked"
+
+    result = run_fake(prepared)
+
+    command = json.loads(
+        (Path(result.artifact_directory) / "metadata.json").read_text(encoding="utf-8")
+    )["command"]
+    assert result.status == "succeeded"
+    assert (Path(result.artifact_directory) / "final-message.md").read_text() == "completed"
+    assert "code-mode host is disabled" not in (
+        Path(result.artifact_directory) / "stderr.log"
+    ).read_text()
+    assert "features.code_mode_host=true" in command
+    assert "features.code_mode_host=false" not in command
+    assert "features.code_mode_only=true" not in command
 
 
 def test_read_only_auditor_tempfile_reproducer_uses_only_action_scratch(
@@ -617,6 +688,133 @@ def test_success_writes_complete_canonical_artifacts_and_metadata(tmp_path: Path
     assert "<FINAL_MESSAGE_TEMP>" in metadata["command"]
     assert not list(directory.glob(".metadata.json.*"))
     assert not list(directory.glob(".result.json.*"))
+
+
+def test_ledger_refresh_recovers_legacy_resumed_per_turn_receipt(tmp_path: Path) -> None:
+    ledger_root = tmp_path / "ledger-root"
+    legacy_directory = ledger_root / "supervisor" / "legacy-resume"
+    legacy_directory.mkdir(parents=True)
+    events = legacy_directory / "events.jsonl"
+    events.write_text(
+        "\n".join(
+            (
+                json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 15_920,
+                            "cached_input_tokens": 13_056,
+                            "output_tokens": 317,
+                            "reasoning_output_tokens": 35,
+                        },
+                    }
+                ),
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    binding = CodexUsageBindingV1(
+        campaign_id="campaign-1",
+        task_id="task-1",
+        action_id="supervisor-r001",
+        role="supervisor",
+        repair_or_retry=True,
+    )
+    legacy = receipt_from_jsonl(
+        events,
+        binding=binding,
+        model="gpt-5.6-sol",
+        codex_cli_version="0.149.1",
+        prior_cumulative_usage=CodexTurnUsageV1(
+            input_tokens=45_091,
+            cached_input_tokens=28_160,
+            output_tokens=785,
+            reasoning_output_tokens=460,
+        ),
+        require_prior_cumulative_usage=True,
+    )
+    assert legacy.incomplete_reasons == (
+        "non_monotonic_or_changed_usage_counters",
+    )
+    write_receipt(legacy_directory / "usage-receipt.json", legacy)
+
+    prepared = replace(
+        prepared_request(tmp_path / "request", "supervisor"),
+        usage_binding=binding,
+        usage_ledger_root=ledger_root,
+        usage_ledger_path=ledger_root / "token-ledgers" / "task-1.json",
+    )
+    _refresh_usage_ledger(prepared, tmp_path / "unused", binding)
+
+    ledger = json.loads(
+        (ledger_root / "token-ledgers" / "task-1.json").read_text(encoding="utf-8")
+    )
+    recovered = list(
+        (ledger_root / "token-ledgers" / "recovered-usage-receipts").glob("*.json")
+    )
+    assert ledger["complete"] is True
+    assert ledger["total_input_tokens"] == 15_920
+    assert ledger["total_cached_input_tokens"] == 13_056
+    assert ledger["total_output_tokens"] == 317
+    assert ledger["total_reasoning_output_tokens"] == 35
+    assert ledger["total_combined_tokens"] == 16_237
+    assert len(recovered) == 1
+
+
+def test_ledger_refresh_excludes_proven_prelaunch_failure(tmp_path: Path) -> None:
+    binding = CodexUsageBindingV1(
+        campaign_id="campaign-1",
+        task_id="task-1",
+        action_id="supervisor-run",
+        role="supervisor",
+        repair_or_retry=True,
+    )
+    ledger_root = tmp_path / "ledger-root"
+    prepared = replace(
+        prepared_request(tmp_path / "request", "supervisor"),
+        usage_binding=binding,
+        usage_ledger_root=ledger_root,
+        usage_ledger_path=ledger_root / "token-ledgers" / "task-1.json",
+    )
+    configure(prepared, final="unreachable")
+    schema = tmp_path / "output-schema.json"
+    schema.write_text(
+        json.dumps(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["value"],
+                "properties": {"value": {"type": "string"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    from tests.test_process_enforcement import FakeContainmentBackend
+
+    backend = FakeContainmentBackend()
+    backend.fail_preflight = True
+    result = run_prepared_codex(
+        prepared,
+        runs_dir=ledger_root / "supervisor" / "codex",
+        codex_executable=str(FAKE_CODEX),
+        environ=fake_environment(),
+        output_schema=schema,
+        process_enforcement_policy=ProcessEnforcementPolicyV1(),
+        containment_backend=backend,
+    )
+    assert result.status == "launch_failed"
+
+    _refresh_usage_ledger(prepared, tmp_path / "unused", binding)
+
+    ledger = json.loads(
+        (ledger_root / "token-ledgers" / "task-1.json").read_text(encoding="utf-8")
+    )
+    assert ledger["complete"] is True
+    assert ledger["receipt_ids"] == []
+    assert ledger["total_session_count"] == 0
+    assert ledger["total_combined_tokens"] == 0
 
 
 @pytest.mark.parametrize(

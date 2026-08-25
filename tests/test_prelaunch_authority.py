@@ -171,6 +171,10 @@ def test_workspace_delegation_retains_core_uid_and_uses_only_shared_gid(
         assert not status.st_mode & stat.S_IWOTH
 
     assert stat.S_IMODE(workspace.stat().st_mode) == 0o3770
+    campaign = workspace.parent
+    assert stat.S_IMODE(campaign.stat().st_mode) == 0o3770
+    assert campaign.stat().st_uid == core_uid
+    assert campaign.stat().st_gid == shared_gid
     assert stat.S_IMODE((workspace / "README.md").stat().st_mode) == 0o660
     assert stat.S_IMODE((workspace / ".research-supervisor").stat().st_mode) == 0o2770
     assert stat.S_IMODE(

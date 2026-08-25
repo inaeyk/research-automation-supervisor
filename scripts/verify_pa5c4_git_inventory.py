@@ -23,7 +23,9 @@ PRE_SNAPSHOT_MODULES = frozenset(
         "custodian_server.py",
         "gitless_repository.py",
         "prelaunch_authority.py",
+        "protected_release.py",
         "qualified_campaign.py",
+        "release_preparation.py",
     }
 )
 POST_SNAPSHOT_MODULES = frozenset(
@@ -83,7 +85,7 @@ PROCESS_ATTRIBUTES = frozenset(
     }
 )
 EXPECTED_INVENTORY_SHA256 = (
-    "dc2ded7e1c14774af428538bd9a9e3d7157b578166f2505cf91c9f3a325f445e"
+    "025dfcb0abeadb306b69bf060a170bcb749cd9b1008742b5b296b2b2a416dddb"
 )
 CATEGORY_OVERRIDES = {
     ("custodian.py", "_launch"): "POST-SNAPSHOT",

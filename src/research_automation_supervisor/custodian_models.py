@@ -37,6 +37,32 @@ MAX_PRIMARY_INPUT_BYTES = 2 * 1024 * 1024
 MAX_SUPPORTING_FILE_BYTES = 16 * 1024 * 1024
 MAX_SUPPORTING_FILES = 20
 
+BARE_PYTHON_TEST_PROGRAM = """\
+import inspect
+import runpy
+from pathlib import Path
+
+paths = sorted(Path("tests").rglob("test_*.py"))
+if not paths:
+    raise SystemExit("no bare Python test modules were found")
+executed = 0
+for path in paths:
+    namespace = runpy.run_path(str(path))
+    for name, candidate in sorted(namespace.items()):
+        if not name.startswith("test_") or not inspect.isfunction(candidate):
+            continue
+        if inspect.signature(candidate).parameters:
+            detail = f"unsupported test parameters require a declared runner: {path}:{name}"
+            raise SystemExit(detail)
+        result = candidate()
+        if inspect.isawaitable(result):
+            raise SystemExit(f"async test requires a declared runner: {path}:{name}")
+        executed += 1
+if not executed:
+    raise SystemExit("no supported bare Python tests were executed")
+print(f"{executed} bare Python test(s) passed")
+"""
+
 QUALIFIED_ACCEPTANCE_RUNNER_V1 = b"""\
 import os
 import subprocess
@@ -50,6 +76,8 @@ if profile == "python_pytest":
     inner = [str(qualified_python), "-m", "pytest", "-q"]
 elif profile == "python_unittest":
     inner = [str(qualified_python), "-m", "unittest", "discover", "-s", "tests"]
+elif profile == "python_bare":
+    inner = [str(qualified_python), "-c", __RAS_BARE_PYTHON_TEST_PROGRAM__]
 elif profile == "repository_integrity":
     inner = [str(qualified_python), "-c",
              "from research_automation_supervisor.safe_git import "
@@ -64,7 +92,10 @@ snapshot_root = campaign.parents[1]
 verification_key = snapshot_root / "workspace-verification-key-v1"
 if not verification_key.is_file():
     raise SystemExit(77)
-command = [str(bwrap), "--die-with-parent", "--new-session", "--unshare-all",
+command = [str(bwrap), "--die-with-parent", "--new-session", "--unshare-all"]
+if os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1":
+    command += ["--share-net"]
+command += [
            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
            "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin"]
 for system_path in ("/lib", "/lib64", "/etc"):
@@ -82,7 +113,8 @@ command += ["--ro-bind", str(snapshot_root), str(snapshot_root),
             "--bind", str(repository), str(repository),
             "--chdir", str(repository),
             "--setenv", "HOME", "/tmp/operator", "--setenv", "PATH", "/usr/bin:/bin",
-            "--setenv", "PYTHONNOUSERSITE", "1", "--"] + inner
+            "--setenv", "PYTHONNOUSERSITE", "1",
+            "--setenv", "PYTHONDONTWRITEBYTECODE", "1", "--"] + inner
 result = subprocess.run(command, cwd=repository, check=False,
                         env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
 raise SystemExit(result.returncode)
@@ -98,6 +130,9 @@ def render_qualified_acceptance_runner(python_executable: str) -> bytes:
         raise ValueError("qualified Python executable path is unsafe")
     return QUALIFIED_ACCEPTANCE_RUNNER_V1.replace(
         b"__RAS_QUALIFIED_PYTHON__", python_executable.encode("ascii")
+    ).replace(
+        b"__RAS_BARE_PYTHON_TEST_PROGRAM__",
+        repr(BARE_PYTHON_TEST_PROGRAM).encode("ascii"),
     )
 
 

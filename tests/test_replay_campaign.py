@@ -18,6 +18,7 @@ import research_automation_supervisor.workflow_engine as workflow_engine
 from research_automation_supervisor.codex_models import CodexRunResult
 from research_automation_supervisor.errors import (
     ReplayCampaignInputError,
+    ReplayCampaignStateError,
     WorkflowPromptSourceError,
     WorkflowStateError,
 )
@@ -518,6 +519,36 @@ def test_two_task_autonomous_pass_uses_persistent_supervisor_and_workers(
     assert result.candidate_manifest_sha256 is not None
     assert (run / "final-candidate/candidate-manifest.json").is_file()
     assert replay_campaign_status(run) == result
+
+
+def test_supervisor_request_keeps_acceptance_argv_out_of_worker_prompt(
+    tmp_path: Path,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response("worker", WORKER_ONE_UUID, worker_result()),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FakeSupervisor(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ]
+    )
+
+    result = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=campaign_services(fake, supervisor, []),
+    )
+
+    assert result.status == "completed"
+    initial_request = supervisor.prompts[0]
+    assert b"Put acceptance-test IDs only in required_checks" in initial_request
+    assert b"do not copy acceptance argv or absolute executable paths" in initial_request
 
 
 def test_auditor_finding_gets_one_supervisor_repair_and_fresh_auditor(
@@ -1201,6 +1232,7 @@ def test_authority_wrapper_keeps_full_stage2_prompt_and_advisory_is_non_authorit
     assert b'"allowed_paths":["src/**"]' in prompt
     assert b'"id":"fixed-test"' in prompt
     assert b"ENGINE-OWNED REPLAY AUTHORITY" in prompt
+    assert b"Do not execute fixed acceptance commands inside the Worker sandbox" in prompt
     assert contradictory.encode() in prompt
 
 
@@ -2159,6 +2191,261 @@ def test_crash_after_stage2_continuation_acceptance_does_not_duplicate_actions(
     assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
     assert len(list((stage2 / "tests").glob("round-*/suite.json"))) == 1
     assert len(list((run / "supervisor/actions").glob("*.json"))) == 4
+
+
+def test_accepted_continuation_is_rehydrated_exactly_after_prompt_source_restart(
+    tmp_path: Path,
+) -> None:
+    observation = tmp_path / "rehydrated-worker.json"
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result("needs_human"),
+            ),
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result(),
+                expected_resume_thread_id=WORKER_RESUME_UUID,
+                write_files={"src/ready.txt": "ready\n"},
+                observation_path=str(observation),
+            ),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+        test_requires_marker=True,
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ],
+        failure_index=1,
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    exact_note = "Exact accepted bytes: snowman ☃\n\nKeep the frozen authority."
+
+    assert paused.paused_boundary == "worker_continuation"
+    prompt_paused = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path, exact_note),
+        services=services,
+    )
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    paused_state = json.loads((stage2 / "state.json").read_text(encoding="utf-8"))
+    accepted_path = Path(paused_state["continuation_path"])
+
+    assert prompt_paused.paused_boundary == "supervisor_repair_prompt"
+    assert accepted_path.read_bytes() == exact_note.encode()
+    completed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(
+            tmp_path,
+            "Resume the existing accepted continuation without replacing it.",
+        ),
+        services=services,
+    )
+    prompt = base64.b64decode(
+        json.loads(observation.read_text(encoding="utf-8"))["prompt_base64"]
+    )
+    journal = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+
+    assert completed.status == "completed"
+    assert prompt.startswith(exact_note.encode())
+    assert prompt.count(exact_note.encode()) == 1
+    assert sum(
+        entry["reason"] == "human_continuation_requested" for entry in journal
+    ) == 1
+    assert sum(
+        entry["reason"] == "prompt_source_human_resume" for entry in journal
+    ) == 1
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 2
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 4
+
+
+def test_sealed_continuation_rehydration_failure_recovers_without_duplicate_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation = tmp_path / "recovered-sealed-failure-worker.json"
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result("needs_human"),
+            ),
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result(),
+                expected_resume_thread_id=WORKER_RESUME_UUID,
+                observation_path=str(observation),
+            ),
+            codex_response("auditor", AUDITOR_ONE_UUID, auditor_result()),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("auditor_prompt"),
+            supervisor_action("finish"),
+        ],
+        failure_index=1,
+    )
+    services = campaign_services(fake, supervisor, [])
+    first_pause = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    exact_note = "Durable continuation bytes survive the sealed local failure."
+
+    assert first_pause.paused_boundary == "worker_continuation"
+    prompt_pause = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path, exact_note),
+        services=services,
+    )
+    assert prompt_pause.paused_boundary == "supervisor_repair_prompt"
+
+    rehydrate = workflow_engine._rehydrate_accepted_continuation
+    monkeypatch.setattr(
+        workflow_engine,
+        "_rehydrate_accepted_continuation",
+        lambda _context, _entries: None,
+    )
+    sealed_failure = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path, "Resume the exact boundary."),
+        services=services,
+    )
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    failed_state = json.loads((stage2 / "state.json").read_text(encoding="utf-8"))
+
+    assert sealed_failure.pause_reason == "unsafe_workflow_state"
+    assert failed_state["status"] == "failed"
+    assert failed_state["pause_reason"] == "workflow_state_invariant_failed"
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
+    assert not list((stage2 / "actions").glob("auditor-*.json"))
+
+    monkeypatch.setattr(
+        workflow_engine,
+        "_rehydrate_accepted_continuation",
+        rehydrate,
+    )
+    completed = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(
+            tmp_path,
+            "Recover only the accepted durable continuation.",
+        ),
+        services=services,
+    )
+    prompt = base64.b64decode(
+        json.loads(observation.read_text(encoding="utf-8"))["prompt_base64"]
+    )
+    journal = [
+        json.loads(line)
+        for line in (stage2 / "journal.jsonl").read_bytes().splitlines()
+    ]
+
+    assert completed.status == "completed"
+    assert prompt.startswith(exact_note.encode())
+    assert sum(
+        entry["reason"] == "continuation_rehydration_recovery" for entry in journal
+    ) == 1
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 2
+    assert len(list((stage2 / "actions").glob("auditor-*.json"))) == 1
+    assert len(list((run / "supervisor/actions").glob("*.json"))) == 4
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    (
+        ("missing", "campaign journal evidence is missing"),
+        ("tampered", "campaign journal evidence was replaced"),
+    ),
+)
+def test_missing_or_tampered_accepted_continuation_fails_closed_after_restart(
+    tmp_path: Path,
+    damage: str,
+    message: str,
+) -> None:
+    manifest, fake = create_campaign(
+        tmp_path,
+        [[
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result("needs_human"),
+            ),
+            codex_response(
+                "worker",
+                WORKER_RESUME_UUID,
+                worker_result(),
+                expected_resume_thread_id=WORKER_RESUME_UUID,
+            ),
+        ]],
+    )
+    supervisor = FailOneSupervisorTurn(
+        [
+            supervisor_action("worker_prompt"),
+            supervisor_action("repair_prompt"),
+            supervisor_action("repair_prompt"),
+        ],
+        failure_index=1,
+    )
+    services = campaign_services(fake, supervisor, [])
+    paused = run_replay_campaign(
+        manifest,
+        runs_dir=tmp_path / "runs",
+        services=services,
+    )
+    run = next((tmp_path / "runs").iterdir())
+    assert paused.paused_boundary == "worker_continuation"
+    prompt_paused = resume_replay_campaign(
+        run,
+        decision_path=write_resume_decision(tmp_path, "Accepted once, exactly."),
+        services=services,
+    )
+    stage2 = next((run / "tasks/replay-task-1/stage2").iterdir())
+    paused_state = json.loads((stage2 / "state.json").read_text(encoding="utf-8"))
+    accepted_path = Path(paused_state["continuation_path"])
+    if damage == "missing":
+        accepted_path.unlink()
+    else:
+        accepted_path.write_bytes(b"replacement bytes")
+
+    assert prompt_paused.paused_boundary == "supervisor_repair_prompt"
+    with pytest.raises(ReplayCampaignStateError, match=message):
+        resume_replay_campaign(
+            run,
+            decision_path=write_resume_decision(tmp_path, "Resume existing bytes."),
+            services=services,
+        )
+    assert len(supervisor.resume_ids) == 2
+    assert len(list((stage2 / "actions").glob("worker-*.json"))) == 1
+    assert not list((stage2 / "actions").glob("auditor-*.json"))
 
 
 def test_five_tasks_are_model_terminal_before_candidate_export(

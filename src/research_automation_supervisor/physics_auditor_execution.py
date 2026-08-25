@@ -1925,7 +1925,10 @@ def resolve_qualified_physics_auditor_codex(
 ) -> QualifiedPhysicsAuditorCodex:
     """Resolve qualified PA-3 only through the common protected managed identity."""
     try:
-        identity = verify_managed_codex_installation(installation_contract)
+        identity = verify_managed_codex_installation(
+            installation_contract,
+            require_code_mode_host=True,
+        )
         codex_home = verified_managed_codex_home(home_contract)
     except (ManagedCodexSecurityError, CustodianEnvironmentError) as exc:
         raise PhysicsAuditorDependencyError(

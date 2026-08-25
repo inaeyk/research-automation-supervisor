@@ -688,6 +688,22 @@ class CampaignCustodian:
     def continue_campaign(self, campaign_public_id: str) -> CustodianCampaignRecordV1:
         record = self.get_record(campaign_public_id, refresh=False)
         intent = self._validated_intent(record)
+        try:
+            recovered = self.core.resume_start_snapshot(record.launch_intent_id)
+        except Exception as exc:
+            raise CustodianStateError(
+                "Core could not re-establish the committed Start workspace."
+            ) from exc
+        if (
+            recovered.campaign_public_id != intent.campaign_public_id
+            or recovered.launch_intent_id != intent.launch_intent_id
+            or recovered.launch_intent_sha256 != intent.launch_intent_sha256
+            or recovered.input_bundle_sha256 != intent.input_bundle_sha256
+        ):
+            raise CustodianStateError(
+                "Recovered Core Start authority does not match the campaign card."
+            )
+        intent = recovered
         environment = self.environment(snapshot_complete=True)
         if not environment.ready:
             updated = record.model_copy(

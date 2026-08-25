@@ -747,6 +747,18 @@ def test_required_systemd_run_shape_contains_no_environment_values(tmp_path: Pat
     assert not any("must-not-be-in-argv" in item for item in command)
 
 
+def test_systemd_control_plane_derives_only_local_user_bus_environment() -> None:
+    source = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    backend = SystemdUserCgroupV2Backend(source)
+
+    assert backend.environment == source
+    assert backend.control_environment == {
+        **source,
+        "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}",
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{os.getuid()}/bus",
+    }
+
+
 @pytest.mark.parametrize(
     ("request_timeout", "wall_clock_limit", "expected"),
     [(30, 60.0, 30.0), (30, 12.5, 12.5)],

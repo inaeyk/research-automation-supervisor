@@ -154,7 +154,7 @@ def _establish_shared_workspace_umask() -> None:
 
 def _seal_production_git_environment() -> None:
     """Ignore host config; snapshot-local config is trusted-generated authority."""
-    verify_managed_codex_installation()
+    verify_managed_codex_installation(require_code_mode_host=True)
     codex_home = verified_managed_codex_home()
     os.environ.clear()
     os.environ.update(

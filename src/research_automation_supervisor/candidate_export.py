@@ -646,9 +646,18 @@ def _working_tree_manifest(root: Path) -> list[dict[str, object]]:
 
 
 def _git_value(workspace: Path, arguments: Sequence[str]) -> str:
+    qualified_workspace = Path(os.path.abspath(workspace))
     try:
         completed = subprocess.run(
-            ("git", "--no-pager", "-C", str(workspace), *arguments),
+            (
+                "git",
+                "--no-pager",
+                "-c",
+                f"safe.directory={qualified_workspace}",
+                "-C",
+                str(qualified_workspace),
+                *arguments,
+            ),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,

@@ -80,6 +80,7 @@ include = [
   "/scripts/install-research-supervisor.sh",
   "/scripts/protected-managed-codex-entry.py",
   "/scripts/prepare-managed-codex-home.py",
+  "/scripts/prepare-protected-release.py",
   "/scripts/research-supervisor-core-authority.service",
   "/scripts/run-protected-python.sh",
   "/scripts/windows-cdp-relay.ps1",

@@ -317,6 +317,12 @@ class SystemdUserCgroupV2Backend:
         cgroup_root: Path = Path("/sys/fs/cgroup"),
     ) -> None:
         self.environment = dict(environment)
+        runtime_directory = f"/run/user/{os.getuid()}"
+        self.control_environment = {
+            **self.environment,
+            "XDG_RUNTIME_DIR": runtime_directory,
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_directory}/bus",
+        }
         self.control_plane_timeout_seconds = control_plane_timeout_seconds
         path = self.environment.get("PATH")
         self.systemctl_executable = systemctl_executable or shutil.which(
@@ -548,7 +554,7 @@ class SystemdUserCgroupV2Backend:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=self.environment,
+                env=self.control_environment,
                 timeout=max(0.001, timeout),
             )
         except (OSError, subprocess.SubprocessError):
